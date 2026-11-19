@@ -828,6 +828,7 @@ if (err) {
   | `IO` | 5 | `EIO` | Input/output error |
   | `BAD_HANDLE` | 9 | `EBADF` | Bad file descriptor: also a closed `File` (§6.4) |
   | `AGAIN` | 11 | `EAGAIN` | Resource temporarily unavailable |
+  | `NO_MEMORY` | 12 | `ENOMEM` | Cannot allocate memory: also GPU memory running out (`STDLIB.md` §10.6) |
   | `PERMISSION` | 13 | `EACCES` | Permission denied |
   | `BUSY` | 16 | `EBUSY` | Device or resource busy |
   | `EXISTS` | 17 | `EEXIST` | File exists |
@@ -853,6 +854,8 @@ if (err) {
   | `MISSING` | 195 | No such key or element |
   | `POSITION` | 196 | A position out of range, such as a cursor moved past the end |
   | `TYPE` | 197 | Wrong kind of value: `asI64()` on a string in a parsed tree (`STDLIB.md` §9.2) |
+  | `GPU` | 198 | A graphics API call failed (`STDLIB.md` §10.6) |
+  | `OUT_OF_DATE` | 199 | A window's surface changed, so the swapchain must be rebuilt (`STDLIB.md` §10.6) |
 
 - **The numbers are Linux's generic table**, which x86-64, AArch64 and RISC-V share. A port to a system with other numbers would translate its errors into these.
 - **Exit statuses**: a status passed up from `u8 main` becomes the exit status. Common codes don't collide with the shell's special values (126, 127, and 129–192 for death by signals 1–64). Zinkite's own codes start at 192, which overlaps only signal 64, one that programs rarely receive. Scripts that check particular exit codes should still return fixed numbers of their own.
@@ -934,6 +937,7 @@ src/
 - **No `package` line** puts the file in the unnamed package. That is meant for single-file scripts; as in Java, named packages can't import from it.
 - **The source root is inferred from the entry file**: `zink run src/com/example/app/Main.zn` containing `package com.example.app;` gives the root `src/`. A `package` line that doesn't match the path is an error. Extra roots for libraries come from a `--source-path` flag (Proposed).
 - **Visibility**: `public`, `private`, and package-private when nothing is written (§6.1).
+- **`vendor.*` is reserved** for bindings to third-party C libraries that ship alongside the standard library, such as GLFW, SDL3, OpenGL and Vulkan (`STDLIB.md` §10.6).
 - **`zink.*` is reserved** for the standard library. `zink.lang` is imported into every file automatically (`print`, `println`, `errprint`, `errprintln`, the standard streams and the other built-ins). `STDLIB.md` lists every package and its contents.
 - **Circular dependencies between packages are allowed.** The compiler sees the whole program at once, which monomorphization needs anyway (§10).
 
@@ -1493,6 +1497,13 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 - Embedding model: precompiled bytecode, AOT `.so` plugins, or none; the host C ABI shape.
 - Smaller syntax items not in the grammar yet (map literals, `?.`, `assert`, `#elif` and others): `GRAMMAR.md` §8.
 - **Standard library**: the open questions in `STDLIB.md` §11.
+
+**Graphics** (needed by the `vendor.*` packages, `STDLIB.md` §10.6)
+- **Calling C**: declaring C functions and linking against C libraries. The runtime needs this too (§12.2).
+- **C layout for classes**: a way to fix a class's field order, alignment and padding to C's, and to GLSL's `std140` and `std430` rules for uniform and storage buffers, so a slice of it can be uploaded as it is.
+- **Vector and matrix types with arithmetic**, since there is no operator overloading: built-in types such as `f32x4`, or GLSL-like `vec3` and `mat4`, as Odin and Zig have. Otherwise `pos.add(vel.mul(dt))` is the only spelling.
+- **Embedding a file at compile time**, such as a SPIR-V shader, into the binary.
+- **Where `vendor.*` packages come from**: shipped with the compiler, or fetched and built on first use, as Goose's blessed packages are. This ties in with the library search path (§8.5).
 
 ---
 

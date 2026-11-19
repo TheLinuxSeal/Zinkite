@@ -27,6 +27,7 @@
 | `zink.yaml` | `YamlParser`, `yaml` | later | 9.6 |
 | `zink.glob`, `zink.regex` | `glob`, `Regex` | later | 9.9 |
 | `zink.net`, `zink.compress`, `zink.thread`, `zink.bigint`, `zink.test` | networking, gzip, workers, big integers, tests | later | 10 |
+| `vendor.glfw`, `vendor.sdl3`, `vendor.gl`, `vendor.vulkan` | windows, input and the GPU, through GLFW, SDL3, OpenGL and Vulkan; separate packages, not the standard library | later | 10.6 |
 
 - **v1** is what the first release ships: enough for the four example programs and for typical CLI tools.
 - **Later** comes after v1. It is designed here so that v1 doesn't paint it into a corner.
@@ -79,6 +80,9 @@ These are added to DESIGN §7.7.
 | `NOT_EMPTY` | 39 | `ENOTEMPTY` | Directory not empty | `fs.remove` on a directory that has entries |
 | `UNSUPPORTED` | 95 | `EOPNOTSUPP` | Operation not supported | input that uses a feature a parser leaves out, such as YAML keys that are collections |
 | `TYPE` | 197 | Zinkite | Wrong kind of value: `asI64()` on a string | tree accessors (§9.2), `finish()` on writers (§9.7) |
+| `NO_MEMORY` | 12 | `ENOMEM` | Cannot allocate memory | the graphics bindings, when host or GPU memory runs out (§10.6) |
+| `GPU` | 198 | Zinkite | A graphics API call failed; the binding gives the exact code | `vendor.gl`, `vendor.vulkan` (§10.6) |
+| `OUT_OF_DATE` | 199 | Zinkite | The window's surface changed, so the swapchain must be rebuilt | `vendor.vulkan` (§10.6) |
 
 - **Malformed input fails with `INVALID`**: bad JSON, an unterminated CSV quote, a bad glob pattern. `i64.parse("abc")` already does the same. The parser's `ParseError` says where.
 - **Exceeding a nesting limit fails with `FULL`**, the same code as a push on a full capped array.
@@ -1420,6 +1424,111 @@ class SplitTest {
 - **`assert(cond)`, `assertEq(a, b)` and `assertNe(a, b)`**. On failure, `assertEq` prints both values.
 - **Each test runs in its own child process.** A failed assertion stops the program like a bug (DESIGN §7.6), so this way it ends only that one test, and every test starts with fresh data stacks.
 - **Whether `assert` is a statement** (`GRAMMAR.md` §8) or these functions is open.
+
+### 10.6 Graphics: `vendor.glfw`, `vendor.sdl3`, `vendor.gl`, `vendor.vulkan`
+Bindings to C libraries for windows, input and the GPU. They aren't part of the standard library. Each wraps a third-party library with its own releases, so they ship as separate packages under `vendor.*` (DESIGN §8.4). They are designed here because the language features they need (DESIGN §17) should be designed with them.
+
+| Package | Wraps | Gives |
+|---|---|---|
+| `vendor.glfw` | GLFW 3.4 | windows, OpenGL contexts, Vulkan surfaces, keyboard, mouse, gamepads, time |
+| `vendor.sdl3` | SDL 3.2 or later | windows, Vulkan surfaces, input, gamepads, audio, timers |
+| `vendor.gl` | OpenGL 3.3 core to 4.6 | the OpenGL API |
+| `vendor.vulkan` | Vulkan 1.3 and later | the Vulkan API and its extensions |
+
+Three pairings are supported:
+
+| Windows and input | Graphics | When to choose it |
+|---|---|---|
+| GLFW | OpenGL | the shortest way to a triangle: shaders are GLSL text that the driver compiles |
+| GLFW | Vulkan | full control of the GPU, with only a window and input around it |
+| SDL3 | Vulkan | the same, plus SDL's audio, gamepads and the rest |
+
+**GLFW and OpenGL**:
+```
+import vendor.glfw.*;
+import vendor.gl.*;
+
+class Vertex { f32 x; f32 y; f32 r; f32 g; f32 b; }      // needs C layout (DESIGN §17)
+
+u8 main() {
+    u8 err = @glfw.init();
+    if (err) { errprintln("no display: ${status.message(err)}"); return err; }
+    defer glfw.terminate();
+
+    glfw.windowHint(glfw.CONTEXT_VERSION_MAJOR, 3);
+    glfw.windowHint(glfw.CONTEXT_VERSION_MINOR, 3);
+    glfw.windowHint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE);
+    GlfwWindow w @noWindow = glfw.createWindow(800, 600, "triangle");
+    if (noWindow) { return noWindow; }
+    defer w.destroy();
+    w.makeContextCurrent();
+    glfw.loadGl();                                         // OpenGL's functions, through glfwGetProcAddress
+
+    Vertex[.3] tri = [new(0.0, 0.5, 1.0, 0.0, 0.0), new(-0.5, -0.5, 0.0, 1.0, 0.0), new(0.5, -0.5, 0.0, 0.0, 1.0)];
+    GlBuffer vbo = gl.genBuffer();
+    defer vbo.delete();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, tri, gl.STATIC_DRAW);  // the array's bytes, as they are
+    ...                                                    // vertex layout, shaders, program
+
+    while (!w.shouldClose()) {
+        while (GlfwEvent e : w.nextEvent()) {
+            if (e.kind == GlfwEventKind.KEY && e.key == glfw.KEY_ESCAPE) { w.setShouldClose(true); }
+        }
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        w.swapBuffers();
+    }
+    return 0;
+}
+```
+
+**SDL3 and Vulkan**, the first steps and the frame loop:
+```
+import vendor.sdl3.*;
+import vendor.vulkan.*;
+
+u8 err = @sdl.init(sdl.INIT_VIDEO);
+SdlWindow w @noWindow = sdl.createWindow("game", 1280, 720, sdl.WINDOW_VULKAN);
+sdl.loadVulkan();                                          // vkGetInstanceProcAddr, through SDL
+
+VkInstanceCreateInfo info = new();                         // every field starts at its zero or default
+info.enabledExtensionNames = sdl.vulkanInstanceExtensions();   // a string[:], not a pointer and a count
+VkInstance inst @noVulkan = vk.createInstance(info);
+vk.loadInstance(inst);
+VkSurfaceKHR surface @noSurface = w.createVulkanSurface(inst);
+...                                                        // device, swapchain, pipeline
+
+while (running) {
+    while (SdlEvent e : sdl.pollEvent()) {
+        if (e.kind == SdlEventKind.QUIT) { running = false; }
+    }
+    u32 image @acquire = vk.acquireNextImageKHR(device, swapchain, u64.MAX, imageReady);
+    if (acquire == status.OUT_OF_DATE) { recreateSwapchain(); continue; }
+    ...                                                    // record, submit, present
+}
+```
+
+- **Names follow the C API, with the prefix moved to a namespace class**: `glClearColor` is `gl.clearColor`, `GL_TRIANGLES` is `gl.TRIANGLES`, `glfwCreateWindow` is `glfw.createWindow` and `vkCreateInstance` is `vk.createInstance`. Vulkan's structs and handles keep their names (`VkInstanceCreateInfo`, `VkDevice`). So tutorials and the official references translate line by line. Types of the other packages carry their library's name, as `JsonParser` does (§1.2): `GlfwWindow`, `SdlEvent`, `GlBuffer`.
+- **The `gl` and `vulkan` bindings are generated** from Khronos's XML registries (`gl.xml`, `vk.xml`), as the C loaders glad and volk are. `glfw` and `sdl3` are generated from their headers. Each package also has a small C layer for what the generator can't do: event queues and building C structs.
+- **No raw pointer reaches Zinkite code**, so the reference rules (`REFERENCES.md`) hold across the boundary:
+  - a pointer and a count become a slice, such as `enabledExtensionNames`;
+  - text C needs as a NUL-terminated string is copied, with the NUL, onto a scratch data stack for the call;
+  - output arrays, such as the result of `vkEnumeratePhysicalDevices`, are appended to an array the caller passes (§1.3, rule 1);
+  - Vulkan's `pNext` chains become optional fields of the create-info classes, and the C layer builds the real structs;
+  - mapped GPU memory is written by copying (`mapped.write(offset, data)`), not through a view, since its life ends at `vkUnmapMemory`, outside the reference rules.
+- **Functions are loaded at run time**, once a context or instance exists: `glfw.loadGl()`, `glfw.loadVulkan()` or `sdl.loadVulkan()`, and then `vk.loadInstance(inst)` and `vk.loadDevice(dev)`. Calling a function the driver doesn't provide is a bug: it stops the program and names the function.
+- **Events are drained with a repeat loop** (DESIGN §9.4). SDL3 already works that way, with `SDL_PollEvent`. GLFW reports input through C callbacks instead, so its C layer queues the events. `w.nextEvent()` calls `glfwPollEvents` when the queue is empty, and fails with `END` when nothing more has happened.
+- **Handles are values.** `GlBuffer`, `GlTexture`, `VkDevice` and the rest are deleted explicitly, usually with `defer` (DESIGN §6.4).
+- **Uploads take slices**: `gl.bufferData(target, data, usage)` and the Vulkan copy functions send a slice's bytes as they are. Classes stored inline without headers already have the layout a GPU buffer expects, once their field order and padding are fixed to C's (DESIGN §17).
+- **Statuses**:
+  - each Vulkan call that returns a `VkResult` sets a status: 0 for success, `OUT_OF_DATE` for `VK_ERROR_OUT_OF_DATE_KHR` (recreate the swapchain), `NO_MEMORY` when host or device memory runs out, and `GPU` for anything else. `vk.lastResult()` gives the exact `VkResult`, `VK_SUBOPTIMAL_KHR` included;
+  - OpenGL reports errors on request, not per call: `@gl.checkError()` fails with `GPU` and `gl.lastError()` gives the `GLenum`. With OpenGL 4.3 or `KHR_debug`, `gl.debugToStderr()` prints the driver's messages as they happen;
+  - Vulkan's validation layers are enabled by naming them in `VkInstanceCreateInfo`, as in C, and their messages go to stderr.
+- **Shaders**: OpenGL compiles GLSL text at run time, and `gl.getShaderInfoLog` gives the compiler's messages. Vulkan takes SPIR-V, compiled ahead of time from GLSL or HLSL with `glslc` or `glslangValidator` and read with `File.readAll`. Embedding the `.spv` file into the binary at compile time is open (DESIGN §17).
+- **One thread**: OpenGL contexts, GLFW windows and SDL windows belong to the main thread, which is where a single-threaded Zinkite program runs anyway.
+- **Per-frame memory is free.** What a frame allocates lives on data stacks and is released when the frame's block ends. There is no garbage collector to pause a frame, and no frame arena to write by hand.
+- **Platforms**: Linux first, on X11 and Wayland through GLFW 3.4 and SDL3, then Windows. On macOS, OpenGL stops at 4.1, and Vulkan runs through MoltenVK.
 
 ---
 
