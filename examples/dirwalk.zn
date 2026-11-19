@@ -1,0 +1,65 @@
+#!/usr/bin/env zink
+// dirwalk: total size of the files under each directory, like `du -b`.
+// usage: dirwalk [dir]
+//
+// Written with an explicit stack of pending directories. The natural recursive
+// version, which reads each directory into a local array and then recurses, is
+// rejected: a recursive call can't happen while a growable local is in scope
+// (REFERENCES.md §8.4).
+
+class Pending {
+    string path;        // a view into `paths`, which only grows
+    i64 parent;         // index of the parent in `dirs`, or -1 for the root
+}
+
+class DirTotal {
+    string path;
+    i64 parent;
+    i64 bytes = 0;      // has an initializer, so new DirTotal(path, parent) leaves it out
+}
+
+void main(string[.] args) {
+    string root = args.len > 0 ? args[0] : ".";
+
+    u8[..>] paths = [];             // every path built, end to end; grows only, so views stay valid
+    DirTotal[..>] dirs = [];        // every directory found, parents before their children
+    Pending[..~] todo = [];         // directories still to read, used as a stack
+
+    todo +> new Pending(root, -1);
+    while (Pending p : todo ->) {               // pops a copy before every pass, until the stack is empty
+        i64 me = dirs.len;
+        dirs +> new DirTotal(p.path, p.parent);
+
+        Dir d @cantOpen = Dir.open(p.path);
+        if (cantOpen) {
+            errprintln("dirwalk: can't open ${p.path}: ${status.message(cantOpen)}");
+            continue;
+        }
+        defer d.close();                        // runs at the end of this iteration
+
+        u8[..>] names = [];                     // this directory's names, freed at the end of the pass
+        while (DirEntry e : d.next(names)) {    // e.name is a view into names
+            if (e.name == "." || e.name == "..") { continue; }
+
+            if (e.isDir) {
+                i64 start = paths.len;
+                paths.append(p.path);
+                paths +> '/';
+                paths.append(e.name);
+                todo +> new Pending(paths[start:], me);
+            } else {
+                dirs[me].bytes += e.size;
+            }
+        }
+    }
+
+    // Children come after their parents in dirs, so one backward pass adds them up.
+    for (i64 i = dirs.len - 1; i > 0; i--) {
+        DirTotal& t = dirs[i];
+        dirs[t.parent].bytes += t.bytes;
+    }
+
+    for (DirTotal& t : dirs) {
+        println("${t.bytes.pad(12)}  ${t.path}");
+    }
+}

@@ -1,0 +1,59 @@
+#!/usr/bin/env zink
+// wordfreq: the most common words on stdin.
+// usage: wordfreq [count]
+
+class Count {
+    string word;        // a view into the input text
+    i64 n;
+}
+
+// Bytes of non-ASCII characters count as letters, so UTF-8 words stay whole.
+bool isLetter(u8 b) {
+    return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b >= 0x80;
+}
+
+u8 lower(u8 b) {
+    return b >= 'A' && b <= 'Z' ? b + 32 : b;
+}
+
+u8 main(string[.] args) {
+    i64 top = 10;
+    if (args.len > 0) {
+        i64 parsed @bad = i64.parse(args[0]);
+        if (bad || parsed < 1) {
+            errprintln("usage: wordfreq [count]");
+            return 1;
+        }
+        top = parsed;
+    }
+
+    u8[..>] text = [];
+    if (@stdin.readAll(text)) {
+        errprintln("wordfreq: can't read stdin");
+        return 1;
+    }
+    for (u8& b : text) { b = lower(b); }          // in place, through a reference
+
+    hashmap<string, i64> counts = [];              // keys are views into text
+    i64 start = -1;
+    for (i64 i = 0; i <= text.len; i++) {
+        bool letter = i < text.len && isLetter(text[i]);
+        if (letter && start < 0) { start = i; }
+        if (!letter && start >= 0) {
+            i64& c = counts.getOrAdd(text[start:i], 0);   // a reference into the map
+            c++;
+            start = -1;
+        }
+    }
+
+    Count[..>] list = [];
+    for (var& e : counts) {
+        list +> new Count(e.key, e.value);
+    }
+    list.partialSort(top, (Count a, Count b) => a.n > b.n || (a.n == b.n && a.word < b.word));   // only the top entries
+
+    for (i64 i = 0; i < list.len && i < top; i++) {
+        Count& c = list[i];
+        println("${c.n.pad(7)} ${c.word}");
+    }
+}

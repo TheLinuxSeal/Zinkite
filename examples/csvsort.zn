@@ -1,0 +1,90 @@
+#!/usr/bin/env zink
+// csvsort: sort CSV rows by one column (no quoted fields).
+// usage: csvsort [-n] [-r] [-k column] [file]
+
+class Row {
+    string line;        // the whole line: a view into the input text
+    string key;         // the sort column: a view into the same text
+    f64 num;            // the key as a number, for -n
+}                       // no constructor written: new Row(line, key, num) takes the fields in order
+
+class Options {
+    bool numeric = false;
+    bool reverse = false;
+    i64 column = 0;
+    string path = "";   // empty means stdin
+}
+
+// Fails with status 1 on a bad argument. The result is rooted at args: path is a view into it.
+Options parseArgs(string[.] args) {
+    Options o = new Options();
+    for (i64 i = 0; i < args.len; i++) {
+        switch (args[i]) {
+            case "-n" => o.numeric = true;
+            case "-r" => o.reverse = true;
+            case "-k" => {
+                i++;
+                if (i >= args.len) { return #1 o; }
+                i64 col @bad = i64.parse(args[i]);
+                if (bad || col < 1) { return #1 o; }
+                o.column = col - 1;
+            }
+            default => o.path = args[i];
+        }
+    }
+    return o;
+}
+
+// The column-th comma-separated field of line, or "" if it has fewer.
+// The result is rooted at line (or is static).
+string field(string line, i64 column) {
+    i64 start = 0;
+    i64 n = 0;
+    for (i64 i = 0; i <= line.len; i++) {
+        if (i == line.len || line[i] == ',') {
+            if (n == column) { return line[start:i]; }
+            n++;
+            start = i + 1;
+        }
+    }
+    return "";
+}
+
+u8 main(string[.] args) {
+    Options opt @badArgs = parseArgs(args);
+    if (badArgs) {
+        errprintln("usage: csvsort [-n] [-r] [-k column] [file]");
+        return 1;                                   // exit status 1
+    }
+
+    u8[..>] text = [];                              // the whole input; rows point into it
+    u8 err = opt.path.len == 0
+        ? @stdin.readAll(text)
+        : @File.readAll(opt.path, text);
+    if (err) {                                      // an unsigned value works as a condition
+        errprintln("csvsort: can't read ${opt.path}: ${status.message(err)}");
+        return err;                                 // the reason becomes the exit status
+    }
+
+    Row[..>] rows = [];
+    for (string line : text.lines()) {        // an iterator: no array of lines is built
+        if (line.len == 0) { continue; }
+        string key = field(line, opt.column);
+        f64 num = 0.0;
+        if (opt.numeric) {
+            num @_ = f64.parse(key);         // not a number: 0.0, which sorts first
+        }
+        rows +> new Row(line, key, num);
+    }
+
+    if (opt.numeric) {
+        rows.sort((Row a, Row b) => a.num < b.num);
+    } else {
+        rows.sort((Row a, Row b) => a.key < b.key);
+    }
+    if (opt.reverse) { rows.reverse(); }
+
+    for (Row& r : rows) {
+        println(r.line);
+    }
+}

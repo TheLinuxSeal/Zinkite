@@ -1,0 +1,82 @@
+#!/usr/bin/env zink
+// linebuf: a one-line editor buffer, driven by commands on stdin.
+//   type <text>   insert text at the cursor
+//   left [n], right [n], home, end
+//   back [n]      delete n characters before the cursor (backspace)
+//   del [n]       delete n characters after the cursor
+//   show          print the line, with | at the cursor
+
+class LineBuffer {
+    u32[.~.] text;              // code points; a cursor array, so edits at the cursor are O(1)
+                                // no constructor: new LineBuffer() starts with text empty
+
+    mut void type(string s) {
+        for (u32 c : s.codePoints()) {
+            text +^ c;          // insert at the cursor; the cursor moves past it
+        }
+    }
+
+    // Each returns how many characters it actually deleted.
+    mut i64 back(i64 n) {
+        for (i64 i = 0; i < n; i++) {
+            if (@(text -^)) { return i; }       // nothing left before the cursor
+        }
+        return n;
+    }
+
+    mut i64 del(i64 n) {
+        for (i64 i = 0; i < n; i++) {
+            if (@(text ^-)) { return i; }       // nothing left after the cursor
+        }
+        return n;
+    }
+
+    mut void left(i64 n) { text.move(-n); }     // move clamps at the edges
+    mut void right(i64 n) { text.move(n); }
+    mut void home() { text.seekStart(); }
+    mut void end() { text.seekFromEnd(0); }
+
+    void show() {
+        u8[..>] out = [];
+        for (i64 i = 0; i <= text.len; i++) {
+            if (i == text.cursor) { out +> '|'; }
+            if (i < text.len) { out.append("${text[i].utf8()}"); }
+        }
+        println(out);
+    }
+}
+
+// "left 3" -> ("left", "3"); "type hello world" -> ("type", "hello world"); "home" -> ("home", "")
+// Both results are views into s.
+(string, string) splitFirst(string s) {
+    for (i64 i = 0; i < s.len; i++) {
+        if (s[i] == ' ') { return (s[:i], s[i + 1:]); }
+    }
+    return (s, "");
+}
+
+void main() {
+    LineBuffer buf = new LineBuffer();
+    u8[..~] input = [];                         // reused for every input line
+
+    while (string line : stdin.nextLine(input)) {   // clears input, then reads one line into it
+        (string cmd, string arg) = splitFirst(line);    // one scan, two results
+        i64 n = 1;
+        if (arg.len > 0) {
+            i64 parsed @notNumber = i64.parse(arg);
+            if (!notNumber) { n = parsed; }
+        }
+
+        switch (cmd) {
+            case "type" => buf.type(arg);
+            case "left" => buf.left(n);
+            case "right" => buf.right(n);
+            case "home" => buf.home();
+            case "end" => buf.end();
+            case "back" => buf.back(n);
+            case "del" => buf.del(n);
+            case "show" => buf.show();
+            default => errprintln("unknown command: ${cmd}");
+        }
+    }
+}
