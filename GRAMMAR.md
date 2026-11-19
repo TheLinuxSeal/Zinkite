@@ -1,7 +1,7 @@
 # Zinkite Grammar (v2)
 
-> Companion to `DESIGN.md`. It covers everything marked Decided there, plus the Proposed syntax the design text relies on. Features still Open are listed in §8 and are not in this grammar yet.
-> **Updated:** 2026-11-17. Version 2 is for the Goose-style design: slot-grammar arrays, `T&` references, the status code (`#` and `@`), interfaces without inheritance, `=>` for lambdas and cases, and no exceptions. Version 1, for the reference-counting design, is kept in `GRAMMAR-refcount.md`.
+> Companion to `DESIGN.md`. It covers everything marked Decided there. Features still Open are listed in §8 and are not in this grammar yet.
+> **Updated:** 2026-11-19. Version 2 is for the Goose-style design: slot-grammar arrays, `T&` references, the status code (`#` and `@`), interfaces without inheritance, `=>` for lambdas and cases, and no exceptions. Version 1, for the reference-counting design, is kept in `GRAMMAR-refcount.md`.
 
 **Notation**
 - `rule = ... ;` defines a rule.
@@ -26,6 +26,8 @@
 IDENT   = LETTER { LETTER | DIGIT } ;          (* not a keyword, and not a lone "_" *)
 LETTER  = "A".."Z" | "a".."z" | "_" ;
 DIGIT   = "0".."9" ;
+HEXDIGIT = DIGIT | "a".."f" | "A".."F" ;
+BINDIGIT = "0" | "1" ;
 ```
 
 Reserved keywords:
@@ -57,6 +59,8 @@ EXPONENT  = ( "e" | "E" ) [ "+" | "-" ] DEC ;
 CHAR      = "'" ( CHAR_CHAR | ESCAPE ) "'" ;
 STRING    = '"' { STRING_CHAR | ESCAPE | INTERP } '"' ;
 INTERP    = "${" expression "}" ;
+CHAR_CHAR = any character except "'", "\" and a line break ;
+STRING_CHAR = any character except '"', "\" and a line break, and "$" only when no "{" follows ;
 ESCAPE    = "\" ( "n" | "t" | "r" | "0" | "\" | "'" | '"' | "$" | "u{" HEXDIGIT { HEXDIGIT } "}" ) ;
 ```
 
@@ -90,7 +94,7 @@ ESCAPE    = "\" ( "n" | "t" | "r" | "0" | "\" | "'" | '"' | "$" | "u{" HEXDIGIT 
 - `&` is both bitwise AND and the reference marker in types (`Item&`). `#` and `@` are covered in §1.6 and §6.
 
 ### 1.6 Directive lines and `#`
-A `#` that is the first non-blank character on a line **and is followed directly by a letter** starts a directive. The lexer turns each directive line into one token:
+A `#` that is the first non-blank character on a line **and is followed directly by a letter** starts a directive, unless the token before it is `return`. The lexer turns each directive line into one token:
 
 ```
 SETTING   = "#" IDENT VALUE ;            (* #max_memory_mb 256 *)
@@ -106,7 +110,7 @@ cond_not  = "!" cond_not | "(" condition ")" | IDENT [ "(" IDENT ")" ] ;
 - `VALUE` is the rest of the line: a word, or an integer.
 - Condition names are build flags (`debug`, `--define color` gives `color`) and the target (`os(linux)`, `arch(aarch64)`); see DESIGN §8.3.
 - `#if` blocks are part of the syntax tree (§2, §4, §5). Both branches must parse; only the active one is type-checked.
-- **Every other `#` is the `#` token**, which writes a call's status after `return` (§5). So `return` followed by `#1 x;` on the next line still works.
+- **Every other `#` is the `#` token**, which writes a call's status after `return` (§5). So `return` followed on the next line by `#1 x;` or `#status.NOT_FOUND x;` still works.
 
 ---
 
@@ -114,6 +118,7 @@ cond_not  = "!" cond_not | "(" condition ")" | IDENT [ "(" IDENT ")" ] ;
 
 ```
 file          = [ SHEBANG ] { setting_item } [ package_decl ] { import_decl } { top_item } ;
+                                    (* SHEBANG: "#!" and the rest of the first line *)
 
 setting_item  = SETTING
               | HASH_IF { setting_item } [ HASH_ELSE { setting_item } ] HASH_END ;
@@ -189,11 +194,11 @@ Suffixes apply left to right:
 Checked after parsing:
 - **Slots**, as in DESIGN §4.1–§4.2:
   - there are three slot characters, for start, cursor and end (`[>~>]`), or one that stands for all three (`[~]` is `[~~~]`, `[.]` is `[...]`). Two is an error;
-  - `*` is allowed only on frozen arrays (no slot symbols);
+  - `*` is allowed only on frozen arrays, whose slots are all `.` (`T[.*]`);
   - a `$` prefix needs a cursor slot other than `.` and no numeric cap: `[$.~.]` and `[$~]` are fine, `[$..>]` and `[$..~16]` are errors;
   - a numeric or named cap must be a compile-time constant.
-- **Nullable types**: `?` is allowed only directly after `&` or after a `func(...)` type. `i32?`, `Item?` and `Item?&` are errors.
-- **Links** (`T&<i32>`, `T&<u32 in pool>`) appear only as field types: a local or parameter that refers to an element uses `T&` (REFERENCES §7). `in` is a keyword only inside a link's angle brackets, and the pool must be a static grow-only array.
+- **Nullable types**: `?` is allowed only directly after `&`, after a link (`Node&<i32>?`), or after a `func(...)` type. `i32?`, `Item?` and `Item?&` are errors.
+- **Links** (`T&<i32>`, `T&<u32 in arr>`) appear only as field types: a local or parameter that refers to an element uses `T&` (REFERENCES §7). `in` is a keyword only inside a link's angle brackets, and `arr` must be a static grow-only array.
 - **No reference to a reference**: `Item&&` lexes as `&&` and is an error, and so is `Item& &`.
 - **`T[:]&`** is a writable view (DESIGN §4.10), not a reference to a slice.
 - **Interfaces** appear only directly before `&`, or as a generic bound: `Shape s;` and `Shape[..>]` are errors (DESIGN §6.3).
@@ -243,7 +248,7 @@ constructor_decl = { modifier } "new" "(" [ param { "," param } ] ")" block ;
 Checked after parsing:
 - **`mut`** goes only on instance methods and interface methods (DESIGN §6.1). `static` goes only on fields and methods. `public` and `private` go on declarations, not on locals.
 - **Constructors** are written `new(...)` and have no return type (DESIGN §6.2). Each must assign every field on every path that doesn't fail (DESIGN §6.2), which the type checker verifies. `this.new(...)` appears only in a constructor, as a statement or after `@err =`.
-- **Overloads** (DESIGN §6.5): methods, static functions and constructors with the same name in one class must differ in a parameter's type, not only in `&`, `?`, array slots, the return type or the parameter names.
+- **Overloads** (DESIGN §6.5): methods, static functions and constructors with the same name in one class must differ in a parameter's type, not only in `&`, `?`, array slots, the return type or the parameter names. A slice and an array differ in kind, so `f(string)` beside `f(u8[..>]&)` is allowed.
 - **Interfaces** declare methods only; they have no fields and no bodies (default methods are Open, §8).
 - **Script files**: top-level declarations take no access modifiers.
 - **`extends`, `protected` and `abstract`** are errors that explain there is no inheritance.
@@ -317,7 +322,7 @@ Checked after parsing:
 - **Repeat loops** (DESIGN §9.4): `while (T x : call)` makes the call before every pass and ends when its status is nonzero.
   - The expression after `:` must be one `@` accepts: a call, an array operator, or a parenthesized one (§6). It must be able to fail, and a call to a method that never sets a status is an error that suggests `while (true)`. A `void` call can't be the source: write `while (!@f())`.
   - The header only declares; it can't assign existing variables.
-  - A status capture after the header declares a `u8` in the enclosing block and needs a block body, so in `while (x : f()) @err = g();` the `@err = g();` is the body.
+  - A status capture after the header declares a `u8` in the enclosing block and needs a block body, so in `while (T x : f()) @err = g();` the `@err = g();` is the body.
 - **For-each over an iterator variable** is an error that suggests the repeat loop (DESIGN §9.4). An iterator expression, such as `text.lines()`, is fine.
 - **`defer`** runs its statement when the enclosing block ends, in reverse order of the `defer`s (DESIGN §6.4). The deferred expression must be one that could be an expression statement, and the deferred code can't contain a `return`, a `break` or `continue` that leaves it, a status write, or another `defer`.
 - **`yield`** gives the value of a `switch` expression from a block arm.
@@ -405,12 +410,12 @@ literal        = INT | FLOAT | CHAR | STRING | "true" | "false" | "null" ;
 
 Checked after parsing:
 - **Assignment targets**: the left side of an assignment must be a variable, a field, an array element or a reference.
-  - `.=` needs a reference variable or a writable view on the left and rebinds it; `=` through a reference writes its target (DESIGN §5.1).
+  - `.=` needs a reference variable or field, a link field, or a writable view on the left, and rebinds it; `=` through a reference writes its target (DESIGN §5.1).
   - A writable slice, such as `buf[0:4]` of a changeable array or a `u8[:]&` variable, can be assigned: `=` copies elements into it (DESIGN §4.10).
 - **`_` discards** (DESIGN §7.3). A lone `_` lexes as its own token, not an `IDENT`. It may appear only:
   - on the left of a plain `=` (`_ = f();`), which evaluates the right side and throws away its value, whatever its type;
   - as a status destination (`x @_ = f();`, `@_ = f();`);
-  - as the name of a parameter, a lambda parameter or a for-each variable, which is then never readable. Several parameters may be named `_`.
+  - as the name of a parameter, a lambda parameter, a for-each or repeat-loop variable, or a destructuring target, which is then never readable. Several parameters may be named `_`.
 
   Reading `_` anywhere, or using it with a compound assignment or `.=`, is an error.
 - **Status captures in assignments** (DESIGN §7.3):
@@ -423,7 +428,7 @@ Checked after parsing:
   - removes are postfix and return the removed value;
   - each needs the capability of its method (DESIGN §4.7–§4.8).
 - **Index modes**: `[%i]` wraps, `[|i]` clamps and `[^k]` counts from the end (DESIGN §4.10). `^` is also allowed before either slice bound: `a[2:^1]`, `a[:^1]`, `a[:]`.
-- **For-each targets**: the expression after `:` must be an array, a slice, a `hashmap`, an iterator (a value with a `mut T next()` method), or a value whose class has an `iterator()` method returning one (DESIGN §9.4).
+- **For-each targets**: the expression after `:` must be an array, a slice, a `hashmap`, a `hashset`, a `pool`, an iterator (a value with a `mut T next()` method), or a value whose class has an `iterator()` method returning one (DESIGN §9.4).
 - **Arrays convert to slices** wherever a slice is expected, so `[:]` is rarely written (DESIGN §4.10).
 - **Arguments are never marked** (DESIGN §5.1, as in Goose). Whether an argument can change depends only on the parameter's type. An argument written `&x` means the same as `x` and draws a warning, which helps people used to Swift, C# or Rust.
 - **Lambdas** write every parameter's type, inside parentheses: `(i32 a, i32 b) => a + b`, `(Dog d) => d.age`. `var` isn't allowed there (DESIGN §9.3).
@@ -431,13 +436,13 @@ Checked after parsing:
   - `(u8) x` stops the program when `x` doesn't fit, `(u8%) x` wraps and `(u8|) x` saturates (DESIGN §9.1). `%` and `|` need an integer target.
   - In a generic body, `(T) x` casts to the type parameter `T`, which must be bounded by a number bound (DESIGN §10.1).
 - **`new`** names a class, or leaves it out when the destination's type is known: `items.push(new(1, 0.0))` (DESIGN §6.1).
-- **Array literals** take their type from the destination: `u8[..>] scratch = [];`. An empty `[]` also creates an empty `hashmap` (DESIGN §4.14).
+- **Array literals** take their type from the destination: `u8[..>] scratch = [];`. An empty `[]` also creates an empty `hashmap`, `hashset` or `pool` (DESIGN §4.14, `STDLIB.md` §7).
 - **`null`** is allowed only where a `T&?` or a nullable function is expected.
 
 **Disambiguation rules**
 1. **Lambda, destructuring or parentheses**: at `(`, the parser looks past the matching `)`. If `=>` follows, it is a lambda. At the start of a statement, if `=` or `@` follows, it is a destructuring (`(a, b) = f();`). Otherwise it is a parenthesized expression or, with commas inside, a tuple expression.
 2. **Cast or parentheses**: `(` followed by a primitive type, an optional `%` or `|`, and `)` is a cast. So is `(T)` where `T` is a type parameter of an enclosing generic declaration; the parser knows these names, since they are declared before use. Nothing else is, since there are no reference casts.
-3. **Closing type arguments**: inside `type_args`, `>>` is split into `>` tokens, so `map<string, map<string, i32>>` parses. A `>` inside slot brackets (`map<string, Item[..>]>`) belongs to the slots, since the brackets are parsed first.
+3. **Closing type arguments**: inside `type_args`, `>>` is split into `>` tokens, so `Pair<string, Pair<i32, i32>>` parses. A `>` inside slot brackets (`hashmap<string, u8[..>16]>`) belongs to the slots, since the brackets are parsed first.
 4. **Declaration or expression**: a statement that starts with something that parses as a type, suffixes included, followed by an `IDENT` is a declaration. These are declarations:
    - `Item& r = items[0];`
    - `u8[..>] scratch = [];`
@@ -449,13 +454,13 @@ Checked after parsing:
    - `x @failed = f();`: `@` follows, not an `IDENT`;
 5. **Slot brackets or index brackets**: after a type, `[` starts slots or `[:]`; after an expression, `[` starts an index or a slice; at the start of an operand, `[` starts an array literal.
 6. **Index modes**: `%`, `|` or `^` directly after `[`, and `^` directly after a slice's `:`, is a mode marker, not an operator. None of them can start an expression, so this never conflicts.
-7. **`@`**: `@ IDENT =` or `@ _ =` (with `=`, not `==`) directly after an assignment target, or at the start of a statement, names a status destination. Anywhere else, `@` reads a status.
+7. **`@`**: `@ IDENT =` or `@ _ =` (with `=`, not `==`) names a status destination directly after an assignment target, and at the start of any expression statement: one standing alone, after `defer`, in a `switch` arm, or in a `for` update. Directly after a repeat loop's header, `@ IDENT` followed by `{` is the loop's status capture (§5). Anywhere else, `@` reads a status.
 8. **`#`**: see §1.6. A `#` that isn't a directive may appear only right after `return`.
-9. **Members**: after modifiers, `new (` starts a constructor. Otherwise the parser reads a return type (or `void`) and a name; `(` next means a method, anything else a field.
+9. **Members**: after modifiers, `new (` starts a constructor. Otherwise the parser reads optional type parameters (`<T implements ordered>`), a return type (`void`, a type, or a tuple type in parentheses) and a name; `(` next means a method, anything else a field.
 10. **`switch`**: at the start of a statement it is a statement; anywhere else it is an expression.
 11. **Qualified names** in expressions, such as `com.example.Thing.count`, parse as a chain of `.` selectors and are resolved by the type checker: package, class, then field.
-12. **`while` headers**: at `while (`, the parser looks for a declaration followed by `:`, as rule 4 does at the start of a statement, and takes that as a repeat loop. `?` counts as part of a type only directly after `&` or a `func(...)` type, so `while (a ? b : c)` stays a condition.
-13. **`:` in brackets**: after an expression, a `:` inside `[ ]` separates slice bounds. A conditional `?:` takes its own `:` first, so `a[c ? i : j]` is an index, and a slice that starts at a conditional needs parentheses: `a[(c ? i : j):]`. An array literal starts at an operand (rule 5), so a `:` in it never means a slice.
+12. **`while` headers**: at `while (`, the parser looks for a declaration, or a parenthesized list of them for a tuple result (`while ((string k, string v) : r.next())`), followed by `:`, as rule 4 does at the start of a statement, and takes that as a repeat loop. `?` counts as part of a type only directly after `&`, a link or a `func(...)` type, so `while (a ? b : c)` stays a condition.
+13. **`:` in brackets**: after an expression, a `:` inside `[ ]` separates slice bounds. A conditional `?:` takes its own `:` first, so `a[c ? i : j]` is an index, and a slice that starts at a conditional needs parentheses: `a[(c ? i : j):]`. Both bounds are shift-level expressions, so a bound that uses a comparison or a bitwise operator needs them too: `a[0:(n & 7)]`. An array literal starts at an operand (rule 5), so a `:` in it never means a slice.
 
 ---
 
@@ -520,7 +525,7 @@ void main(string[.] args) {
 
     u32[.~.] text = [];                            // a cursor array of code points
     text +^ 'h' +^ 'i';                            // "hi", cursor at the end
-    text.seek(0);
+    @_ = text.seek(0);
     text +^ '>';                                   // ">hi", cursor after '>'
     u32 removed @empty = text ^-;                  // removes 'h'
     println("${text.utf8()}");                     // >i
@@ -561,5 +566,4 @@ These need a decision before they are added:
 - Patterns in `switch`, and enums with fields, methods or payloads.
 - Type aliases, such as `type Action = func(void => void);`.
 - Unicode letters in identifiers.
-- Format specs inside `${...}` were considered and rejected (DESIGN Appendix A.11); formatting is done by methods.
 - Integers narrower than a byte (`i4`, `u4`) (DESIGN §9.1).

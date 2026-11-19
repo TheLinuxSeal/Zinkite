@@ -1,7 +1,7 @@
 # Zinkite Standard Library (draft)
 
 > Companion to `DESIGN.md`. Lists what the standard library contains, with a signature and the status codes for each function. It keeps to the language's rules: no hidden memory (DESIGN §3), views rooted at their inputs (`REFERENCES.md`), and a `u8` status per call (DESIGN §7). Everything here is **Proposed** unless marked otherwise.
-> **Updated:** 2026-11-18. First version: what CLI tools need, plus JSON, JSON5, TOML and YAML.
+> **Updated:** 2026-11-19. First version: what CLI tools need, plus JSON, JSON5, TOML and YAML.
 
 ---
 
@@ -71,7 +71,7 @@ These follow from the memory model and the status code. Every section below keep
 12. **Signatures are written as declarations**, with the receiver as a variable: `i64 s.find(string needle)` means a method on a `string` `s`. A comment lists the statuses it can fail with.
 
 ### 1.4 Status codes the library adds
-These are added to DESIGN §7.7.
+DESIGN §7.7 lists them too.
 
 | Name | Number | Source | Description | Used by |
 |---|---|---|---|---|
@@ -103,7 +103,7 @@ void errprint(string text)       // to stderr
 void errprintln(string text)
 ```
 
-- **They fail with** `IO`, `NO_SPACE` or `BROKEN_PIPE`.
+- **They set no status** (DESIGN §4.13), so a bare `println` draws no warning. A failed write is reported on stderr at exit and makes the exit status 1. For code that must check each write, `stdout.write(...)` and `stdout.flush()` fail with `IO`, `NO_SPACE` or `BROKEN_PIPE`.
 - **Writing to stdout after its reader has gone ends the program quietly**, so `BROKEN_PIPE` is only reported for stderr (DESIGN §7.6).
 - **`stdin`, `stdout` and `stderr` are `File` handles** for descriptors 0, 1 and 2, with the methods of §4.1 (Proposed, §11). DESIGN §4.13 only says they have "the same methods as files".
 - **Buffering**:
@@ -158,6 +158,7 @@ bool x.isNaN(), bool x.isFinite()     // float types
 <T implements ordered> T max(T a, T b)
 <T implements ordered> T clamp(T x, T lo, T hi)    // lo > hi is a bug
 <T implements number> T abs(T x)                   // abs(i64.MIN) overflows, so it stops the program
+<T implements int> T x.divOr(T d, T fallback)     // x / d, or fallback when d is 0
 ```
 
 - **`parse` accepts** a sign, then digits, with no spaces and no `_`.
@@ -280,7 +281,7 @@ b +> 'x'                                         // one byte (DESIGN §4.8)
 ```
 
 - **`append` of interpolated text writes the parts directly**, with no temporary (DESIGN §4.11).
-- **`appendUtf8` also takes any `u32` array, a cursor array included**, read in logical order. It is the method `linebuf.zn`'s `show` wanted (examples `NOTES.md` §3).
+- **`appendUtf8` takes a slice**, so a cursor array can't be passed to it until slices of cursor arrays are decided (DESIGN §17). Until then `linebuf.zn`'s `show` encodes one code point at a time.
 
 ---
 
@@ -341,7 +342,7 @@ void File.appendAll(string path, string bytes)
 ```
 Dir Dir.open(string path)             // NOT_FOUND, PERMISSION, NOT_DIRECTORY
 DirEntry d.next(u8[..>]& names)       // END after the last entry; the name is appended to names
-void d.close()
+void d.close()                        // BAD_HANDLE when already closed
 
 class DirEntry { string name; bool isDir; bool isLink; i64 size; }
 ```
@@ -361,8 +362,8 @@ class WalkEntry { string path; string name; i64 depth; bool isDir; bool isLink; 
 ```
 
 ```
-u8[..~] path = [];
-Walker w = fs.walk("src", path);
+u8[..~] buf = [];
+Walker w = fs.walk("src", buf);
 while (WalkEntry e : w.next()) {
     if (e.isDir && e.name == ".git") { w.skip(); continue; }
     if (e.err) {
@@ -466,6 +467,8 @@ c.input = manifest;              // fed to its stdin; without it, stdin is inher
 c.timeout = Duration.seconds(30);    // after that it is killed, and the call fails with TIMEOUT
 ```
 
+- **Storage**: the arguments and the environment changes share `Command`'s one growable field, a list of strings. `cwd` and `input` are views, so what they view must outlive the command (rule S).
+
 ```
 Exit c.run()                                    // stdout and stderr inherited
 Exit c.output(u8[..>]& out)                     // stdout appended to out
@@ -504,7 +507,7 @@ void time.sleep(Duration d)
 
 `Duration`:
 ```
-class Duration { i64 ns; }
+class Duration { i64 nanos; }
 Duration Duration.ns(i64 n)          // also .us, .ms, .seconds, .minutes, .hours
 i64 d.toMs()
 f64 d.toSeconds()
@@ -575,8 +578,8 @@ Sort CSV rows by one column.
 
 Declaring:
 ```
-void cli.flag(u8 short, string long, string help)                 // short 0 for none
-void cli.option(u8 short, string long, string meta, string help)
+void cli.flag(u8 letter, string name, string help)                // letter 0 for none
+void cli.option(u8 letter, string name, string meta, string help)
 void cli.positional(string name, string help)                     // optional, in order
 void cli.rest(string name, string help)                           // any number more: [files...]
 cli.version = "1.2.0";                                            // adds --version
@@ -591,12 +594,12 @@ void cli.usageError(string message)    // prints "csvsort: message" and the usag
 
 Reading:
 ```
-bool cli.has(string long)
-i64 cli.count(string long)                     // -vvv gives 3
-string cli.get(string long, string fallback)
-i64 cli.getI64(string long, i64 fallback)      // INVALID, RANGE
-f64 cli.getF64(string long, f64 fallback)      // INVALID
-ArgIterator cli.getAll(string long)            // every occurrence: -I a -I b
+bool cli.has(string name)
+i64 cli.count(string name)                     // -vvv gives 3
+string cli.get(string name, string fallback)
+i64 cli.getI64(string name, i64 fallback)      // INVALID, RANGE
+f64 cli.getF64(string name, f64 fallback)      // INVALID
+ArgIterator cli.getAll(string name)            // every occurrence: -I a -I b
 ArgIterator cli.restValues()
 ```
 
@@ -722,7 +725,7 @@ Scratch space is taken on a scratch data stack and released when the call return
 | `i64 binarySearch(T x)` | `MISSING` | the array must be sorted ascending; the index of an equal element |
 | `i64 lowerBound(T x)`, `i64 upperBound(T x)` | | the first index `>= x`, or `> x`; never fail |
 
-`binarySearch`, `lowerBound` and `upperBound` each have a `By` form that takes a key function, such as `lowerBoundBy(key, k)`.
+`binarySearch`, `lowerBound` and `upperBound` each have a `By` form that takes a key function, such as `lowerBoundBy(k, key)`, with the key function last, as in `partialSortBy(k, key)`.
 
 **New values.** Results are built in place (DESIGN §3.3).
 
@@ -806,14 +809,14 @@ DESIGN §3.5, made concrete:
 pool<Conn> conns = [];
 Handle h = conns.add(new Conn(fd));      // reuses a freed slot, or grows
 Conn& c @gone = conns.get(h);            // MISSING after h was freed
-conns.free(h);                           // MISSING when already freed
+@_ = conns.free(h);                      // MISSING when already freed
 for (Conn& c : conns) { ... }            // live slots only
 ```
 
 - **A `Handle` is a slot index and a generation**, 8 bytes in all.
   - Freeing a slot bumps its generation, so a stale handle fails with `MISSING` instead of reading the slot's next value.
   - On failure, `get` still returns a reference to the slot, which is safe because a pool slot always holds a `T` (REFERENCES §5.4).
-- **`T&` references into a pool are exempt from rule R** (REFERENCES §5.4). A stale one reads the replacement: a logic bug, never memory corruption.
+- **`T&` references into a pool are exempt from rule R** (REFERENCES §5.4), and may be stored in fields (REFERENCES §7.4). A stale one reads the replacement: a logic bug, never memory corruption.
 - **Layout**: one grow-only array of slots, each with a 4-byte header that holds its generation and, while the slot is free, the next free slot.
 - **Built in** like `hashmap`, so it is created with `[]` and is a built-in type name.
 
@@ -830,12 +833,13 @@ for (Conn& c : conns) { ... }            // live slots only
 
 ### 8.1 `math`
 ```
-f64 math.sqrt(f64 x)    cbrt, exp, log, log2, log10
-f64 math.pow(f64 x, f64 y)
-f64 math.hypot(f64 x, f64 y)
-f64 math.sin(f64 x)     cos, tan, asin, acos, atan, sinh, cosh, tanh
-f64 math.atan2(f64 y, f64 x)
-f64 math.floor(f64 x)   ceil, trunc, round (half away from zero)
+// F is f32 or f64: each of these is <F implements float>
+F math.sqrt(F x)        cbrt, exp, log, log2, log10
+F math.pow(F x, F y)
+F math.hypot(F x, F y)
+F math.sin(F x)         cos, tan, asin, acos, atan, sinh, cosh, tanh
+F math.atan2(F y, F x)
+F math.floor(F x)       ceil, trunc, round (half away from zero)
 math.PI, math.TAU, math.E
 
 <T implements int> T math.gcd(T a, T b)
@@ -911,8 +915,8 @@ void base64.decodeUrl(string text, u8[..>]& out)   // INVALID
 ```
 CsvReader r = new CsvReader(text);
 r.separator = ';';                         // ',' by default
-string[..>] fields = [];
 u8[..>] strings = [];                      // fields that had "" inside quotes, decoded
+string[..~] fields = [];                   // cleared by every call, so it must allow removal
 while (true) {
     u8 st = @r.next(fields, strings);
     if (st == status.END) { break; }
@@ -925,7 +929,7 @@ while (true) {
 }
 ```
 
-- **`next` clears `fields`**, then appends one view per field.
+- **`r.next(string[..~]& fields, u8[..>]& strings)` clears `fields`**, then appends one view per field. Clearing is a removal, so `fields` must allow removal at the end (`[..~]`).
 - **A field is a view into the input whenever it can be**: an unquoted field, or a quoted one with no `""` inside (the view leaves the quotes out).
 - **Only fields with doubled quotes are decoded**, into `strings`. `next` never clears `strings`; clear it yourself once no earlier field is kept.
 - **The format is RFC 4180's**:
@@ -944,7 +948,7 @@ w.writeRow(["name", "note"]);
 w.writeField(name);
 w.writeField(note);
 w.endRow();
-@err = File.writeAll("out.csv", out);
+u8 err = @File.writeAll("out.csv", out);
 ```
 
 - **A field is quoted only when it needs to be**: when it contains the separator, a quote, `\r` or `\n`, or starts or ends with a space.
@@ -975,10 +979,11 @@ if (bad) {
     return bad;
 }
 
-string host = cfg.get("server").get("host").asStringOr("localhost");
+string host @_ = cfg.get("server").get("host").asStringOr("localhost");
 i64 port @badPort = cfg.get("server").get("port").asI64();    // MISSING, TYPE, RANGE
 for (Value user : cfg.get("users").items()) {
-    println(user.get("name").asStringOr("?"));
+    string name @_ = user.get("name").asStringOr("?");
+    println(name);
 }
 ```
 
@@ -1245,7 +1250,7 @@ w.write(80);
 w.write(443);
 w.end();
 w.end();
-@err = w.finish();
+u8 err = @w.finish();
 println(out);
 ```
 
@@ -1272,8 +1277,8 @@ void yaml.write(u8[..>]& out, Value root)    // FULL
 
 **`TreeBuilder`** builds a tree from program data: for writing TOML or YAML, or for code that takes a `Value`.
 ```
-Node[..>] tree = [];
 u8[..>] strings = [];                  // the text of the numbers the program writes
+Node[..>] tree = [];                   // its nodes view strings, so strings comes first (rule S)
 TreeBuilder b = new TreeBuilder(tree, strings);
 b.beginObject();
 b.key("server");
@@ -1284,10 +1289,10 @@ b.key("port");
 b.write(8080);
 b.end();
 b.end();
-b.finish();
+u8 built = @b.finish();
 
 u8[..>] out = [];
-@err = toml.write(out, b.root());
+u8 err = @toml.write(out, b.root());
 ```
 
 - **`TreeBuilder` implements `DataWriter`.** So a function written once can either write JSON directly or build a tree for TOML and YAML:
@@ -1353,7 +1358,7 @@ GlobIterator fs.glob(string pattern, u8[..~]& path)   // "src/**/*.zn"
 ```
 Regex re @bad = Regex.compile("([a-z]+)=([0-9]+)");   // INVALID
 bool re.matches(string s)                  // the whole of s
-Match m @none = re.find(string s)          // the first match; MISSING
+Match re.find(string s)                    // the first match; MISSING
 MatchIterator re.findAll(string s)
 string m.group(i64 i)                      // "" for a group that didn't take part
 u8[.] re.replaceAll(string s, string with) // $1 in `with` refers to group 1
@@ -1466,7 +1471,7 @@ u8 main() {
 
     Vertex[.3] tri = [new(0.0, 0.5, 1.0, 0.0, 0.0), new(-0.5, -0.5, 0.0, 1.0, 0.0), new(0.5, -0.5, 0.0, 0.0, 1.0)];
     GlBuffer vbo = gl.genBuffer();
-    defer vbo.delete();
+    defer gl.deleteBuffer(vbo);
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
     gl.bufferData(gl.ARRAY_BUFFER, tri, gl.STATIC_DRAW);  // the array's bytes, as they are
     ...                                                    // vertex layout, shaders, program
@@ -1492,7 +1497,7 @@ u8 err = @sdl.init(sdl.INIT_VIDEO);
 SdlWindow w @noWindow = sdl.createWindow("game", 1280, 720, sdl.WINDOW_VULKAN);
 sdl.loadVulkan();                                          // vkGetInstanceProcAddr, through SDL
 
-VkInstanceCreateInfo info = new();                         // every field starts at its zero or default
+VkInstanceCreateInfo info = new();                         // every generated field has an initializer
 info.enabledExtensionNames = sdl.vulkanInstanceExtensions();   // a string[:], not a pointer and a count
 VkInstance inst @noVulkan = vk.createInstance(info);
 vk.loadInstance(inst);
@@ -1517,9 +1522,10 @@ while (running) {
   - output arrays, such as the result of `vkEnumeratePhysicalDevices`, are appended to an array the caller passes (§1.3, rule 1);
   - Vulkan's `pNext` chains become optional fields of the create-info classes, and the C layer builds the real structs;
   - mapped GPU memory is written by copying (`mapped.write(offset, data)`), not through a view, since its life ends at `vkUnmapMemory`, outside the reference rules.
+- **Every field of a generated Vulkan class has an initializer**, so `new()` builds the zeroed struct Vulkan code starts from, with `sType` already set (DESIGN §6.2).
 - **Functions are loaded at run time**, once a context or instance exists: `glfw.loadGl()`, `glfw.loadVulkan()` or `sdl.loadVulkan()`, and then `vk.loadInstance(inst)` and `vk.loadDevice(dev)`. Calling a function the driver doesn't provide is a bug: it stops the program and names the function.
 - **Events are drained with a repeat loop** (DESIGN §9.4). SDL3 already works that way, with `SDL_PollEvent`. GLFW reports input through C callbacks instead, so its C layer queues the events. `w.nextEvent()` calls `glfwPollEvents` when the queue is empty, and fails with `END` when nothing more has happened.
-- **Handles are values.** `GlBuffer`, `GlTexture`, `VkDevice` and the rest are deleted explicitly, usually with `defer` (DESIGN §6.4).
+- **Handles are values.** `GlBuffer`, `GlTexture`, `VkDevice` and the rest are deleted explicitly, usually with `defer`: `defer gl.deleteBuffer(vbo);`, which follows the C name `glDeleteBuffers` (DESIGN §6.4). `delete` is reserved, so there is no `vbo.delete()`.
 - **Uploads take slices**: `gl.bufferData(target, data, usage)` and the Vulkan copy functions send a slice's bytes as they are. Classes stored inline without headers already have the layout a GPU buffer expects, once their field order and padding are fixed to C's (DESIGN §17).
 - **Statuses**:
   - each Vulkan call that returns a `VkResult` sets a status: 0 for success, `OUT_OF_DATE` for `VK_ERROR_OUT_OF_DATE_KHR` (recreate the swapchain), `NO_MEMORY` when host or device memory runs out, and `GPU` for anything else. `vk.lastResult()` gives the exact `VkResult`, `VK_SUBOPTIMAL_KHR` included;

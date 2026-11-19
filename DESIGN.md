@@ -1,7 +1,7 @@
 # Zinkite Language Design Notes
 
 > **Name:** Zinkite. The command is `zink` and source files end in `.zn`. Zinkite is a variant spelling of zincite, the zinc oxide mineral: Rust is iron oxide, and zinc is what keeps iron from rusting.
-> **Updated:** 2026-11-17. Zinkite now uses a Goose-style memory model: no heap, data stacks freed when their scope ends, values stored inline. The previous design (reference counting with `owned`, `owner` and `weak` references) is kept in full in `DESIGN-refcount.md` and summarized in Appendix A.1. Superseded and rejected ideas are kept in Appendix A with the reasons.
+> **Updated:** 2026-11-19. Zinkite now uses a Goose-style memory model: no heap, data stacks freed when their scope ends, values stored inline. The previous design (reference counting with `owned`, `owner` and `weak` references) is kept in full in `DESIGN-refcount.md` and summarized in Appendix A.1. Superseded and rejected ideas are kept in Appendix A with the reasons.
 
 **Status labels**
 - **Decided**: settled.
@@ -33,43 +33,49 @@ Left out to stay light: inheritance, exceptions, destructors, reflection, dynami
 | Memory model | No heap: values live on the native stack, in static data, or on compiler-assigned data stacks; a scope's memory is freed by one store when it ends | Decided | 3 |
 | Nested data | Stored inline; a record is a contiguous run of bytes | Decided | 3.2 |
 | Array types | Slot grammar `T[sce cap]`: one character each for start, cursor and end, `>` insert, `<` remove, `~` both, `.` nothing; `T[a]` applies one character to all three; a `$` prefix (`T[$.~.]`) chooses a chunked index | Decided | 4.1 |
+| Varint lengths | `*` after the slots gives a frozen array a varint length field: `T[.*]` | Decided | 4.6 |
 | Array operations | Methods and operators, both: `push(x)` and `a +> x` | Decided | 4.7, 4.8 |
-| Cursor arrays | A cursor slot other than `.` gives a data array whose elements never move, plus a gap buffer of indices; references survive inserts and seeks; removal holes are reused | Decided | 4.3, 4.5 |
+| Cursor arrays | On a data stack, a cursor slot other than `.` gives a data array whose elements never move, plus a gap buffer of indices; references survive inserts and seeks; removal holes are reused | Decided | 4.3, 4.5 |
 | Indexing from the end | `a[^1]` is the last element; no negative indices | Decided | 4.10 |
 | Assignment | `=` copies a value; references are written `T&`; `.=` rebinds a reference | Decided | 5.1 |
-| Reference safety | Every reference has an inferred root and can't outlive it; removing from an array while a reference into it may still be used is a compile error; follows Goose, with no annotations and no aliasing rules (`REFERENCES.md`) | Proposed | 5.2 |
-| Links inside data | `T&` fields, rooted like any reference; relative links `T&<i32>` for compact structures that can be copied and saved as bytes | Proposed | 5.4 |
+| Binding references | `var& x = e` binds a reference; arguments are never marked, and `&x` at a call draws a warning | Decided | 5.1 |
+| Reference safety | Every reference has an inferred root and can't outlive it; removing from an array while a reference into it may still be used is a compile error; follows Goose, with no annotations and no aliasing rules (`REFERENCES.md`) | Decided | 5.2 |
+| Links inside data | `T&` fields, rooted like any reference; relative links `T&<i32>` for compact structures, copied only with their whole array; saving them as bytes is Open | Decided | 5.4 |
 | Classes | Methods in the body, constructors `new(...)`, `mut` methods, `private`; no header, so a class is exactly as large as its fields | Decided | 6.1 |
 | Default constructors | A class with no constructor gets one taking each field without an initializer, in declaration order | Decided | 6.2 |
+| Constructors | Every field assigned on every path, checked for the worst case; `this.new(...)` delegates; a failing `return #code;` gives the zero value | Decided | 6.2 |
 | Overloading | Methods, static functions and constructors, by parameter types; chosen at compile time from the arguments' static types; no default parameter values | Decided | 6.5 |
-| Exit status | `u8 main(...)` returns it; `void main` exits with 0; `exit(code)` ends the program from anywhere | Proposed | 8.6 |
 | Dispatch | Interfaces only, no inheritance; an interface reference is 16 bytes (value pointer + method table) | Decided | 6.3 |
 | Errors | A `u8` status per call, 0 for success: `return #status.NOT_FOUND x;` writes it, `x @err = f();` reads it; no exceptions | Decided | 7 |
 | Status codes | Follow Linux's `errno` numbers (`NOT_FOUND` is `ENOENT`, 2); 1 means failed; Zinkite's own codes from 192 to 223; a program's own from 224 to 255 | Decided | 7.7 |
-| Conditions | Unsigned integers work as conditions: 0 is false, anything else true | Decided | 9.4 |
 | Value on failure | Always defined: every return supplies a value, and the standard library returns the zero value on failure | Decided | 7.5 |
-| Bugs | Overflow, an index out of range, division by zero and similar stop the program with a message | Proposed | 7.6 |
+| Discarding | `_` takes any value or status and can never be read | Decided | 7.3 |
+| Bugs | Overflow, an index out of range, division by zero and similar stop the program with a message | Decided | 7.6 |
 | Cleanup | No destructors, as in Goose; `defer` runs a statement when its block ends; the runtime flushes and closes files still open at exit | Decided | 6.4 |
 | Number types | `i8`–`i64`, `u8`–`u64`, `f32`, `f64`, plus `bool`; no aliases; lengths and indexes are `i64` | Decided | 9.1 |
+| Literals | An integer literal is an `i64` and a float literal an `f64` unless where it is used says otherwise; Rust-style suffixes (`255u8`, `1.5f32`) | Decided | 9.1 |
 | Casts | `(u8) n` stops when the value doesn't fit; `(u8%) n` wraps and `(u8\|) n` saturates; `u8.from(n)` fails with `RANGE` instead | Decided | 9.1 |
 | Mixed integer types | Allowed when one type holds every value of the other, and the result has that type; otherwise a cast; comparisons between any two integer types are exact | Decided | 9.2 |
 | Generic bounds | Built in: `sint`, `uint`, `int`, `float`, `number`, `ordered`, `hashable`, combined with `&`; a class is `ordered` by declaring `compareTo` | Decided | 10.1 |
 | Characters | No `char` type: a code point is a `u32`, and `'a'` is an integer literal (ASCII-only when used as a `u8`) | Decided | 9.1 |
-| Hash maps | Built-in `hashmap<K, V>`: insertion-ordered, entries never move, the index is rebuilt on growth (Python's compact dict) | Decided | 4.14 |
+| Hash maps | Built-in `hashmap<K, V>`: insertion-ordered, entries never move on insert, the index is rebuilt on growth (Python's compact dict) | Decided | 4.14 |
 | Printing | `print` and `println` take text; values are formatted by methods inside `${...}`, such as `${n.hex()}` and `${c.utf8()}` | Decided | 4.13 |
-| Strings | `string` is a view (`u8[:]`); text is stored as `u8` arrays | Proposed | 4.11 |
+| Strings | `string` is a view (`u8[:]`); text is stored as `u8` arrays | Decided | 4.11 |
 | Lambdas and `switch` cases | `(i32 a, i32 b) => a + b`, with every parameter's type written; `case 0 => ...`; `->` is the pop operator | Decided | 9.3, 9.4 |
 | Standard library | Packages under `zink.*`; text that is read goes into caller buffers, computed text is built in place, failures are status codes; JSON, JSON5, TOML and YAML share one parsed tree | Proposed | `STDLIB.md` |
 | Implementation | Compiler in Rust, runtime in C, compiler emits machine code directly (not C) | Decided | 14 |
-| Output | Native code; optional bytecode VM for embedding | Decided | 12, 13 |
+| Output | Native code; a bytecode VM backend, run with `zink run --vm` (§14.4); the embedding model is Open (§13) | Decided | 12, 13 |
 | Program settings | One setting per program, as `#` directives at the top of the file containing `main` | Decided | 8.2 |
 | Conditional compilation | `#if` / `#else` / `#endif` | Decided | 8.3 |
 | Packages and imports | Java-style packages that match directories; `import a.b.C as D` for aliases | Decided | 8.4, 8.5 |
 | Script files | A file with no class declaration is allowed; its top-level methods and fields go into a hidden class | Decided | 8.6 |
+| Exit status | `u8 main(...)` returns it; `void main` exits with 0; `exit(code)` ends the program from anywhere | Decided | 8.6 |
 | Static initialization | Every static field is set before `main`, in dependency order; initializers that depend on each other in a loop are a compile error | Decided | 8.7 |
-| String interpolation | `"${expr}"`; `$` reserved for this | Decided | 4.11 |
+| String interpolation | `"${expr}"`; otherwise `$` only marks a chunked index in types (§4.1) | Decided | 4.11 |
 | Statements and expressions | Java's, plus `var`, for-each, arrow-only `switch`, simple enums | Decided | 9.4 |
+| Conditions | Unsigned integers work as conditions: 0 is false, anything else true | Decided | 9.4 |
 | Repeat loops | `while (T x : call)` makes the call before every pass and runs while its status is 0: `while (Pending p : todo ->)` | Decided | 9.4 |
+| Iterators | A value with `mut T next()` is an iterator, for for-each and repeat loops; `Iterator<T>` for generic code | Decided | 9.4 |
 | Multiple results | `(string, string) f()` returns a tuple, and `(string a, string b) = f();` destructures it; the status stays a `u8` | Decided | 9.5 |
 | Index modes | `a[i]` checked, `a[%i]` wraps, `a[\|i]` clamps, `a[^k]` from the end | Decided | 4.10 |
 | Slices | `a[i:j]`, `a[i:]`, `a[:j]`, `a[:]`; `T[:]` is a read-only view and `T[:]&` a writable one; an array converts to a slice wherever one is expected | Decided | 4.10 |
@@ -92,19 +98,19 @@ for (i32 round = 0; round < 3; round++) {
 }                                               // freed: one store to the stack's top
 ```
 
-- **At most one resizable value is live per data stack, and it is always on top.** Growth therefore never moves anything and never checks a capacity. The compiler proves this; the runtime tracks only the bump pointers.
+- **At most one resizable value is live per data stack, and it is always on top** (rule G, `REFERENCES.md` §8). Growth therefore never moves anything and never checks a capacity. The compiler proves this; the runtime tracks only the bump pointers.
 - **Freeing is one store.** When a scope ends, each data stack it used gets its saved top back, however much data was built and however deeply it is nested.
 - **References survive growth.** A reference into a growing array stays valid as long as the array does, because its elements never move:
   ```
   Item[..>] items = [];
   Item& first = items.push(new Item(1, 0.5));   // a reference to element 0
   for (i32 i = 2; i <= 1000000; i++) { items.push(new Item(i, 0.0)); }
-  first.weight = 99.5;                          // still valid, a million pushes later
+  first.heavier(99.0);                          // still valid, a million pushes later
   ```
 - Pages are committed by the kernel on first touch, so an unused reservation costs nothing but address space.
 
 ### 3.2 Nested data is stored inline (Decided)
-A value is stored where it is declared: in a local, a field, or an array element. A class with variable-size parts (a string, a frozen array) stores them inline, so a record is a contiguous run of bytes with no pointers in it:
+A value is stored where it is declared: in a local, a field, or an array element. A class with variable-size parts (text in a `u8[.*]`, a frozen array) stores them inline, so a record is a contiguous run of bytes with no pointers in it:
 
 ```
 class Item  { u8[.*] sku; i32 qty; i32 cents; }
@@ -119,7 +125,7 @@ The whole order book is one block, so reading it streams through the cache.
 - **A class with a variable-size field is itself variable-size.** An array of it can be iterated but not indexed, since element `i` has no fixed offset. To index it, keep a second array of references to its elements (§15 measured this: sorting 1,000,000 such records through an array of references).
 - Fixed-size alternatives keep indexing: a capped array (`u8[..~16]`) or a view (`string`, §4.11).
 
-### 3.3 Building in place (Proposed)
+### 3.3 Building in place (Decided)
 - **A value is constructed at its final destination**, through any depth of calls. `items.push(parse(line))` writes the parsed record straight into the array.
 - **Returning a growable array by value doesn't copy it**: the callee builds it where the caller will keep it.
 - `new` therefore means "construct here", never "allocate" (§6.1).
@@ -134,7 +140,7 @@ The whole order book is one block, so reading it streams through the cache.
 - **Links inside data follow the reference rules** (§5.4): a reference in a field can't outlive what it points into, so objects can't point freely at each other.
 - **Virtual memory is required** (§1).
 
-### 3.5 Pools for long-running programs (Proposed)
+### 3.5 Pools for long-running programs (Decided)
 A built-in `pool<T>` pairs a grow-only array with a free list: `add` reuses a free slot or pushes a new one, and `free` returns a slot (`STDLIB.md` §7.5). A slot's memory is never released while the pool lives, so a stale reference to a freed slot reads a different value of the same type: a logic bug, never memory corruption. This is Goose's `slot_pool`.
 
 ---
@@ -208,8 +214,9 @@ There is no `T[k]`: `T[.k]` is the only fixed-size spelling.
 | `<.<` | front and back offsets over existing data | a window that only narrows |
 | a `$` prefix | the same data array, with the index split into chunks of about √n entries (a two-level tiered vector, Goodrich and Kloss 1999) | inserts and removals anywhere cost O(√n); reads take three loads; the cursor is just a position |
 
-- **Parameters take capabilities, not layouts** (Proposed). Since a plain parameter is a read-only copy (§5.1), an array the callee changes is passed by reference. A `T[..>]&` parameter accepts any array that can at least be appended to, and the function can only append. The compiler compiles the function once per layout passed to it, since the whole program is visible.
+- **Parameters take capabilities, not layouts** (Decided). Since a plain parameter is a read-only copy (§5.1), an array the callee changes is passed by reference. A `T[..>]&` parameter accepts any array that can at least be appended to, and the function can only append. The compiler compiles the function once per layout passed to it, since the whole program is visible.
 - **Reads on a cursor array cost more even when the code never moves the cursor.** Elements stay where they were inserted, so `a[i]` reads the index array first. Arrays that are mostly read should use a type whose cursor slot is `.`.
+- **A lint for unused capabilities** (Decided): a warning when an array's type allows something the code never does. The cursor matters most: `T[~]` is the shortest spelling, but its cursor slot makes every read take two loads (§4.3). The warning would suggest `T[~.~]` when the cursor is never used. It could also suggest adding `$` to a large array whose edits jump around, and removing it when edits stay in one place.
 
 ### 4.4 Cost model (Decided)
 
@@ -227,8 +234,8 @@ Nothing gives O(1) insert anywhere together with O(1) indexing: about log n / lo
 - Gap layout only, no tombstones, so indexing stays O(1) and order is preserved.
 - Removing widens the gap, and the element's slot in the data array becomes a hole.
 - **Holes are reused.** A removal puts the slot on a free list, and the next insert takes a slot from there before appending. The data array therefore never holds more slots than the most elements that were live at once, instead of growing with every insert.
-- **The free list lives inside the holes** when an element is at least 4 bytes. Smaller elements keep it in a small side array (Proposed).
-- **The reuse is never visible**: removing from a cursor array while a reference into it may still be used is a compile error (§5.3, `REFERENCES.md` §5). References survive inserts and seeks, which never move elements.
+- **The free list lives inside the holes** when an element is at least 4 bytes. Smaller elements keep it in a small side array (Decided).
+- **The reuse is never visible**: removing from a cursor array while a reference into it may still be used is a compile error (§5.3, `REFERENCES.md` §5). On a data stack, references survive inserts and seeks, which never move elements. A capped cursor array's small gap buffer does move them (§4.3).
 - **A cursor slot needs fixed-size elements**, so a reused hole always fits.
 - No swap-remove: it would break the order.
 
@@ -240,7 +247,7 @@ A varint (LEB128-style) stores the length in 1 byte up to 127, 2 bytes up to 16,
 
 `*` is allowed on frozen arrays and is illegal with a numeric cap, since the cap determines the counter width. Whether unbounded editable arrays (`T[..>*]`) may carry it is Open (§17).
 
-### 4.7 Methods (Decided; names Proposed)
+### 4.7 Methods (Decided)
 Which methods exist follows the slots; the compiler rejects any method the type doesn't allow.
 
 | Slot | Insert (`>` or `~`) | Remove (`<` or `~`) |
@@ -249,9 +256,9 @@ Which methods exist follows the slots; the compiler rejects any method the type 
 | End | `push(x)` | `pop()` |
 | Cursor | `insert(x)` | `removeBefore()`, `removeAfter()` |
 
-- `push`, `pushFront` and `insert` return a reference to the new element.
+- `push`, `pushFront` and `insert` return a reference to the new element. On a full capped array they fail with `status.FULL` and store nothing, and the reference points at the last element instead. A cap must be at least 1, so a full array always has one, and the reference is safe to use (§7.5).
 - `pop`, `popFront`, `removeBefore` and `removeAfter` return the removed value. On failure they return the zero value with `status.EMPTY` (§7.5).
-- Every editable array has `len`, `clear()` (one store on a data stack), `a[i]`, and for-each in logical order.
+- Every editable array has `len`, `clear()` (one store on a data stack), `a[i]` (except an array of variable-size values, §3.2), and for-each in logical order.
 - Frozen arrays have only `len`, indexing and for-each.
 
 ### 4.8 Operators (Decided)
@@ -294,7 +301,7 @@ The sign says insert (`+`) or remove (`-`); the symbol says where: `<` start, `^
 
 - `seek` takes only positions from 0 to `len`; anything else fails with `status.POSITION` and leaves the cursor where it was.
 - There is no `seekEnd()`: `seekFromEnd(0)` covers it.
-- The `At` forms cost O(distance); they aren't random-access inserts.
+- The `At` forms cost O(distance), or O(√n) with a chunked index (`$`); they aren't random-access inserts.
 - The cursor methods require a cursor slot other than `.`.
 
 ### 4.10 Indexing (Decided)
@@ -307,7 +314,7 @@ The sign says insert (`+`) or remove (`-`); the symbol says where: `<` start, `^
 - **No negative indices**: `a[-1]` is out of range, so a computed index that goes negative never silently wraps. Use `a[^1]` or `a[%-1]`.
 - **An index can be any integer type** (Decided). The check rejects any value beyond the length, so `buckets[h % (u64) buckets.len]` needs no cast back to `i64` (§9.2).
 - The asymmetry is deliberate: `a[^1]` counts elements from 1, while `seekFromEnd(0)` counts gaps from 0.
-- **Slices** `T[:]` are views into any array kind, without copying: a pointer and a length. On a cursor array, a slice shows logical order (Open, §17).
+- **Slices** `T[:]` are views without copying: a pointer and a length, into an array whose elements sit in order in one block. Slices of cursor, chunked, reversed and ring-buffer arrays are Open (§17).
 - **`a[i:j]` takes a slice** (Decided): the elements from `i` up to, but not including, `j`. `a[i:]` runs to the end, `a[:j]` starts at the beginning, and `a[:]` is the whole array. `^` counts from the end in either bound: `a[1:^1]` leaves out the first and last elements. A bound out of range, or `i > j`, stops the program.
 - **An array converts to a slice of its elements wherever a slice is expected** (Decided): as an argument, as a method's receiver, in a declared `T[:]` or `string` variable or field, in a `return`, and as an operand of `==` or another comparison whose other side is a slice. So `[:]` is rarely written:
   ```
@@ -337,10 +344,11 @@ The sign says insert (`+`) or remove (`-`); the symbol says where: `<` start, `^
   - **A writable view can only be taken of an array the code may change**: a local, a `&` parameter, or a field inside a `mut` method. Taking one of a string literal, which lives in read-only memory, of a `T[:]`, or of a plain parameter is a compile error.
   - **`=` copies elements into the view**, as `=` through a reference writes its target. Lengths that differ stop the program, like an index out of range. A copy between overlapping parts of one array gives the right result.
   - **`.=` rebinds the view** to another range.
+- **`=` on a view follows the rule for values and references** (Decided). A `T[:]` is a value, so `string w = a; w = b;` makes `w` view `b`. A `T[:]&` behaves like a `T&`, so `=` writes through it and `.=` rebinds it.
   - **Rule R applies as to any view**: removing from the array while a writable view of it may still be used is a compile error (`REFERENCES.md` §9).
   - **Every in-place library method** (the sorts, `reverse`, `shuffle`, `swap`, `fill`) works on a writable view too (`STDLIB.md` §7.1).
 
-### 4.11 Strings (Proposed)
+### 4.11 Strings (Decided)
 - **Text is `u8` arrays, as in Goose**:
   - `u8[..>]` is a builder;
   - `u8[.]` or `u8[.*]` is finished text stored inline in whatever holds it;
@@ -354,7 +362,7 @@ The sign says insert (`+`) or remove (`-`); the symbol says where: `<` start, `^
   - **Variables get the text built in place**: `u8[.] msg = "${count} files";` builds it in `msg`'s own storage (§3.3), where it lives as long as `msg`.
   - **Everything else gets an exact-size temporary on a scratch data stack**, released at the end of the statement. That's the case for a plain `string` parameter, as in `log("${n} done")`. Every part is evaluated first, then the text is written once at its final size, so it never grows (rule G). A part that is itself a temporary is finished first and sits below it on the stack.
   - **Keeping a view of a temporary is a compile error**: `string s = "${x}";` would outlive its text, so the error suggests `u8[.] s = "${x}";` (rule S, `REFERENCES.md` §3.3).
-- **`split`** returns views into its input, so splitting a line allocates nothing (§15).
+- **`split`** returns views into its input, so splitting a line allocates nothing.
 - **Indexing gives bytes**: `s[i]` is a `u8`, since a string is a `u8` array. Code points come from decoding: `for (u8 b : s)` walks the bytes, and `for (u32 c : s.codePoints())` decodes the UTF-8 into code points (Decided).
 - **Comparing a byte with a character just works**: `if (line[i] == ',')`, because `','` takes the type `u8` there (§9.1).
 
@@ -362,9 +370,9 @@ The sign says insert (`+`) or remove (`-`); the symbol says where: `<` start, `^
 - **In a type, the characters between `[` and `]` are read directly**: one or three slot characters, then an optional number, constant or `*`. So `>>` and `<<`, which are tokens elsewhere, count as two slot characters there.
 - **A `$` directly after `[` in a type** marks the chunked index (§4.1). Outside string literals, `$` has no other meaning.
 - **Types and slices can't be confused.** A slice always has a `:` between its bounds, and the only type with a `:` is the slice type `T[:]`. That one is spelled like the whole slice `a[:]`, and the declaration rule (`GRAMMAR.md` §6, rule 4) tells them apart, as for other types.
-- **A conditional takes its own `:` first**: `a[c ? i : j]` is an index. A slice that starts at a conditional needs parentheses: `a[(c ? i : j):]`.
+- **Slice bounds are shift-level expressions** (`GRAMMAR.md` §6), below comparisons, bitwise operators and the conditional. So a conditional keeps its own `:`, and `a[c ? i : j]` is an index. A bound that uses one of those operators needs parentheses: `a[(c ? i : j):]`, `a[0:(n & 7)]`.
 - **One near-collision**: `u8[~16]` (a capped array that can do everything) and `a[~16]` (indexing with the bitwise NOT of 16) are spelled alike. A statement that starts with a type followed by a name is a declaration (`GRAMMAR.md` §6, rule 4), so the parser can tell them apart, but a reader may not.
-- Generics written with angle brackets around slot types, such as `map<string, Item[..>]>`, need an early parser test.
+- Generics written with angle brackets around slot types, such as `hashmap<string, u8[..>16]>`, need an early parser test (§18, test 121).
 
 ### 4.13 Printing and formatting (Decided)
 ```
@@ -376,9 +384,9 @@ println("id:    ${id.zeroPad(8)}");   // 00000097
 println("cost:  ${x.fixed(2)}");      // 3.14
 ```
 
-- **`print(text)` writes to stdout, and `println(text)` adds a newline**, as in Java. Both take text, usually an interpolated string. A failed write returns a nonzero status; writing to a closed pipe ends the program quietly (§7.6).
+- **`print(text)` writes to stdout, and `println(text)` adds a newline**, as in Java. Both take text, usually an interpolated string. They set no status (Decided), so a bare `println` draws no warning. A failed write is remembered, reported on stderr at exit, and makes the exit status 1 (§6.4). Writing to a closed pipe ends the program quietly (§7.6). Code that must check each write calls `stdout.write(...)` or `stdout.flush()`, which do set a status.
 - **`errprint(text)` and `errprintln(text)` write to stderr**, for error messages. They stay on the terminal when stdout is redirected to a file or a pipe.
-- **`stdin`, `stdout` and `stderr` are stream objects** with the same methods as files (`print`, `println`, `write`, `readLine`, `readAll`). The four functions are shorthand: `println(x)` is `stdout.println(x)`, and `errprintln(x)` is `stderr.println(x)`.
+- **`stdin`, `stdout` and `stderr` are stream objects** with the same methods as files (`print`, `println`, `write`, `readLine`, `readAll`). The four functions are shorthand: `println(x)` is `stdout.println(x)`, and `errprintln(x)` is `stderr.println(x)`, except that the four set no status (below).
 - **Defaults in `${...}`**: the type decides how a value prints.
 
   | Value | `${x}` prints |
@@ -388,7 +396,7 @@ println("cost:  ${x.fixed(2)}");      // 3.14
   | `bool` | `true` or `false` |
   | any other array | a list: `[104, 105]` |
 
-- **Formatting methods** change that, and work in any interpolation: in `print`, in a string, in a buffer, or in a file write. Names Proposed:
+- **Formatting methods** change that, and work in any interpolation: in `print`, in a string, in a buffer, or in a file write. Names:
   - `hex()`, `bin()`: the integer in base 16 or 2;
   - `pad(w)`, `zeroPad(w)`: at least `w` characters wide, padded with spaces or zeros;
   - `fixed(d)`: a float with `d` decimal places;
@@ -414,7 +422,7 @@ for (var& e : counts) {                          // insertion order
 
 - **`hashmap<K, V>` is built in, like arrays.** It is created by `[]` and needs no `new`. The compiler gives each one two data stacks, as it does for a cursor array's data and index. A class with a `hashmap` field counts it as its one growable field (§3.4).
 - **`hashset<T>` is built in the same way**, with the same layout minus the values (`STDLIB.md` §7.4).
-- **Methods** (names Proposed):
+- **Methods**:
   - `get(key)` returns the value, or the zero value with `status.MISSING` when the key is missing;
   - `getOrAdd(key, initial)` returns a `V&`, adding `initial` first if needed;
   - `put(key, value)` adds or replaces;
@@ -448,7 +456,7 @@ for (var& e : counts) {                          // insertion order
 ### 5.1 Copies and references (Decided)
 ```
 Item[..>] items = [];
-items.push(new Item(1, 0.0));
+items +> new Item(1, 0.0) +> new Item(2, 0.0);
 
 Item copy = items[0];          // copies the value
 copy.heavier(2.5);             // items[0] is unchanged
@@ -471,25 +479,25 @@ items[0].heavier(1.0);         // works in place, with no copy
       cur .= cur.next;           // cur = cur.next would overwrite the node instead
   }
   ```
-  - `.=` works on reference variables and on writable views (§4.10). On a value, it is a compile error that suggests `=`.
+  - `.=` works on reference variables and fields, on link fields (§5.4), and on writable views (§4.10). On a value, it is a compile error that suggests `=`.
 - **`var x = e` copies; `var& x = e` binds a reference** (Decided): `var& c = counts.getOrAdd(word, 0);`.
-- **`T&?` is a nullable reference** and must be narrowed (`if (r != null)`) before use (Proposed).
-- **Parameters** (Proposed): a plain parameter is a read-only copy. The compiler passes large ones by pointer when the difference can't be observed. A `T&` parameter lets the callee change the caller's value.
+- **`T&?` is a nullable reference** and must be narrowed (`if (r != null)`) before use (Decided).
+- **Parameters** (Decided): a plain parameter is a read-only copy. The compiler passes large ones by pointer when the difference can't be observed. A `T&` parameter lets the callee change the caller's value.
 - **Nothing marks a changeable argument at the call site** (Decided, as in Goose). `File.readAll(path, text)` binds `text` to a `u8[..>]&` parameter, and only the declaration says it may change. Writing `&text` at the call means the same, and draws a warning.
 - **Interface references** are always references: `Shape&` (§6.3).
 
-### 5.2 Roots: lifetime checks without annotations (Proposed)
-Every reference and slice has a static **root**: the variable that bounds its target's lifetime. The compiler infers roots, and a summary for each function of how its result and stores relate to its parameters' roots, so no annotations are needed. There are no aliasing or exclusivity rules. This is Goose's approach, except that functions are compiled once instead of once per root. The full rules are in `REFERENCES.md`.
+### 5.2 Roots: lifetime checks without annotations (Decided)
+Every reference and slice has a static **root**: the variable that bounds its target's lifetime. This is rule S (`REFERENCES.md` §3). The compiler infers roots, and a summary for each function of how its result and stores relate to its parameters' roots, so no annotations are needed. There are no aliasing or exclusivity rules. This is Goose's approach, except that functions are compiled once instead of once per root. The full rules are in `REFERENCES.md`.
 
 ```
 string longest(string a, string b) { return a.len >= b.len ? a : b; }
 
 u8[..>] outer = [];
-string w = outer[:];
+string w = outer;
 {
     u8[..>] inner = [];
     inner.append("inner text");
-    w = longest(outer[:], inner[:]);   // compile error: the result may be rooted at inner,
+    w = longest(outer, inner);         // compile error: the result may be rooted at inner,
 }                                        //   which doesn't outlive w
 ```
 
@@ -497,20 +505,20 @@ string w = outer[:];
 - A function can return a reference rooted at a parameter or at a static; at the call site its root is the argument's root. Returning a reference to the function's own local is a compile error.
 - References into a growing array stay valid while the array lives (§3.1).
 
-### 5.3 Removal and stale references (Proposed)
-- **Removing elements from an array on a data stack is a compile error while a reference into it may still be used.** That covers `pop`, the cursor removals, `clear`, and assigning the whole array. The check follows the program's order, and the error names the reference and the line where it was bound. This is Goose's rule (`REFERENCES.md` §5).
+### 5.3 Removal and stale references (Decided)
+- **Removing elements from an array on a data stack is a compile error while a reference into it may still be used.** That covers `pop`, the cursor removals, `clear`, and assigning the whole array. The check follows the program's order, and the error names the reference and the line where it was bound. This is Goose's rule, and rule R in `REFERENCES.md` §5.
 - **So freed slots are reused right away**: popped slots by the next push, and cursor-array holes by the next insert (§4.5).
-- **References into an array that can remove elements stay in variables.** They can't be stored in fields, array elements or statics, so the compiler sees every one. References into grow-only and frozen arrays can be stored anywhere the root rule allows.
+- **References into an array that can remove elements stay in local variables and parameters.** They can't be stored in fields, array elements or statics, so the compiler sees every one. References into grow-only and frozen arrays can be stored anywhere the root rule allows.
 - **Capped arrays and pools are the exception.** Their storage never holds another type, so a reference survives a removal and reads whatever value of the same type is in the slot: a logic bug, never memory corruption.
 - **Variable-size values are written once**: a variable-size field can't be assigned. A whole variable can be, which rebuilds the value and counts as a removal (`REFERENCES.md` §6).
 
-### 5.4 Links inside data (Proposed)
+### 5.4 Links inside data (Decided)
 The notes said "no pointers inside records", but also that `push` returns a reference "so elements can be linked while building". Three kinds of link are allowed, for different jobs (`REFERENCES.md` §7):
 1. **References in fields**: `T&`, `T&?`, interface references and slices, rooted like any other reference. An array can hold references rooted at itself, so they also link elements of one array. Each takes 8 bytes, and a copy still points at the original.
-2. **Self-relative links**: `T&<i32>` (or `<i16>`, `<i8>`) stores a signed byte offset from the field to its target in the same array, as Goose's relative references do. They are compact, mean the same thing wherever the whole array is copied, and can be saved as bytes. A value with these links can't be copied out of its array, only referenced in place.
-3. **Pool links**: `T&<u32 in pool>` stores an offset from the start of a static grow-only array, so values holding them can be copied anywhere (Goose's pool-relative references).
+2. **Self-relative links**: `T&<i32>` (or `<i16>`, `<i8>`) stores a signed byte offset from the field to its target in the same array, as Goose's relative references do. They are compact, and mean the same thing wherever the whole array is copied. Saving them as bytes needs a check that is Open (`REFERENCES.md` §12). A value with these links can't be copied out of its array, only referenced in place.
+3. **Pool links**: `T&<u32 in arr>` stores an offset from the start of `arr`, a static grow-only array, so values holding them can be copied anywhere (Goose's pool-relative references). The built-in `pool<T>` (§3.5) isn't such an array.
 
-Links and references in fields can point only into arrays that never remove or move elements: grow-only and frozen arrays, and capped arrays whose cursor slot is `.` (`REFERENCES.md` §7).
+Links and references in fields can point only into arrays whose elements stay in their slots: grow-only and frozen arrays, and capped arrays whose cursor slot is `.`. References in fields may also point into pools (`REFERENCES.md` §7.4). A field may also refer to a whole array, as the library's writers do (`REFERENCES.md` §7.1).
 
 Plain indices (`i64`, or `u32` to save space) remain available as ordinary numbers.
 
@@ -539,12 +547,12 @@ first.heavier(2.5);
 - **No header and no hidden fields**: a class is exactly as large as its fields (§11).
 - **Methods live inside the class body.** Fields, constructors, methods and static functions appear in any order. There's no adding methods from outside; a free function can be called as `x.helper()`.
 - **Constructors are named `new`** inside the body. Call sites write `new Item(1, 0.0)`.
-- **`new` means "construct in place at the destination"**, never heap allocation (§3.3). It is only for classes: arrays, primitives and other values come from literals and declarations. Where the target type is known, the class name can be dropped: `items.push(new(1, 0.0))` (Proposed).
+- **`new` means "construct in place at the destination"**, never heap allocation (§3.3). It is only for classes: arrays, primitives and other values come from literals and declarations. Where the target type is known, the class name can be dropped: `items.push(new(1, 0.0))` (Decided).
 - **Implicit `this`**: fields are reachable by their bare names.
 - **`mut`** marks methods that change the object. Other methods are read-only, which the compiler checks.
 - **Visibility**: `public`, `private` (only this class's methods), and package-private when nothing is written. There is no `protected`, since there are no subclasses.
 - **`static`** marks functions and fields with no instance.
-- **`==` compares fields** (Proposed). Values have no identity.
+- **`==` compares fields** (Decided). Values have no identity.
 - **Slot capabilities double as contracts**: a method with an append-only array parameter (`T[..>]&`) can't remove from it (§4.3).
 - **No inheritance**: `extends` is a compile error. Interfaces (§6.3) provide dynamic dispatch.
 
@@ -635,13 +643,13 @@ for (Shape& s : shapes) { total += s.area(); }
 ### 6.4 Resources and cleanup: no destructors (Decided)
 ```
 File out @failed = File.create(path);
-if (failed) { println("can't create ${path}"); return #1; }
-out.write(data);
-@failed = out.close();          // 1 if buffered data couldn't be written
+if (failed) { errprintln("can't create ${path}"); return #1; }
+@failed = out.write(data);
+if (!failed) { @failed = out.close(); }   // nonzero (IO, NO_SPACE) if buffered data couldn't be written
 
 File cfg @missing = File.open(configPath);
 if (missing) { return #1; }
-defer cfg.close();              // runs when this block ends, however it ends
+defer @_ = cfg.close();         // runs when this block ends, however it ends
 ```
 
 - **No destructors**, as in Goose. Nothing runs when a value's scope ends, so freeing stays one store with no per-element work, and every class can be copied. `delete` is reserved, and declaring `delete()` is an error that suggests `defer`.
@@ -650,11 +658,11 @@ defer cfg.close();              // runs when this block ends, however it ends
   - A deferred statement can't itself `return`, `break`, `continue` or write a status.
   - It doesn't run when the program stops (§7.6); this is Goose's `defer`.
 - **Failures are reported with the status** (§7): `File.create`, `write` and `close` fail with a code such as `status.NOT_FOUND`, `status.PERMISSION` or `status.IO`. A deferred call that can fail needs its status captured or discarded: `defer @_ = d.close();` (§7.3). For a file that was written, call `close()` and check its status.
-- **A `File` is a handle** (Proposed): a slot and a generation number in a table the runtime keeps, with the buffers in the runtime's own memory rather than in the value.
+- **A `File` is a handle** (Decided): a slot and a generation number in a table the runtime keeps, with the buffers in the runtime's own memory rather than in the value.
   - Copying a `File` copies the handle.
   - Closing it through one copy makes every copy's operations fail with `status.BAD_HANDLE`, instead of touching a descriptor that has since been reused.
-- **Backstop at exit** (Proposed): at normal exit, and when the program stops, the runtime flushes and closes every file still open, and reports any failure on stderr. A forgotten `close()` keeps a descriptor open until exit, but never loses data silently.
-- **A lint** (Proposed) warns when a local `File` may still be open at the end of the scope that opened it, with no `defer` closing it and no store that keeps it.
+- **Backstop at exit** (Decided): at normal exit, and when the program stops, the runtime flushes and closes every file still open, and reports any failure on stderr. That includes an earlier failed write by `print`, `println`, `errprint` or `errprintln` (§4.13), which also makes the exit status 1 when it would otherwise be 0. A forgotten `close()` keeps a descriptor open until exit, but never loses data silently.
+- **A lint** (Decided) warns when a local `File` may still be open at the end of the scope that opened it, with no `defer` closing it and no store that keeps it.
 - There's no `finalize()` and no `with` statement.
 
 ### 6.5 Overloading (Decided)
@@ -688,7 +696,7 @@ i64 m @bad2 = i64.parse(s, 16);     // parse(string, i64): base 16
   4. The chosen candidate fits every argument at least as well as every other candidate does, and some argument better. If no candidate does, the call is ambiguous: a compile error that lists the candidates and suggests a cast.
   5. A non-generic candidate beats a generic one that fits equally well.
 - **Static types decide**: a `Shape&` argument calls the `Shape&` overload even when it refers to a `Circle`. Dynamic dispatch comes only from interface methods (§6.3).
-- **Overloads must differ in a parameter's type.** Differing only in `&`, `?`, an array parameter's slots, the return type or the parameter names is a compile error, since one call could fit both: `f(Item x)` beside `f(Item& x)` is an error.
+- **Overloads must differ in a parameter's type.** Differing only in `&`, `?`, an array parameter's slots, the return type or the parameter names is a compile error, since one call could fit both: `f(Item x)` beside `f(Item& x)` is an error. A slice and an array are different kinds, so `f(string)` beside `f(u8[..>]&)` is allowed, and a buffer argument calls the second, its exact match.
 - **Generic bodies choose once, against their bounds** (§10). An argument of type `T` fits a parameter of type `T`, or a generic parameter whose bound `T` satisfies, but never one overload per number type. So `<T implements number> void emit(JsonWriter& w, T x) { w.write(x); }` is an error: no single `write` takes every `number`.
 - **Lambdas carry their types** (§9.3), so a lambda fits a `func` parameter only when the types are the same, and overloads on function types are chosen like any others.
 - **Overloads should do the same thing for different inputs.** Different behaviour gets a different name, so `sort(less)` and `sortBy(key)` stay apart (`STDLIB.md` §7.1).
@@ -752,7 +760,7 @@ if (err == status.EMPTY) { ... }
 - **`err` is always a `u8` and needs no type.**
   - In a declaration (`Item x @err = a.pop();`), it is declared along with `x`.
   - In an assignment (`x @err = ...`, `@err = ...`), it must already exist.
-  - `u8 err = @a.pop();` declares a status on its own (Proposed; `GRAMMAR.md` §5, §6).
+  - `u8 err = @a.pop();` declares a status on its own (`GRAMMAR.md` §5, §6).
 - **Unsigned integers work as conditions** (§9.4), so `if (err)` tests whether the call failed.
 - **`while (T x : call)` repeats a call until its status is nonzero** (§9.4).
 - **A bare call in a condition tests its value**; `@` in front tests its status.
@@ -767,7 +775,7 @@ if (err == status.EMPTY) { ... }
   func(i64, i64 => i64) first = (i64 a, i64 _) => a;   // a parameter that isn't used
   ```
   - It declares nothing and has no type, so it can be assigned a value of any type, any number of times.
-  - It works as an assignment target, a status destination, a parameter name and a for-each variable (`for (var _ : items) { n++; }`).
+  - It works as an assignment target, a status destination, a parameter name, a destructuring target, a for-each variable (`for (var _ : items) { n++; }`) and a repeat-loop variable.
   - Reading it, as in `if (_)` or `x = _`, is a compile error. So are compound assignments such as `_ += 1`, which would read it.
   - Only a lone `_` is special: `_count` and `my_value` are ordinary names.
 
@@ -781,7 +789,7 @@ if (err == status.EMPTY) { ... }
 - **The standard library returns the zero value on failure**: `0`, `false`, an empty view, or the zero value of a class.
 - A stricter form that scopes `x` to the success branch is Open (§17).
 
-### 7.6 Bugs stop the program (Proposed)
+### 7.6 Bugs stop the program (Decided)
 With no exceptions, failures that are bugs rather than expected outcomes stop the program:
 - integer overflow, `x / 0`, `x % 0`, and `MIN / -1`;
 - an out-of-range `a[i]`;
@@ -799,7 +807,7 @@ The explicit alternatives remain for code that wants another outcome:
 
 **Closed pipes**: writing to stdout after the reading end has closed, as in `zink run tool.zn | head`, ends the program quietly, the way standard Unix tools do. The shell sees the usual SIGPIPE status. Writing to other files and pipes fails with `status.BROKEN_PIPE` instead.
 
-### 7.7 Named codes (Decided; names Proposed)
+### 7.7 Named codes (Decided)
 Status codes follow Linux's `errno` numbers, with Zinkite's own codes from 192 up and a program's own from 224 up. So an operating-system error passes through unchanged, and `status.message(code)` can use the system's own description (`strerror`) for it.
 
 ```
@@ -858,7 +866,7 @@ if (err) {
   | `OUT_OF_DATE` | 199 | A window's surface changed, so the swapchain must be rebuilt (`STDLIB.md` §10.6) |
 
 - **The numbers are Linux's generic table**, which x86-64, AArch64 and RISC-V share. A port to a system with other numbers would translate its errors into these.
-- **Exit statuses**: a status passed up from `u8 main` becomes the exit status. Common codes don't collide with the shell's special values (126, 127, and 129–192 for death by signals 1–64). Zinkite's own codes start at 192, which overlaps only signal 64, one that programs rarely receive. Scripts that check particular exit codes should still return fixed numbers of their own.
+- **Exit statuses**: the value `u8 main` returns becomes the exit status. Common codes don't collide with the shell's special values (126, 127, and 129–192 for death by signals 1–64). Zinkite's own codes start at 192, which overlaps only signal 64, one that programs rarely receive. Scripts that check particular exit codes should still return fixed numbers of their own.
 - **A program's own codes** (224–255) have no built-in description: `status.message` gives "Error 230" for them.
 - One status can say why a call failed, but not carry details such as a file name. The caller writes the message, and it knows the path anyway.
 
@@ -868,7 +876,7 @@ if (err) {
 
 ### 8.1 Syntax roles
 - **`#`** means "decided by the compiler" at the start of a line: settings directives and conditional compilation, resolved before code generation. After `return`, `#` writes the call's status (§7.2). The lexer tells them apart by position.
-- **`@`** reads a call's status (§7.3). Annotations, which `@` was reserved for, are dropped; none had been defined (Proposed).
+- **`@`** reads a call's status (§7.3). Annotations, which `@` was reserved for, are dropped; none had been defined (Decided).
 - **Runtime operations are ordinary functions**, never sigils.
 - **`$`** is used for string interpolation, and in array types to mark the chunked index (§4.1). **`%`** stays the modulo operator.
 
@@ -893,11 +901,11 @@ Rules:
 - **Precedence: host API > build flag (e.g. `--max_memory_mb=512`) > directive > default.**
 - Embedded scripts usually have no `main`, so the host sets these through the C API. If a loaded script has its own directives, the host's settings win and the compiler warns.
 
-Setting names (Proposed):
+Setting names:
 
 | Directive | Values | Default | Meaning |
 |---|---|---|---|
-| `#max_memory_mb` | integer | none | Ceiling on memory committed to data stacks; exceeding it stops the program (§7.6) |
+| `#max_memory_mb` | integer | none | Ceiling on memory committed to data stacks; exceeding it stops the program (§7.6). How it is enforced without a check on growth is Open (§17) |
 | `#data_stack_gb` | integer | 64 | Address space reserved per data stack (not memory) |
 
 ### 8.3 `#if` (Decided)
@@ -933,15 +941,15 @@ src/
 ```
 
 - **File order**: shebang, directives (entry file only, §8.2), `package`, imports, declarations.
-- **One public top-level class or interface per file**, named after the file: `MyArray.zn` holds `public class MyArray`. A file may also hold non-public declarations, visible only inside its package.
+- **One public top-level class, interface or enum per file**, named after the file: `MyArray.zn` holds `public class MyArray`. A file may also hold non-public declarations, visible only inside its package.
 - **No `package` line** puts the file in the unnamed package. That is meant for single-file scripts; as in Java, named packages can't import from it.
-- **The source root is inferred from the entry file**: `zink run src/com/example/app/Main.zn` containing `package com.example.app;` gives the root `src/`. A `package` line that doesn't match the path is an error. Extra roots for libraries come from a `--source-path` flag (Proposed).
+- **The source root is inferred from the entry file**: `zink run src/com/example/app/Main.zn` containing `package com.example.app;` gives the root `src/`. A `package` line that doesn't match the path is an error. Extra roots for libraries come from a `--source-path` flag.
 - **Visibility**: `public`, `private`, and package-private when nothing is written (§6.1).
 - **`vendor.*` is reserved** for bindings to third-party C libraries that ship alongside the standard library, such as GLFW, SDL3, OpenGL and Vulkan (`STDLIB.md` §10.6).
 - **`zink.*` is reserved** for the standard library. `zink.lang` is imported into every file automatically (`print`, `println`, `errprint`, `errprintln`, the standard streams and the other built-ins). `STDLIB.md` lists every package and its contents.
 - **Circular dependencies between packages are allowed.** The compiler sees the whole program at once, which monomorphization needs anyway (§10).
 
-### 8.5 Imports (Decided; details Proposed)
+### 8.5 Imports (Decided)
 ```
 package com.example.app;
 
@@ -960,7 +968,7 @@ public class Main {
 
 Rules:
 - **`as` renames a declaration for this file only.** The original simple name isn't imported: after `import com.example.MyArray as ExampleArray;`, a bare `MyArray` means whatever it would mean without that line.
-- **Two imports can't bring in the same name.** `import com.example.util.MyArray;` together with `import com.example.MyArray;` is an error, and the message suggests `as`. An import that clashes with a declaration in the same file is also an error.
+- **Two imports can't bring in the same name.** `import com.example.util.MyArray;` together with `import com.example.MyArray;` is an error, and the message suggests `as`. An import that clashes with a declaration in the same file is also an error. Names that come automatically from `zink.lang` are different: a declaration of the program's own hides the `zink.lang` one wherever it is visible, as a class of your own hides `java.lang`'s in Java (Decided).
 - **Wildcards work as in Java**: an explicit import or alias wins over a wildcard, and a name provided by two wildcards is an error only where it's used.
 - **Only public declarations can be imported** from another package.
 - **Unused imports** are a warning.
@@ -973,7 +981,7 @@ A file doesn't need a class. A file whose top level has methods and fields but n
 #!/usr/bin/env zink
 #max_memory_mb 64
 
-i32 total = 0;
+i64 total = 0;
 
 void main(string[.] args) {
     total = args.len;
@@ -983,7 +991,7 @@ void main(string[.] args) {
 
 - **The compiler wraps the file in a hidden class.** Its top-level methods and fields become `static` members of that class, so they work exactly like static members everywhere else.
 - **Entry point**: `main()` or `main(string[.] args)` at the top level, returning `void` or `u8`. Directives (§8.2) go at the top of the file as usual.
-- **Exit status** (Proposed):
+- **Exit status** (Decided):
   - `u8 main(...)` returns the status, and falling off its end returns 0, as in C;
   - `void main(...)` always exits with 0;
   - the status is a `u8` because Linux keeps only its low 8 bits. With a wider type, `return 256;` would reach the shell as 0, which means success;
@@ -1019,7 +1027,7 @@ void main(string[.] args) {
 | interface references (`Shape&`) | 16 | |
 | slices `T[:]`, `string` | 16 | |
 
-- **One spelling per type.** There are no aliases: `long`, `short`, `byte` and `double` are compile errors that suggest the new name, since Java programmers will type them out of habit. `int` and `float` name generic bounds (§10.1), not types, so `int x = 5;` is an error too, and suggests `i64` or `i32`.
+- **One spelling per type.** There are no aliases: `long`, `short`, `byte` and `double` are compile errors that suggest the new name, since Java programmers will type them out of habit. `int` and `float` name generic bounds (§10.1), not types, so `int x = 5;` is an error too, and suggests `i64`.
 - **Lengths, indexes and cursor positions are `i64`.** Indexes are signed, so a computed index that goes negative is out of range instead of wrapping (§4.10).
 - **Literals take their type from where they are used**: `u8 b = 200;` is a `u8`, and `f64 x = 0.5;` an `f64`. With nothing to go by, an integer literal is an `i64`, the type of lengths and indexes, and a floating-point literal an `f64` (Decided). So `var i = 0;` is an `i64`, as are `"${1 << 40}"` and `max(3, 5)`. A suffix gives another type where it's needed: `255u8`, `1.5f32` (Decided, as in Rust). A literal that doesn't fit its type is a compile error.
   - **The type flows into arithmetic** (Decided). In `i64 big = 100000 * 100000;`, both literals are `i64`, so the multiplication is done in 64 bits instead of overflowing. In `a.len * 2`, the `2` takes the type of the other operand.
@@ -1126,7 +1134,7 @@ enum Color { RED, GREEN, BLUE }
   - An assignment can't be used directly as a condition: `if (x = 0)` is an error, since with integers as conditions it is usually a typo for `==`.
 - **For-each** is Java's too, and works over:
   - every array kind and slice, in logical order;
-  - a `hashmap`, in insertion order (§4.14);
+  - a `hashmap` or a `hashset`, in insertion order (§4.14), and a `pool`, over its live slots (`STDLIB.md` §7.5);
   - an **iterator**: any value with a `mut T next()` method that returns a nonzero status when nothing is left (Decided);
   - any value whose class has an `iterator()` method returning an iterator, as with Java's `Iterable`: `for (Node& n : tree)`.
 
@@ -1176,9 +1184,10 @@ enum Color { RED, GREEN, BLUE }
   - **Iterators are lazy**, so iterating doesn't build an array first.
   - **The usual reference rules apply**: an iterator over `text` holds a view into it, so removing from `text` inside the loop is a compile error (`REFERENCES.md` §9).
   - **For generic code**, `zink.lang` declares `interface Iterator<T> { mut T next(); }`, so a function can take `<I implements Iterator<T>>`.
-  - **Library iterators** (names Proposed): `s.codePoints()`, `s.lines()` and `s.splitBy(sep)`. The eager `s.split(sep)` still returns a `string[..>]` when an array is wanted.
-  - Goose has no iterator protocol; it iterates through functions that take a lambda. Those stay available in the library too (`filter`, `map`, `sort`, `eachSplit`).
+  - **Library iterators**: `s.codePoints()`, `s.lines()` and `s.splitBy(sep)`. The eager `s.split(sep)` still returns a `string[..>]` when an array is wanted.
+  - Goose has no iterator protocol; it iterates through functions that take a lambda. Those stay available in the library too (`filter`, `map`, `sort`, `retain`).
 - **`switch`** has only the arrow form: no fall-through and no `break`. The case arrow is `=>`, as for lambdas (§9.3). A case can list several values (`case 1, 2 =>`). It works on integer types (character literals included), `string` and enums, as a statement or as an expression. As an expression it must cover every case, with `default` or every enum constant.
+- **`yield`** gives the value of a `switch` expression from a block arm, and a **label** names a loop for `break` and `continue`: `outer: for (...) { ... break outer; }` (`GRAMMAR.md` §5).
 - **Enums** are Java-style lists of constants, stored in static data. Enums with fields, and Goose-style variants with payloads, are Open (§17).
 
 ### 9.5 Multiple results (Decided)
@@ -1209,7 +1218,7 @@ enum Color { RED, GREEN, BLUE }
 
 ## 10. Generics
 - **Everything is monomorphized.** Values of different classes have different sizes, so each instantiation is compiled separately with sizes and offsets hardcoded. Goose does the same.
-- **Angle brackets** (`map<K, V>`) are kept (Proposed). Slot types inside them (`map<string, Item[..>]>`) work because `[...]` in a type is lexed on its own (§4.12).
+- **Angle brackets** (`hashmap<K, V>`) are kept (Decided). Slot types inside them (`hashmap<string, u8[..>16]>`) work because `[...]` in a type is lexed on its own (§4.12).
 - **Array parameters are specialized per layout** (§4.3).
 - **Compile-time constants as type arguments** are needed for capped arrays (`T[.N]`); the syntax is Open (§17).
 - No runtime type information.
@@ -1217,7 +1226,7 @@ enum Color { RED, GREEN, BLUE }
   - Instantiations get internal names users can't type, so they never collide with user declarations. Errors show the written form.
   - Nested instantiations are cached by generic and type arguments.
   - For recursive types, the instance is registered in the cache before its body is expanded.
-  - Runaway instantiation (`Foo<T>` using `Foo<list<T>>`) is stopped by a depth limit, or rejected.
+  - Runaway instantiation (`Foo<T>` using `Foo<Pair<T, T>>`) is stopped by a depth limit, or rejected.
   - Only what is used is instantiated. The compiler sees the whole program (no dynamic loading).
   - Generic bodies are type-checked once, against their declared bounds.
 
@@ -1303,7 +1312,7 @@ There is no allocator, no counting and no collector. With dead-code elimination 
 - **No unwinding.** There are no exceptions: failures are status codes (§7), and bugs stop the program (§7.6). No unwind tables, landing pads or per-call error checks are needed.
 - **Stack overflow**: the call stack and every data stack end in an unmapped guard page. Touching one stops the program, through a signal handler running on a separate small stack. Functions with frames larger than a page touch each page in order (stack probes), so a large frame can't jump past the guard page.
 
-### 12.4 Dispatch (Proposed)
+### 12.4 Dispatch (Decided)
 - Direct calls for everything whose type is known, which is every call except through an interface reference.
 - One method table per (class, interface) pair, in static data. An interface call loads the function pointer from the reference's table.
 
@@ -1314,7 +1323,7 @@ There is no allocator, no counting and no collector. With dead-code elimination 
   2. **Own backend**: start with x86-64, every IR value in a stack slot with fixed instruction templates, then linear-scan register allocation. Full control, most work.
   3. **QBE**: small with good code, but emits assembly text and needs `as` and `ld`, which undercuts emitting machine code directly.
 - Producing the executable: the system linker (`ld`/`lld`), or writing the ELF directly (static, no libc, raw syscalls; the `object` crate handles the byte layouts). The runtime is compiled once to a relocatable object that the compiler embeds and applies relocations for.
-- Calling convention: System V ABI on Linux x86-64 and ARM64. The status is an extra return register (Proposed).
+- Calling convention: System V ABI on Linux x86-64 and ARM64. The status is an extra return register.
 - Debug info (DWARF via `gimli`): not needed on day one.
 
 ---
@@ -1352,7 +1361,7 @@ There is no allocator, no counting and no collector. With dead-code elimination 
 - Calling conventions shared with the C runtime.
 - Debug info (DWARF), eventually.
 
-### 14.3 Build order (Proposed)
+### 14.3 Build order (Decided)
 1. **Write the reference rules** as a specification before any compiler code. They decide what is safe, and Goose's author credits this kind of spec work for much of that language's quality. Drafted: `REFERENCES.md`.
 2. **Prototype the array layouts in C** and benchmark them (started: `bench/gap_buffer.c`, §15).
 3. **Typed IR**: layouts, slot arrays, references with roots, the status channel; monomorphization done before the IR.
@@ -1460,20 +1469,18 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 
 ## 17. Open decisions
 
-**Syntax**
-- **Annotations**: `@` now reads statuses. Proposed: no annotations (§8.1).
-
 **Memory and references**
 - **Reference rules**: the open questions in `REFERENCES.md` §12, such as following roots per program point and choosing data stacks at run time.
 - **Several growable fields in one class**, as in Goose's root structs (`REFERENCES.md` §8.2).
 - **Removing elements inside a for-each by value** over the same array (§9.4).
+- **Enforcing `#max_memory_mb`** when growth never checks a capacity (§3.1, §8.2): commit memory in chunks from the page-fault handler and stop at the ceiling, which costs nothing on the fast path, or size each stack's reservation.
 - **Threads**: Goose compiles each worker as a separate program with its own memory and typed queues between them.
 
 **Arrays**
-- **Hash maps**: literals with entries (`["a": 1]`); `m[key]` indexing; a library `sortedmap` as a B-tree in a pool (§4.14).
+- **Hash map literals** with entries (`["a": 1]`), and `m[key]` indexing (`GRAMMAR.md` §8).
+- **Making a window** (`T[<.<]`): the type is in §4.2, but nothing creates one yet.
 - `*` on unbounded editable arrays (`T[..>*]`) (§4.6).
 - Slices of arrays whose elements aren't stored in order: cursor, chunked (`$`), reversed (`>..`) and ring-buffer capped arrays. Logical order is the natural choice for what a slice shows (§4.3, §4.10).
-- **A lint for unused capabilities** (Proposed): a warning when an array's type allows something the code never does. The cursor matters most: `T[~]` is the shortest spelling, but its cursor slot makes every read take two loads (§4.3). The warning would suggest `T[~.~]` when the cursor is never used. It could also suggest adding `$` to a large array whose edits jump around, and removing it when edits stay in one place.
 - Multi-dimensional arrays (the previous design had `array<int, 2>` with `m[i, j]`).
 - Compile-time constants as type arguments, for caps (§10).
 
@@ -1484,15 +1491,14 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 - **Ordering by fields**: whether a class that says `implements ordered` without writing `compareTo` gets field-by-field order, like Rust's `derive(PartialOrd)` (§10.1).
 
 **Errors**
-- Error reasons: `lastError()`, error codes as values, or both (§7.7).
 - A stricter form of `x @failed = f();` that scopes `x` to the success branch (§7.5).
 - Whether to add the `flag` mark-and-continue statement later (Appendix A.8).
-- Integers narrower than a byte (`i4`, `u4`): if wanted, Zig's approach, with any width from 1 to 64 bits that is packed only inside packed classes and arrays, which then can't hand out references (§9.1).
 
 **Other**
 - Default formatting of class values in `${...}` (§4.13).
+- Integers narrower than a byte (`i4`, `u4`): if wanted, Zig's approach, with any width from 1 to 64 bits that is packed only inside packed classes and arrays, which then can't hand out references (§9.1).
 - Stored closures that capture (§9.3); method references.
-- Static imports and aliases for whole packages (§8.5); the library search path.
+- Static imports and aliases for whole packages (§8.5); the library search path (§8.4).
 - Backend route: Cranelift first (after the VM), own backend later; system linker vs. writing the ELF directly.
 - Embedding model: precompiled bytecode, AOT `.so` plugins, or none; the host C ABI shape.
 - Smaller syntax items not in the grammar yet (map literals, `?.`, `assert`, `#elif` and others): `GRAMMAR.md` §8.
@@ -1503,7 +1509,7 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 - **C layout for classes**: a way to fix a class's field order, alignment and padding to C's, and to GLSL's `std140` and `std430` rules for uniform and storage buffers, so a slice of it can be uploaded as it is.
 - **Vector and matrix types with arithmetic**, since there is no operator overloading: built-in types such as `f32x4`, or GLSL-like `vec3` and `mat4`, as Odin and Zig have. Otherwise `pos.add(vel.mul(dt))` is the only spelling.
 - **Embedding a file at compile time**, such as a SPIR-V shader, into the binary.
-- **Where `vendor.*` packages come from**: shipped with the compiler, or fetched and built on first use, as Goose's blessed packages are. This ties in with the library search path (§8.5).
+- **Where `vendor.*` packages come from**: shipped with the compiler, or fetched and built on first use, as Goose's blessed packages are. This ties in with the library search path (§8.4).
 
 ---
 
@@ -1523,7 +1529,7 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 9. Methods the slots don't allow are compile errors: `pop` on `T[..>]`, `pushFront` on `T[..~]`, `insert` when the cursor slot is `.`, any editing method on a frozen array. Each operator needs the same capability as its method.
 10. `*` with a numeric cap is a compile error; `T[>.>]` as a class field is a compile error; capped arrays nest inline in classes.
 11. A function with a `T[..>]&` parameter accepts a `T[..~]` and a `T[>~>]`, is compiled once per layout, and can't call `pop` on the parameter.
-12. `push` on a full capped array fails with `status.FULL` and leaves the array unchanged; `pop` on an empty array fails with `status.EMPTY` and returns the zero value.
+12. `push` on a full capped array fails with `status.FULL`, leaves the array unchanged, and returns a reference to the last element; a cap of 0 is a compile error; `pop` on an empty array fails with `status.EMPTY` and returns the zero value.
 
 **Operators**
 13. `a +> 1 +> 2 +> 3` appends in order; `a ->` returns the last element and `a -<` the first; `+^`, `-^` and `^-` match `insert`, `removeBefore` and `removeAfter`.
@@ -1638,13 +1644,13 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 96. `d < c` is true for `i32 d = -1` and `u32 c = 0`; comparisons of `u64` with `i64` are right at both types' limits; `a[h]` with a `u64` `h` above `i64.MAX` is out of range.
 97. `sum` with `<T implements number>` works for every number type; `%` in its body is a compile error; `T total = 0;` compiles and `T k = 1000;` doesn't; `(T) 1000` is a compile error only in the `i8` and `u8` instances.
 98. `ordered x;`, `number& r` and `int[..>] a` are compile errors; a declaration named `ordered` or `uint` is a compile error; a class can't implement `number`.
-99. A class that implements `ordered` with `compareTo` supports `<`, `<=`, `>` and `>=` in plain and generic code, and without `compareTo` it is a compile error; `"apple" < "banana"`, `false < true`, and enum constants in declaration order hold.
+99. A class that implements `ordered` with `compareTo` supports `<`, `<=`, `>` and `>=` in plain and generic code, and without `compareTo` it is a compile error (until §17 decides on ordering by fields); `"apple" < "banana"`, `false < true`, and enum constants in declaration order hold.
 100. `sort` and `max` over `f64` values that include NaN put NaN last and order the other values correctly; `hashset<f64>` and a `hashmap` keyed by a class with an `f64` field are compile errors.
 
 **Repeat loops**
 101. `while (Pending p : todo ->)` pops every element once, in stack order, and doesn't run the body after the failing pop; `continue` makes the next call, and `break` makes none.
 102. `while (DirEntry e : d.next(names))`, a `T&` binding from a `mut T& next()`, and a destructured tuple result compile; `while (var it : s.lines())`, and a source that isn't a call or an array operator, are compile errors.
-103. `while (string line : stdin.nextLine(buf))` compiles although `nextLine` clears `buf`; storing `line` in an array declared before the loop is a compile error under rule R.
+103. `while (string line : stdin.nextLine(buf))` compiles although `nextLine` clears `buf`; storing `line` in an array declared before the loop is a compile error, since `buf` is removable and a view into it can't be stored in an array (`REFERENCES.md` §5.3).
 104. `for (string l : lines)` over a `LineIterator` variable is a compile error that suggests `while (string l : lines.next())`; `for (string l : text.lines())` compiles.
 105. After `while (JsonEvent e : r.next()) @why { ... }`, `why` is `status.END` for a complete input, the error's code for a malformed one, and 0 after a `break`; `while (a ? b : c)` parses as a condition.
 
@@ -1668,6 +1674,11 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 118. A writable view of a string literal, of a `T[:]` or of a plain parameter is a compile error; `.=` rebinds a `u8[:]&` to another range; removing from an array while a writable view of it is live is a compile error.
 119. `.=` on a value variable is a compile error that suggests `=`; `var& c = counts.getOrAdd(w, 0); c++;` changes the map's value.
 120. `println(out)`, `line.trim()`, `new JsonParser(text)` and `cmd == "quit"` on `u8` arrays compile and view them; `var c = out;` copies; `string s = buf;` followed by `buf.clear()` while `s` is still used is a compile error; passing a cursor array where a `string` is expected is a compile error; with `f(string)` and `f(u8[..>]&)`, `f(buf)` calls the second.
+121. `hashmap<string, u8[..>16]>` and `Pair<string, Pair<i32, i32>>` parse: a `>` inside slot brackets belongs to the slots, and `>>` closes two type-argument lists.
+122. A bare `println(...)` draws no dropped-status warning; when its write fails, the program reports it on stderr at exit and exits with status 1.
+123. `clear()` through a `T[..>]&` parameter is a compile error; through a `T[..~]&` it compiles.
+124. A program's own `sum` or `splitFirst` hides the `zink.lang` one, with no error; two imports of the same name are still an error.
+125. With `string w = a;`, `w = b;` makes `w` view `b`; with `u8[:]& v = buf[0:3];`, `v = "abc";` copies three bytes into `buf`.
 
 ---
 
@@ -1743,5 +1754,5 @@ The pasted notes wrote `T[start.middle.end cap]`, with dots between the slots an
 Most common types are spelled the same either way (`T[..>]`, `T[..~]`, `T[.~.]`, `u8[..~16]`). The ones that changed include `T[>.>]` (was `T[>..>]`), `T[>~>]` (was `T[>.~.>]`), `T[~]` (was `T[~.~.~]`) and the frozen `T[.]` (was `T[..]`).
 
 ### A.14 A one-bit status
-The pasted notes gave every call a one-bit side output, 0 or 1, read as a `bool`. Replaced on 2026-11-18 by a `u8` status (§7), so a failed call can also say why: "no such file" or "permission denied", which CLI tools need for their messages. A status passed up from `u8 main` becomes the exit status. To keep `if (failed)` working, unsigned integers became usable as conditions (§9.4). A separate `status` type with that one property was considered and found unnecessary.
+The pasted notes gave every call a one-bit side output, 0 or 1, read as a `bool`. Replaced on 2026-11-18 by a `u8` status (§7), so a failed call can also say why: "no such file" or "permission denied", which CLI tools need for their messages. The value `u8 main` returns becomes the exit status. To keep `if (failed)` working, unsigned integers became usable as conditions (§9.4). A separate `status` type with that one property was considered and found unnecessary.
 

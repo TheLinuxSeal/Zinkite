@@ -34,7 +34,7 @@ Ordered by how often they came up.
 
 1. **Constructors for plain data classes.** Every data class (`Row`, `Options`, `Count`, `Pending`, `DirTotal`) needed a hand-written constructor that assigns each field in turn. DESIGN.md's own examples (`new Order(1001, "alice", ...)`) already assumed one existed.
    Decided: a class that declares no constructor gets one taking every field without an initializer, in declaration order (DESIGN §6.2). The examples now use it.
-2. **Exit status.** Nothing in the design set it, so the examples used `return #1;` from `main`. Proposed: `u8 main(...)` returns the status, `void main` exits with 0, and `exit(code)` ends the program from anywhere (DESIGN §8.6). The examples now return `1`.
+2. **Exit status.** Nothing in the design set it, so the examples used `return #1;` from `main`. Decided: `u8 main(...)` returns the status, `void main` exits with 0, and `exit(code)` ends the program from anywhere (DESIGN §8.6). The examples now return `1`.
 3. **Writing to stderr.** Decided: `errprint` and `errprintln`, shorthand for `stderr.print` and `stderr.println` (DESIGN §4.13).
 4. **The type of integer literals.** Every loop is written `for (i64 i = 0; ...)`, because lengths and indexes are `i64` while `var i = 0` would have been an `i32`. Decided: with nothing else to decide it, an integer literal is an `i64`, so `var i = 0` is an `i64` (DESIGN §9.1).
 5. **Ignoring a bit on purpose.** `f64 parsed @notNumber = f64.parse(key);` declared a variable only to stop the dropped-bit warning, and the variable was then never read. Decided: `_` can be assigned anything and never read, so this is now `num @_ = f64.parse(key);` (DESIGN §7.3).
@@ -43,8 +43,8 @@ Ordered by how often they came up.
 7. **Maps and the one-growable-field rule.** Decided: a built-in `hashmap<K, V>`, which the compiler gives two data stacks, like a cursor array (DESIGN §4.14). The original problem: a hash map needs a growable table, and rehashing builds a new table while the old one is still live. With one growable field per class (REFERENCES §8.2), the standard library's `map` must either copy every entry twice when it grows or be allowed two growable fields.
    Root structs are no longer needed for maps. They stay open for user classes that need several growable fields (REFERENCES §12).
 8. **For-each over library types.** Decided: for-each works over iterators, values with a `mut T next()` method that return a nonzero status at the end, so `codePoints()`, `lines()` and `splitBy()` are lazy (DESIGN §9.4). The original question: `counts` (a map), `s.codePoints()` and `text[:].split('\n')` were all iterated with for-each.
-   **Options**: they return arrays, built on a data stack, or they use an iteration interface for classes (Open in DESIGN §17). A lazy `codePoints()` and `split()` would avoid building an array just to loop over it.
-9. **Two results from one function.** Decided: tuple results, `(string, string) splitFirst(string s)`, destructured with `(string cmd, string arg) = splitFirst(line[:]);` (DESIGN §9.5). `linebuf` now uses them. The original problem: `linebuf` scans each line twice, once in `firstWord` and once in `afterFirstWord`, because a function returns one value plus a status. A two-field class works, and it would be easy with decision 1.
+   **Options**: they return arrays, built on a data stack, or they use an iteration interface for classes (then Open). A lazy `codePoints()` and `split()` would avoid building an array just to loop over it.
+9. **Two results from one function.** Decided: tuple results, `(string, string) splitFirst(string s)`, destructured with `(string cmd, string arg) = splitFirst(line);` (DESIGN §9.5). `linebuf` now uses them. The original problem: `linebuf` scans each line twice, once in `firstWord` and once in `afterFirstWord`, because a function returns one value plus a status. A two-field class works, and it would be easy with decision 1.
 10. **Where interpolated temporaries live.** `out.append("${text[i].utf8()}")` passes freshly built text to a `string` parameter.
     Decided (DESIGN §4.11): outputs and `append` get the parts written directly, so this example needs no temporary at all. Variables get the text built in place. Anything else gets an exact-size temporary on a scratch data stack, released at the end of the statement. Keeping a view of a temporary is a compile error that suggests `u8[.]`.
 
@@ -70,11 +70,11 @@ This is what the four programs needed. `STDLIB.md` now designs all of it, and mo
 | Area | Used |
 |---|---|
 | Output | `println`, `errprintln`, `print` |
-| Input | `stdin.readAll(u8[..>]&)`, `stdin.readLine(u8[..>]&)` |
+| Input | `stdin.readAll(u8[..>]&)`, `stdin.readLine(u8[..>]&)`, now `stdin.nextLine(u8[..~]&)` |
 | Files | `File.readAll(string, u8[..>]&)`, `File.open`, `File.create`, `close` |
 | Directories | `Dir.open(string)`, `d.next(u8[..>]&)` returning a `DirEntry { string name; bool isDir; i64 size; }`, `d.close()` |
-| Text | `split(u8)`, `lines()`, `splitBy(u8)`, `codePoints()` (the last three are iterators), `compareTo`, `==`, `append(string)`, slices |
+| Text | `split(string)`, `lines()`, `splitBy(string)`, `codePoints()` (the last three are iterators), `compareTo`, `==`, `append(string)`, slices |
 | Numbers | `i64.parse`, `f64.parse`, `pad(w)`, `utf8()` |
-| Arrays | `push`/`+>`, pop/`->`, `clear`, `sort(lambda)`, `reverse`, `len` |
+| Arrays | `push`/`+>`, pop/`->`, `clear`, `sort(lambda)`, `partialSort`, `reverse`, `len` |
 | Cursor arrays | `+^`, `-^`, `^-`, `move`, `seekStart`, `seekFromEnd`, `cursor` |
-| Maps | `hashmap<K, V>` (built in): `getOrAdd(key, default)` returning `V&`, for-each over entries with `key` and `value` |
+| Maps | `hashmap<K, V>` (built in): `getOrAdd(key, initial)` returning `V&`, for-each over entries with `key` and `value` |

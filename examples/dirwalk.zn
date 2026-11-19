@@ -35,7 +35,7 @@ void main(string[.] args) {
             errprintln("dirwalk: can't open ${p.path}: ${status.message(cantOpen)}");
             continue;
         }
-        defer d.close();                        // runs at the end of this iteration
+        defer @_ = d.close();                   // runs at the end of this iteration
 
         u8[..>] names = [];                     // this directory's names, freed at the end of the pass
         while (DirEntry e : d.next(names)) {    // e.name is a view into names

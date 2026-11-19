@@ -40,7 +40,7 @@ class LineBuffer {
         u8[..>] out = [];
         for (i64 i = 0; i <= text.len; i++) {
             if (i == text.cursor) { out +> '|'; }
-            if (i < text.len) { out.append("${text[i].utf8()}"); }
+            if (i < text.len) { @_ = out.append("${text[i].utf8()}"); }
         }
         println(out);
     }

@@ -1,7 +1,7 @@
 # Zinkite Reference Rules (draft)
 
-> Companion to `DESIGN.md` §3 and §5. This is the specification the compiler's safety checks are written against (DESIGN §14.3, step 1). It follows Goose's specification (v4 draft) wherever Zinkite has the same feature; §11 lists where it differs. Everything here is **Proposed** unless marked otherwise.
-> **Updated:** 2026-11-17. Revised to follow Goose on removal, variable-size values, data stacks and recursion, and to reuse cursor-array holes.
+> Companion to `DESIGN.md` §3 and §5. This is the specification the compiler's safety checks are written against (DESIGN §14.3, step 1). It follows Goose's specification (v4 draft) wherever Zinkite has the same feature; §11 lists where it differs. Everything here is **Decided** unless marked otherwise.
+> **Updated:** 2026-11-19. Revised to follow Goose on removal, variable-size values, data stacks and recursion, and to reuse cursor-array holes.
 
 ---
 
@@ -13,7 +13,7 @@
 
 The memory model gives part of this for free:
 - **Storage never changes type while it is allocated.** An array of `T` only ever holds `T`s, and a field only ever holds its own type.
-- **Nothing moves.** Growth never moves elements (DESIGN §3.1), and cursor arrays keep each element in the slot it was inserted into (DESIGN §4.3). That includes cursor arrays with a chunked index (`$`, DESIGN §4.1): only their index moves, so every rule here applies to them unchanged.
+- **Nothing moves.** Growth never moves elements (DESIGN §3.1), and cursor arrays on a data stack keep each element in the slot it was inserted into (DESIGN §4.3). A capped cursor array's small gap buffer does move elements, which L3 accounts for (§7.4). That includes cursor arrays with a chunked index (`$`, DESIGN §4.1): only their index moves, so every rule here applies to them unchanged.
 
 Five rules cover the rest:
 
@@ -47,7 +47,7 @@ There are **no aliasing or exclusivity rules**: two references to the same eleme
 
   Every variable outlives itself.
 - **Reference values**: `T&`, `T&?`, interface references (`Shape&`), slices (`T[:]`, including `string`, and writable views `T[:]&`), and links (§7). A **value that contains references** is a class value with reference fields, or an array of reference values, at any depth.
-- **Removable array**: an array on a data stack with `<` or `~` in any slot, so elements can be taken out of it. **Grow-only arrays** (`T[..>]`, `T[>..]`, `T[>.>]`) and frozen arrays aren't removable. **Capped arrays** (the `..k` forms) are stored inline and have their own rule (§5.4).
+- **Removable array**: an array on a data stack with `<` or `~` in any slot, so elements can be taken out of it. **Grow-only arrays** (`T[..>]`, `T[>..]`, `T[>.>]`) and frozen arrays aren't removable. **Capped arrays** (a number or constant after the slots) are stored inline and have their own rule (§5.4).
 
 ---
 
@@ -98,11 +98,11 @@ early.push(rects.push(new Rect(1.0, 2.0)));    // error: rects is declared after
 string longest(string a, string b) { return a.len >= b.len ? a : b; }
 
 u8[..>] outer = [];
-string w = outer[:];
+string w = outer;
 {
     u8[..>] inner = [];
     inner.append("inner text");
-    w = longest(outer[:], inner[:]);   // error: the result may be rooted at inner,
+    w = longest(outer, inner);         // error: the result may be rooted at inner,
 }                                        //   which doesn't outlive w
 ```
 
@@ -110,10 +110,10 @@ string w = outer[:];
 A variable's root set is the union of everything stored into it, or into any part of it, anywhere in its scope. So this is rejected, even though `w` is never used after the inner block:
 
 ```
-string w = outer[:];
+string w = outer;
 {
     u8[..>] inner = [];
-    w = inner[:];            // error: inner doesn't outlive w
+    w = inner;               // error: inner doesn't outlive w
 }
 ```
 
@@ -138,7 +138,7 @@ string longest(string a, string b) { return a.len >= b.len ? a : b; }
 void register(Shape&[..>]& all, Circle& c) { all.push(c); }
 // summary: c must outlive all; grows all
 
-void trim(i32[..~]& xs) { while (xs.len > 10) { xs ->; } }
+void trim(i32[..~]& xs) { while (xs.len > 10) { @_ = xs ->; } }
 // summary: removes from xs
 ```
 
@@ -157,7 +157,7 @@ void trim(i32[..~]& xs) { while (xs.len > 10) { xs ->; } }
 Nothing is written by the programmer. Error messages show the summary that caused them: "`longest(...)` may return a view rooted at its second argument, `inner`".
 
 ### 4.5 Compiled once
-Each function is compiled once, and the summaries are used only for checking. Goose instead compiles a function once per combination of roots, writability and destination stacks (Goose §7.7), and keeps summaries as well for removals and stores (Goose §5.1). A function that builds a value for its caller gets the destination stack as a hidden argument instead (§8.3).
+Each function is compiled once per array layout and generic instance (DESIGN §4.3, §10), never once per root, and the summaries are used only for checking. Goose instead compiles a function once per combination of roots, writability and destination stacks (Goose §7.7), and keeps summaries as well for removals and stores (Goose §5.1). A function that builds a value for its caller gets the destination stack as a hidden argument instead (§8.3).
 
 ---
 
@@ -180,18 +180,18 @@ Each function is compiled once, and the summaries are used only for checking. Go
 i32[..~] stack = [];
 stack +> 1 +> 2 +> 3;
 i32& top = stack[^1];
-stack ->;                    // error: top (bound on line 3) is used on line 5
+@_ = stack ->;               // error: top (bound on line 3) is used on line 5
 println("${top}");
 ```
 
 ```
 i32& top = stack[^1];
 println("${top}");
-stack ->;                    // fine: top isn't used after this
+@_ = stack ->;               // fine: top isn't used after this
 ```
 
 ### 5.3 Where references into removable arrays can be held
-- **Removable arrays**: references into one can be held only in local variables and parameters, never in fields, array elements or statics. The compiler can then see every reference that might still be used (Goose §5.2).
+- **Removable arrays**: references into one can be held only in local variables and parameters, never in fields, array elements or statics. The compiler can then see every reference that might still be used (Goose §5.2). A reference to a whole array, rather than into its elements, is different: it may be a field (§7.1).
 - **Grow-only and frozen arrays**: references into them can be stored anywhere rule S allows. For these arrays, `clear` and whole assignment are the only removals. The compiler records which fields and arrays hold references into each array, so rule R sees those holders too (Goose §5.1).
 
 ### 5.4 Capped arrays and pools
@@ -224,7 +224,7 @@ A value is **variable-size** when its size isn't fixed by its type: a frozen arr
 class Order { i32 id; u8[.*] customer; }
 
 Order o = new Order(1, "alice");
-string name = o.customer[:];
+string name = o.customer;
 o.customer = "bob";                // error: a variable-size field can't be assigned (V1)
 o = new Order(2, "alexander");     // fine on its own: rebuilds o (V2) ...
 println(name);                     // ... but this use makes it an error under rule R
@@ -237,7 +237,7 @@ println(name);                     // ... but this use makes it an error under r
 This settles DESIGN §5.4. There are three kinds of link.
 
 ### 7.1 References in fields
-A class may have `T&`, `T&?`, interface-reference and slice fields. A value of that class carries their roots (§3.1), so rule S applies to it everywhere. By §5.3, they can point only into grow-only, frozen or capped arrays, or into variables that aren't arrays. An array may hold references rooted at itself, so this also links elements of one array:
+A class may have `T&`, `T&?`, interface-reference and slice fields. A value of that class carries their roots (§3.1), so rule S applies to it everywhere. By §5.3 and §5.4, they can point only into the arrays L3 lists (§7.4), into pools, or into variables that aren't arrays. An array may hold references rooted at itself, so this also links elements of one array:
 
 ```
 class Node { i32 key; Node&? next; }
@@ -252,6 +252,8 @@ The costs:
 - a copy of such a value still points at the original's storage;
 - values with absolute references can't be saved as bytes.
 
+**A field may also refer to a whole array**, as the library's writers do (`STDLIB.md` §1.3, rule 11): a `u8[..>]&` field, for example. Rule S applies as to any reference, so the array must outlive the object. Growing the array through the field is growing that array, which rule G checks as it would a direct call, and a removal through it, such as `clear` through a `u8[..~]&` field, is a removal from that array under rule R.
+
 ### 7.2 Self-relative links
 `T&<i32>` stores a link as a signed byte offset from the field to its target, in either direction. `T&<i16>` and `T&<i8>` are 2- and 1-byte versions, and `T&<i32>?` uses offset 0 as null. This is Goose's self-relative reference, which Goose spells `T&<u32>`; its offsets are signed too (Goose §3.9).
 
@@ -261,7 +263,7 @@ class Node { i32 key; Node&<i32>? left; Node&<i32>? right; }   // 12 bytes
 Node[..>] tree = [];
 Node& root = tree.push(new Node(5, null, null));
 root.left .= tree.push(new Node(3, null, null));
-println("${root.left.key}");     // 3: following a link is an add and a load
+if (root.left != null) { println("${root.left.key}"); }   // 3: following a link is an add and a load
 ```
 
 A structure built from self-relative links:
@@ -270,7 +272,7 @@ A structure built from self-relative links:
 - can be saved and loaded as bytes, after a check that every link lands on an element (Open, §12).
 
 ### 7.3 Pool links
-`T&<u32 in pool>` stores an unsigned byte offset from the start of `pool`, plus one, so that 0 can mean null in `T&<u32 in pool>?`. `pool` must be a static grow-only array (Goose §3.9).
+`T&<u32 in arr>` stores an unsigned byte offset from the start of `arr`, plus one, so that 0 can mean null in `T&<u32 in arr>?`. `arr` must be a static grow-only array (Goose §3.9); the built-in `pool<T>` isn't one.
 
 - A value whose links are all pool links can be copied anywhere, since its links don't depend on where the value sits.
 - Following one is an add from the pool's start and a load.
@@ -279,10 +281,10 @@ A structure built from self-relative links:
 ### 7.4 The rules
 - **L1, same array**:
   - a self-relative link can be stored only from a reference into the same array as the field it is stored in: the same root variable and field path (Goose §3.9);
-  - a pool link only from a reference into its pool;
+  - a pool link only from a reference into its array;
   - when the compiler can't tell which array a reference points into, for example because two arrays were passed as parameters, it is a compile error.
 - **L2, no copying out**: a value with self-relative links can't be copied out of its array. `Node n = tree[0];` is an error; use `Node& n = tree[0];`. The links are measured from where the value sits, so a copy elsewhere would point at the wrong memory. Copying a whole array is fine, and so is copying values whose links are all pool links.
-- **L3, arrays that keep their elements**: links can only point into arrays that never remove elements and never move them. That means grow-only and frozen arrays, and capped arrays whose cursor slot is `.`, since a capped cursor array's small gap buffer moves elements (DESIGN §4.3).
+- **L3, arrays that keep their elements in place**: links, and references in fields (§7.1), can only point into arrays whose elements never move and whose memory never holds another type. That means grow-only and frozen arrays, and capped arrays whose cursor slot is `.`: a removal from a capped array leaves its slots holding values of the same type (§5.4). A capped cursor array's small gap buffer moves elements, so it is excluded (DESIGN §4.3). References in fields may also point into pools (§5.4); links can't.
 - **L4, width**:
   - storing a link whose offset doesn't fit its width stops the program, like an overflow (DESIGN §7.6), for example more than 127 bytes for `<i8>`;
   - no check is needed when the array's reservation is no larger than the width can reach, for example 2 GB for 32-bit links (Goose §3.9).
@@ -327,7 +329,7 @@ void collectEach(Dir& d, Item[..>]& out) {
 }
 ```
 
-Goose marks the entry to a recursive cycle with `recursive fn`. Zinkite finds cycles from the call graph instead, so nothing is written (Proposed).
+Goose marks the entry to a recursive cycle with `recursive fn`. Zinkite finds cycles from the call graph instead, so nothing is written.
 
 ---
 
@@ -338,13 +340,13 @@ Goose marks the entry to a recursive cycle with `recursive fn`. Zinkite finds cy
 - **Interface references** follow the same rules as `T&`. The slot they point into keeps its class, so the method table stays right.
 - **Lambdas** passed as parameters are compile-time values. A captured reference keeps its roots, and the lambda can't outlive the call. A `func` stored in a variable or field can't capture (DESIGN §9.3).
 - **Hash maps** (DESIGN §4.14) follow the rules for removable arrays. Their entries never move on insert, so `put` and `getOrAdd` invalidate nothing. `remove` and `clear` are removals under rule R, and may compact the entries. References into a `hashmap` can be held only in local variables and parameters (§5.3). Each map uses two data stacks under rule G, one for its entries and one for its index.
-- **Repeat loops** (`while (T x : call)`, DESIGN §9.4): the header's variables are declared afresh in the body on each pass, and the call is made before they exist. So when the call runs, no binding from the previous pass is live, and the call may remove from what that binding viewed: `stdin.nextLine(buf)` clears `buf` on every pass. A copy of the binding kept outside the body still counts, so storing `line` in an outer array makes the next call a compile error.
+- **Repeat loops** (`while (T x : call)`, DESIGN §9.4): the header's variables are declared afresh in the body on each pass, and the call is made before they exist. So when the call runs, no binding from the previous pass is live, and the call may remove from what that binding viewed: `stdin.nextLine(buf)` clears `buf` on every pass. Storing `line` in an outer array is still rejected, by §5.3: `buf` is removable, so a view into it can't be stored in an array.
 - **For-each over an iterator** (DESIGN §9.4): the loop keeps the iterator in a hidden local for the whole loop. An iterator that holds a view or a reference into something, like `text.lines()`, keeps it live for the whole loop, so a removal from that data inside the loop is a compile error under rule R. A `mut T& next()` returns references, which follow rule S like any other.
 - **For-each by reference** (`for (Item& it : items)`): the loop variable is a reference rooted at the array, so removing from that array inside the loop body is a compile error under rule R. For-each by value holds no reference; whether it may remove is Open (DESIGN §17).
 - **`defer`** (DESIGN §6.4): for rules S and R, a deferred statement counts as running at the end of its block, before any of the block's variables are released. A reference it uses is therefore live until then, so a removal later in the block from the array it points into is a compile error.
 - **`File` handles** (DESIGN §6.4) are plain values, a slot and a generation number, so copies and stale copies are safe: the runtime checks the generation on every operation.
 - **Windows** (`T[<.<]`) made from another array are views with that array's roots.
-- **Enums with payloads** (Open in DESIGN §17): if they are added, a value never changes variant in place, as in Goose (§3.5), so references into a payload stay valid.
+- **Enums with payloads** (Open in DESIGN §17): if they are added, a value never changes variant in place, as in Goose (Goose §3.5), so references into a payload stay valid.
 
 ---
 
@@ -378,7 +380,7 @@ Goose marks the entry to a recursive cycle with `recursive fn`. Zinkite finds cy
 19. A link into a removable array, or into a capped array with a cursor, is an error (L3).
 20. A `Node&<i8>` link whose offset is more than 127 bytes stops the program with a message (L4).
 21. A copied array of `Node`s with self-relative links works on its own after the original's scope ends.
-22. A value whose links are all `T&<u32 in pool>` can be copied to a local and its links followed; a pool that isn't a static grow-only array is an error.
+22. A value whose links are all `T&<u32 in arr>` can be copied to a local and its links followed; an `arr` that isn't a static grow-only array is an error.
 
 **Data stacks**
 23. Two growable arrays that are live at the same time get different stacks; two with disjoint lifetimes share one.
@@ -398,7 +400,7 @@ Goose marks the entry to a recursive cycle with `recursive fn`. Zinkite finds cy
 
 | Topic | Goose | Here | Why |
 |---|---|---|---|
-| Checking functions | compiled once per combination of roots, writability and destination stacks | compiled once in total; summaries for checking, the destination stack as a hidden argument | smaller code and faster compiles; revisit if code generation needs constants |
+| Checking functions | compiled once per combination of roots, writability and destination stacks | compiled once per layout and generic instance, never per root; summaries for checking, the destination stack as a hidden argument | smaller code and faster compiles; revisit if code generation needs constants |
 | Roots of a reference variable | committed at its first binding | the union of everything stored into it | about as strict, and simpler to explain |
 | Self-relative link spelling | `T&<u32>` (signed) | `T&<i32>` | the name says the offset is signed |
 | Slices | writable or `const` depending on where they came from | read-only `T[:]`, and writable views `T[:]&` | the type says whether a callee may write, as for other parameters |
