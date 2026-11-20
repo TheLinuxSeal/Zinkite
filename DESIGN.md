@@ -32,7 +32,7 @@ Left out to stay light: inheritance, exceptions, destructors, reflection, dynami
 |---|---|---|---|
 | Memory model | No heap: values live on the native stack, in static data, or on compiler-assigned data stacks; a scope's memory is freed by one store when it ends | Decided | 3 |
 | Nested data | Stored inline; a record is a contiguous run of bytes | Decided | 3.2 |
-| Array types | Slot grammar `T[sce cap]`: one character each for start, cursor and end, `>` insert, `<` remove, `~` both, `.` nothing; `T[a]` applies one character to all three; a `$` prefix (`T[$.~.]`) chooses a chunked index | Decided | 4.1 |
+| Array types | Slot grammar `T[sce cap]`: one character each for start, cursor and end, `>` insert, `<` remove, `~` both, `.` nothing; `T[a]` applies one character to all three; a trailing `$` (`T[.~.$]`) chooses a chunked index | Decided | 4.1 |
 | Varint lengths | `*` after the slots gives a frozen array a varint length field: `T[.*]` | Decided | 4.6 |
 | Array operations | Methods and operators, both: `push(x)` and `a +> x` | Decided | 4.7, 4.8 |
 | Cursor arrays | On a data stack, a cursor slot other than `.` gives a data array whose elements never move, plus a gap buffer of indices; references survive inserts and seeks; removal holes are reused | Decided | 4.3, 4.5 |
@@ -44,6 +44,7 @@ Left out to stay light: inheritance, exceptions, destructors, reflection, dynami
 | Classes | Methods in the body, constructors `new(...)`, `mut` methods, `private`; no header, so a class is exactly as large as its fields | Decided | 6.1 |
 | Default constructors | A class with no constructor gets one taking each field without an initializer, in declaration order | Decided | 6.2 |
 | Constructors | Every field assigned on every path, checked for the worst case; `this.new(...)` delegates; a failing `return #code;` gives the zero value | Decided | 6.2 |
+| Roots | `root Parser { ... }` is a class whose growable fields each get their own data stack; it can't be copied or stored by value | Decided | 6.6 |
 | Overloading | Methods, static functions and constructors, by parameter types; chosen at compile time from the arguments' static types; no default parameter values | Decided | 6.5 |
 | Dispatch | Interfaces only, no inheritance; an interface reference is 16 bytes (value pointer + method table) | Decided | 6.3 |
 | Errors | A `u8` status per call, 0 for success: `return #status.NOT_FOUND x;` writes it, `x @err = f();` reads it; no exceptions | Decided | 7 |
@@ -133,7 +134,7 @@ The whole order book is one block, so reading it streams through the cache.
 ### 3.4 What the model costs (Decided, as known trade-offs)
 - **Memory goes back to the data stack only when its scope ends.** An array keeps the slots it frees for its own later inserts: popped slots, and a cursor array's holes (§4.5). An array that once held a million elements keeps that memory until its scope ends, even if it now holds ten.
 - **Long-running programs need structure.** Per-iteration data goes in an inner scope. A structure that keeps changing for the whole run, such as a cache or a server's state, needs a pool (§3.5) or a periodic rebuild into a fresh array.
-- **One resizable value per data stack.** Two growing arrays at once take two stacks, which the compiler assigns. An array whose elements are themselves still growing (a list of lists where any inner list can grow later) isn't possible: inner arrays are frozen or capped once their element is pushed. Build each inner array in a scratch array first, then push it (`REFERENCES.md` §8).
+- **One resizable value per data stack.** Two growing arrays at once take two stacks, which the compiler assigns. A class with several growable fields is a root (§6.6). An array whose elements are themselves still growing (a list of lists where any inner list can grow later) isn't possible: inner arrays are frozen or capped once their element is pushed. Build each inner array in a scratch array first, then push it (`REFERENCES.md` §8).
 - **One growable field per class**, and it must be the last field (`REFERENCES.md` §8.2).
 - **Recursive functions can't keep a growable local across a recursive call.** Data that has to outlive the calls is passed in by reference from outside the recursion (`REFERENCES.md` §8.4).
 - **Removing from an array while a reference into it may still be used is a compile error** (§5.3).
@@ -163,20 +164,21 @@ Each slot is exactly one character, saying what can change at that position:
 | `~` | insert and remove |
 
 - **The shorthand**: one character stands for all three slots. `T[.]` is a frozen array (`T[...]`), and `T[~]` can do everything (`T[~~~]`).
-- **Two characters is an error**, so a type always has one or three slot characters before its cap.
-- **A `$` before the slots chooses a chunked index** (Decided): `T[$.~.]`, or `u32[$~]` with the shorthand. The operations are the same as without it, and only their costs change (§4.3, §15).
+- **Two characters is an error**, so a type always has one or three slot characters, before any cap or `$`.
+- **A `$` after the slots chooses a chunked index** (Decided): `T[.~.$]`, or `u32[~$]` with the shorthand. It goes where a cap would, like `*`, since it can't be combined with one. The operations are the same as without it, and only their costs change (§4.3, §15).
   - **Edits anywhere cost O(√n)**: `insertAt(i, x)` and `removeAt(i)` don't move a gap, and `seek` is free, because the cursor is just a number.
   - **Typing in one place gets slower**, and reads take one more load.
   - **Use it for large arrays edited at scattered positions**: it measured faster from about 50,000 elements up, and 12–16× faster at a million.
   - **It needs a cursor slot other than `.`**, since that's the part it changes, and **it can't have a numeric cap**, since capped arrays are small enough for one gap to win.
   - `$` looks like an S, for "segmented". It can't be confused with interpolation, which happens only inside string literals.
 
-The optional trailing `cap`:
+The optional trailing `cap`, or `$` in its place:
 
 | Cap | Meaning |
 |---|---|
 | a number or compile-time constant (`16`, `MAX_NAME`) | inline storage with that capacity |
 | `*` | variable-width (varint) length field, frozen arrays only |
+| `$` | chunked index, cursor arrays only (above) |
 | *(none)* | no inline cap: the array lives on a data stack (editable) or is sized at construction (frozen) |
 
 The cap says **where the data lives** (inline or on a stack). The slots say **what operations are allowed**.
@@ -198,7 +200,7 @@ The cap says **where the data lives** (inline or on a stack). The slots say **wh
 | `T[~.~]` | on a data stack, a deque: insert and remove at both ends |
 | `T[>~>]` | insert at both ends, insert and remove at a cursor |
 | `T[~]` | everything: a deque at each end plus a cursor |
-| `T[$.~.]` | a cursor array with a chunked index: edits anywhere in O(√n) |
+| `T[.~.$]` | a cursor array with a chunked index: edits anywhere in O(√n) |
 
 There is no `T[k]`: `T[.k]` is the only fixed-size spelling.
 
@@ -212,7 +214,7 @@ There is no `T[k]`: `T[.k]` is the only fixed-size spelling.
 | a cursor slot other than `.` | a data array whose elements never move, plus an index array with a **gap buffer** at the cursor | reads take two loads; the start and end slots decide whether the index array is double-ended |
 | capped (a number or constant after the slots, such as `..~16`) | everything inline in the parent; ring buffer or reversed layout for a start slot, a small gap buffer for a cursor | nests inside classes; counter width chosen from `k` |
 | `<.<` | front and back offsets over existing data | a window that only narrows |
-| a `$` prefix | the same data array, with the index split into chunks of about √n entries (a two-level tiered vector, Goodrich and Kloss 1999) | inserts and removals anywhere cost O(√n); reads take three loads; the cursor is just a position |
+| a trailing `$` | the same data array, with the index split into chunks of about √n entries (a two-level tiered vector, Goodrich and Kloss 1999) | inserts and removals anywhere cost O(√n); reads take three loads; the cursor is just a position |
 
 - **Parameters take capabilities, not layouts** (Decided). Since a plain parameter is a read-only copy (§5.1), an array the callee changes is passed by reference. A `T[..>]&` parameter accepts any array that can at least be appended to, and the function can only append. The compiler compiles the function once per layout passed to it, since the whole program is visible.
 - **Reads on a cursor array cost more even when the code never moves the cursor.** Elements stay where they were inserted, so `a[i]` reads the index array first. Arrays that are mostly read should use a type whose cursor slot is `.`.
@@ -368,7 +370,7 @@ The sign says insert (`+`) or remove (`-`); the symbol says where: `<` start, `^
 
 ### 4.12 Parsing notes
 - **In a type, the characters between `[` and `]` are read directly**: one or three slot characters, then an optional number, constant or `*`. So `>>` and `<<`, which are tokens elsewhere, count as two slot characters there.
-- **A `$` directly after `[` in a type** marks the chunked index (§4.1). Outside string literals, `$` has no other meaning.
+- **A `$` directly before `]` in a type** marks the chunked index (§4.1). Outside string literals, `$` has no other meaning.
 - **Types and slices can't be confused.** A slice always has a `:` between its bounds, and the only type with a `:` is the slice type `T[:]`. That one is spelled like the whole slice `a[:]`, and the declaration rule (`GRAMMAR.md` §6, rule 4) tells them apart, as for other types.
 - **Slice bounds are shift-level expressions** (`GRAMMAR.md` §6), below comparisons, bitwise operators and the conditional. So a conditional keeps its own `:`, and `a[c ? i : j]` is an index. A bound that uses one of those operators needs parentheses: `a[(c ? i : j):]`, `a[0:(n & 7)]`.
 - **One near-collision**: `u8[~16]` (a capped array that can do everything) and `a[~16]` (indexing with the bitwise NOT of 16) are spelled alike. A statement that starts with a type followed by a name is a declaration (`GRAMMAR.md` §6, rule 4), so the parser can tell them apart, but a reader may not.
@@ -420,7 +422,7 @@ for (var& e : counts) {                          // insertion order
 }
 ```
 
-- **`hashmap<K, V>` is built in, like arrays.** It is created by `[]` and needs no `new`. The compiler gives each one two data stacks, as it does for a cursor array's data and index. A class with a `hashmap` field counts it as its one growable field (§3.4).
+- **`hashmap<K, V>` is built in, like arrays.** It is created by `[]` and needs no `new`. A map is one growable region, so a class can hold one as its one growable field (§3.4), and a root can hold several (§6.6).
 - **`hashset<T>` is built in the same way**, with the same layout minus the values (`STDLIB.md` §7.4).
 - **Methods**:
   - `get(key)` returns the value, or the zero value with `status.MISSING` when the key is missing;
@@ -429,10 +431,10 @@ for (var& e : counts) {                          // insertion order
   - `remove(key)` fails with `status.MISSING` when the key is missing;
   - `has(key)`, `len` and `clear()`;
   - for-each visits entries in insertion order, each with a read-only `key` and a writable `value`.
-- **Layout**: Python's compact dict (since 3.6).
-  - Entries (the key, the value and the key's hash) are appended to an array that only grows, in insertion order.
-  - A separate index of 1-, 2- or 4-byte slot numbers, sized to the table, finds them by linear probing.
-  - **Growing rebuilds only the index**, and entries never move. So a reference from `getOrAdd` or a for-each by reference survives later inserts.
+- **Layout**: Python's compact dict (since 3.6), kept in one block. Goose's direct table is still being weighed against it (§17).
+  - Entries are appended in insertion order. Each holds the key, the value, and the key's hash when the key is costly to hash, such as a string.
+  - An index of 1-, 2- or 4-byte slot numbers, sized to the table, finds them by linear probing. It sits in the same block, after the entries' spare room.
+  - **Growing rebuilds only the index**, after the new spare room, from the stored hashes or by hashing cheap keys again. Entries never move. So a reference from `getOrAdd` or a for-each by reference survives later inserts.
   - **Removing marks the entry as removed**, which keeps the order. When more than half the entries are removed ones, the next removal compacts the array.
 - **Reference rules** (`REFERENCES.md` §9):
   - inserts never invalidate references;
@@ -581,11 +583,11 @@ first.heavier(2.5);
   ```
   class Row { string line; string key; f64 num; }
   class Options { bool numeric = false; i64 column = 0; string path = ""; }
-  class LineBuffer { u32[.~.] text; }
+  class Words { string[..>] list; }
 
   new Row(line, key, num)     // the three fields in order
   new Options()               // every field has an initializer
-  new LineBuffer()            // an editable array starts empty, so it isn't a parameter
+  new Words()                 // an editable array starts empty, so it isn't a parameter
   ```
   - The order is the order in the source, not the layout order in memory (§11).
   - A class that declares any constructor gets no default one, as in Java.
@@ -702,6 +704,37 @@ i64 m @bad2 = i64.parse(s, 16);     // parse(string, i64): base 16
 - **Overloads should do the same thing for different inputs.** Different behaviour gets a different name, so `sort(less)` and `sortBy(key)` stay apart (`STDLIB.md` §7.1).
 - **Interfaces can declare overloads**, and a class implements each one.
 - **Not included**: default parameter values, and overloaded operators (§1).
+
+### 6.6 Roots: several growable fields (Decided)
+A class keeps its fields in one block, so it can hold at most one growable field, at its end (§3.4). A **root** is declared like a class, with `root` in place of `class`, and gives each growable field its own data stack instead. It follows Goose's root structs.
+
+```
+root Parser {
+    Token[..>] tokens;              // its own data stack
+    i64[..~] work;                  // another one
+    u32[.~.] text;                  // a cursor array: its data and its index get a stack each
+    i64 position = 0;               // ordinary fields stay in the root's record
+
+    mut void reset() { tokens.clear(); work.clear(); position = 0; }
+}
+
+Parser p = new Parser();            // only as a named local or static
+parse(p, input);                    // void parse(Parser& state, string input)
+```
+
+- **A root can have everything a class can**: fields, methods, constructors, `implements` and type parameters. Its growable fields may come in any number and any order.
+- **Its value is a small record of where each part lives**, not one block of bytes, so it can't be copied. These are compile errors:
+  - copying it (`Parser q = p;`), passing it as a plain parameter, or returning it by value;
+  - storing it by value in a class, another root or an array;
+  - an unnamed temporary: `new Parser()` must initialize a named local or static.
+
+  References to it (`Parser&`) go wherever references can, under the usual rules.
+- **The number of data stacks stays fixed at compile time.** Each root variable's parts get stacks the compiler assigns, as growable locals do, and roots whose lifetimes don't overlap reuse them. That is why a root can't be an array element.
+- **Recursion**: a root can't be live across a call into a recursive cycle that would need new stacks on each activation. Pass one declared outside the cycle by reference (`REFERENCES.md` §8.4).
+- **In a class, a second growable field is a compile error that suggests `root`, and so is a cursor-array field**, since a cursor array needs two regions: its data and its index.
+- **Speed**: each part is the top of its own data stack, as a local array is, and the compiler keeps each part's start and length in registers inside loops. Goose measured its root structs against passing the same arrays separately, over 32 million pushes: 85–88 ms either way.
+- **`root` is a keyword only at the start of a type declaration**, so variables and fields named `root` stay legal: `Node& root = tree.push(...)`.
+- **The name**: a root owns its parts' storage, so its variable is the root (§5.2) of every reference into them.
 
 ---
 
@@ -941,7 +974,7 @@ src/
 ```
 
 - **File order**: shebang, directives (entry file only, §8.2), `package`, imports, declarations.
-- **One public top-level class, interface or enum per file**, named after the file: `MyArray.zn` holds `public class MyArray`. A file may also hold non-public declarations, visible only inside its package.
+- **One public top-level class, root, interface or enum per file**, named after the file: `MyArray.zn` holds `public class MyArray`. A file may also hold non-public declarations, visible only inside its package.
 - **No `package` line** puts the file in the unnamed package. That is meant for single-file scripts; as in Java, named packages can't import from it.
 - **The source root is inferred from the entry file**: `zink run src/com/example/app/Main.zn` containing `package com.example.app;` gives the root `src/`. A `package` line that doesn't match the path is an error. Extra roots for libraries come from a `--source-path` flag.
 - **Visibility**: `public`, `private`, and package-private when nothing is written (§6.1).
@@ -1285,9 +1318,10 @@ A generic body can use only what its bounds allow (§10). Seven bounds for the b
 
 ---
 
-## 11. Memory layout (Proposed)
+## 11. Memory layout (Decided)
 - **Class values have no header.** Fixed-size fields come first, sorted by size (largest first), then by name, so they pack with almost no padding and always sit at fixed offsets. Variable-size fields follow, in declaration order.
 - **Arrays** are `[metadata][elements]`, inline and packed, never a pointer to a separate block. The width of the metadata comes from the cap, or from a varint (§4.6).
+- **A root is the one exception**: its record holds where each growable part lives, on that part's own data stack (§6.6).
 - **Alignment**: a fixed-size value is aligned to its largest field. Variable-size records are packed; reads use unaligned loads, which x86-64 and AArch64 support.
 - **Data stacks**: each is an address-space reservation (`#data_stack_gb`, 64 GB by default) ending in an unmapped guard page. The compiler assigns stacks statically, and a scope saves and restores the tops of the stacks it uses.
 - **Static data** holds literals, statics, enum constants and interface method tables.
@@ -1440,7 +1474,7 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
   - **typing in one place gets much slower**: every insert passes an entry through every later chunk, so it costs 52 ns at 1,000 elements and 5.6 µs at a million, against 2–4 ns with one gap;
   - **random reads cost about a third more** at a million elements (11.5 against 8.7 ns), because of the extra chunk lookup.
 
-  So it doesn't replace the gap for cursor arrays, whose main use is editing in one place. It is available as a choice instead: a `$` before an array's slots selects it (§4.1).
+  So it doesn't replace the gap for cursor arrays, whose main use is editing in one place. It is available as a choice instead: a `$` after an array's slots selects it (§4.1).
 
 **Not measured yet**: long-running programs that keep adding and removing data, where memory only comes back to the data stack at scope exit (§3.4).
 
@@ -1453,7 +1487,8 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
   - inline nested data;
   - roots inferred without annotations;
   - building in place;
-  - relative references.
+  - relative references;
+  - root structs, which Zinkite calls roots (§6.6).
 - **Hylo** (formerly Val): mutable value semantics with second-class references.
 - **Rust**: ownership and borrowing; `Vec`, `VecDeque` and slices; `saturating_add`; graphs through indices.
 - **Zig** and **Go**: `defer`. **Zig** also has `+%` and `+|` for wrapping and saturating arithmetic; `i32`/`u8` type names and arbitrary-width integers; implicit integer conversions only where no value is lost; error unions as a light error channel.
@@ -1471,13 +1506,13 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 
 **Memory and references**
 - **Reference rules**: the open questions in `REFERENCES.md` §12, such as following roots per program point and choosing data stacks at run time.
-- **Several growable fields in one class**, as in Goose's root structs (`REFERENCES.md` §8.2).
 - **Removing elements inside a for-each by value** over the same array (§9.4).
 - **Enforcing `#max_memory_mb`** when growth never checks a capacity (§3.1, §8.2): commit memory in chunks from the page-fault handler and stop at the ceiling, which costs nothing on the fast path, or size each stack's reservation.
 - **Threads**: Goose compiles each worker as a separate program with its own memory and typed queues between them.
 
 **Arrays**
 - **Hash map literals** with entries (`["a": 1]`), and `m[key]` indexing (`GRAMMAR.md` §8).
+- **Hash map layout** (§4.14): the entries-then-index block, or Goose's direct table, one array of slots with hash tags that doubles and rehashes in place. The direct table reads memory once per lookup instead of twice, but references from `getOrAdd` last only until the next insert, and iteration order isn't defined. Both keep a map in one region.
 - **Making a window** (`T[<.<]`): the type is in §4.2, but nothing creates one yet.
 - `*` on unbounded editable arrays (`T[..>*]`) (§4.6).
 - Slices of arrays whose elements aren't stored in order: cursor, chunked (`$`), reversed (`>..`) and ring-buffer capped arrays. Logical order is the natural choice for what a slice shows (§4.3, §4.10).
@@ -1525,7 +1560,7 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 
 **Array types**
 7. Every type in the §4.2 table parses with the layout in §4.3; `T[k]` is a compile error that suggests `T[.k]`.
-8. `T[$.~.]` and `u32[$~]` behave exactly like `T[.~.]` and `u32[~]` under any sequence of edits (property test); `T[$..>]`, `T[$.]` and `u8[$..~16]` are compile errors; a function taking `T[.~.]&` accepts a `T[$.~.]`.
+8. `T[.~.$]` and `u32[~$]` behave exactly like `T[.~.]` and `u32[~]` under any sequence of edits (property test); `T[..>$]`, `T[.$]` and `u8[..~16$]` are compile errors; a function taking `T[.~.]&` accepts a `T[.~.$]`.
 9. Methods the slots don't allow are compile errors: `pop` on `T[..>]`, `pushFront` on `T[..~]`, `insert` when the cursor slot is `.`, any editing method on a frozen array. Each operator needs the same capability as its method.
 10. `*` with a numeric cap is a compile error; `T[>.>]` as a class field is a compile error; capped arrays nest inline in classes.
 11. A function with a `T[..>]&` parameter accepts a `T[..~]` and a `T[>~>]`, is compiled once per layout, and can't call `pop` on the parameter.
@@ -1679,6 +1714,12 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 123. `clear()` through a `T[..>]&` parameter is a compile error; through a `T[..~]&` it compiles.
 124. A program's own `sum` or `splitFirst` hides the `zink.lang` one, with no error; two imports of the same name are still an error.
 125. With `string w = a;`, `w = b;` makes `w` view `b`; with `u8[:]& v = buf[0:3];`, `v = "abc";` copies three bytes into `buf`.
+
+**Roots**
+126. A `root` with two growable fields and a cursor-array field compiles, and each part grows independently of the others.
+127. Copying a root, passing it as a plain parameter, returning it by value, storing it in a class, a root or an array, and a `new Parser()` that isn't assigned to a named variable are compile errors; `Parser&` parameters and fields work.
+128. A second growable field, or a cursor-array field, in a `class` is a compile error that suggests `root`.
+129. `Node& root = tree.push(...)` and a field named `root` compile.
 
 ---
 

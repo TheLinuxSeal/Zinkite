@@ -42,6 +42,8 @@ Reserved keywords:
 
 The unused keywords are reserved so the compiler can explain why they aren't available: there is no inheritance (DESIGN §6.1), nothing is thrown (DESIGN §7), there are no destructors (`delete()` suggests `defer`, DESIGN §6.4), the number types are spelled `i32`, `u8`, `f64` and so on, and code points are `u32` (DESIGN §9.1).
 
+`root` is a keyword only at the start of a type declaration (`root Parser { ... }`, DESIGN §6.6), so variables and fields may still be named `root`.
+
 `hashmap`, `hashset` and `pool` are built-in generic type names (DESIGN §4.14, `STDLIB.md` §7), and `sint`, `uint`, `int`, `float`, `number`, `ordered` and `hashable` are built-in generic bounds (DESIGN §10.1). They aren't keywords, but no declaration may reuse them. `int` and `float` used as a type are errors that suggest `i64` and `f64`.
 
 ### 1.4 Literals
@@ -135,7 +137,7 @@ top_item      = type_decl
 
 - Settings are allowed only in the file that contains the entry point (DESIGN §8.2).
 - A file with top-level fields or methods is a **script file** (DESIGN §8.6). It can't have a `package` line, and its top-level fields and methods are static members of a hidden class.
-- Otherwise the file holds one public top-level class, interface or enum named after the file, plus any non-public ones (DESIGN §8.4).
+- Otherwise the file holds one public top-level class, root, interface or enum named after the file, plus any non-public ones (DESIGN §8.4).
 
 ---
 
@@ -161,9 +163,9 @@ type_suffix    = array_suffix                   (* an array of the type so far *
 link           = "<" ( "i8" | "i16" | "i32" ) ">"                          (* self-relative *)
                | "<" ( "u8" | "u16" | "u32" ) "in" qualified_name ">" ;   (* pool link *)
 
-array_suffix   = "[" [ "$" ] slots "]"             (* "$": chunked index *)
+array_suffix   = "[" slots "]"
                | "[" ":" "]" ;                  (* a slice *)
-slots          = slot [ slot slot ] [ cap ] ;    (* one slot stands for all three *)
+slots          = slot [ slot slot ] [ cap | "$" ] ;   (* one slot stands for all three; "$": chunked index *)
 slot           = ">" | "<" | "~" | "." ;        (* insert, remove, both, nothing *)
 cap            = INT | qualified_name | "*" ;
 
@@ -181,7 +183,7 @@ Suffixes apply left to right:
 |---|---|
 | `Item&` | a reference to an `Item` |
 | `Item&?` | a nullable reference |
-| `Item[$.~.]` | a cursor array with a chunked index (DESIGN §4.1) |
+| `Item[.~.$]` | a cursor array with a chunked index (DESIGN §4.1) |
 | `Node&<i32>?` | a nullable self-relative link: a 4-byte offset to another element of the same array (REFERENCES §7) |
 | `Node&<u32 in nodes>` | a pool link: an offset from the start of the static array `nodes` (REFERENCES §7.3) |
 | `u8[..>]` | an append-only array of bytes on a data stack |
@@ -195,7 +197,7 @@ Checked after parsing:
 - **Slots**, as in DESIGN §4.1–§4.2:
   - there are three slot characters, for start, cursor and end (`[>~>]`), or one that stands for all three (`[~]` is `[~~~]`, `[.]` is `[...]`). Two is an error;
   - `*` is allowed only on frozen arrays, whose slots are all `.` (`T[.*]`);
-  - a `$` prefix needs a cursor slot other than `.` and no numeric cap: `[$.~.]` and `[$~]` are fine, `[$..>]` and `[$..~16]` are errors;
+  - a trailing `$` needs a cursor slot other than `.`, and takes the place of a cap: `[.~.$]` and `[~$]` are fine, `[..>$]` is an error, and `[.~.16$]` doesn't parse;
   - a numeric or named cap must be a compile-time constant.
 - **Nullable types**: `?` is allowed only directly after `&`, after a link (`Node&<i32>?`), or after a `func(...)` type. `i32?`, `Item?` and `Item?&` are errors.
 - **Links** (`T&<i32>`, `T&<u32 in arr>`) appear only as field types: a local or parameter that refers to an element uses `T&` (REFERENCES §7). `in` is a keyword only inside a link's angle brackets, and `arr` must be a static grow-only array.
@@ -213,9 +215,12 @@ Checked after parsing:
 ```
 modifier       = "public" | "private" | "static" | "mut" ;
 
-type_decl      = { modifier } ( class_decl | interface_decl | enum_decl ) ;
+type_decl      = { modifier } ( class_decl | root_decl | interface_decl | enum_decl ) ;
 
 class_decl     = "class" IDENT [ type_params ]
+                 [ "implements" class_type { "," class_type } ]
+                 class_body ;
+root_decl      = "root" IDENT [ type_params ]                  (* DESIGN §6.6 *)
                  [ "implements" class_type { "," class_type } ]
                  class_body ;
 interface_decl = "interface" IDENT [ type_params ]
@@ -248,6 +253,7 @@ constructor_decl = { modifier } "new" "(" [ param { "," param } ] ")" block ;
 Checked after parsing:
 - **`mut`** goes only on instance methods and interface methods (DESIGN §6.1). `static` goes only on fields and methods. `public` and `private` go on declarations, not on locals.
 - **Constructors** are written `new(...)` and have no return type (DESIGN §6.2). Each must assign every field on every path that doesn't fail (DESIGN §6.2), which the type checker verifies. `this.new(...)` appears only in a constructor, as a statement or after `@err =`.
+- **Roots** (DESIGN §6.6): a `class` may have only one growable field, and no cursor-array field; either is an error that suggests `root`. A root can't be copied, passed as a plain parameter, returned by value, stored by value in a class, root or array, or created as an unnamed temporary.
 - **Overloads** (DESIGN §6.5): methods, static functions and constructors with the same name in one class must differ in a parameter's type, not only in `&`, `?`, array slots, the return type or the parameter names. A slice and an array differ in kind, so `f(string)` beside `f(u8[..>]&)` is allowed.
 - **Interfaces** declare methods only; they have no fields and no bodies (default methods are Open, §8).
 - **Script files**: top-level declarations take no access modifiers.

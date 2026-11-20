@@ -303,7 +303,7 @@ L1–L3 keep every link inside its array, and that memory never holds another ty
 - Each stack has one bump pointer. It moves up when a value is placed or grows, and back down when a scope ends.
 
 ### 8.2 Growable fields
-A class has at most one growable field, and it must be the last field, so the value can grow at its end. Goose's "root structs", which hold several growable fields, are Open (§12).
+A class has at most one growable field, and it must be the last field, so the value can grow at its end. A root (DESIGN §6.6), Goose's root struct, gives each growable field its own data stack instead. Its value is a record of where each part lives, so it is never copied, and the compiler assigns each root variable's stacks as it does a growable local's. Rules S and R treat the root variable as the base of every reference into its parts.
 
 ### 8.3 Calls and returns
 - **Growing a parameter**: a function that grows a `T[..>]&` parameter grows it on the argument's stack. Its own resizable locals go on other stacks, which its summary records (§4.1).
@@ -412,7 +412,6 @@ Goose marks the entry to a recursive cycle with `recursive fn`. Zinkite finds cy
 ## 12. Open questions
 
 - **Order-following roots**: accept §3.5's example by tracking roots per point in the program. It would accept more programs without changing any.
-- **Several growable fields in one class**: Goose's root structs.
 - **Choosing a stack at run time**: Goose lists dynamic stacks as future work. They would let a recursive function keep growable locals.
 - **Removal inside a for-each by value**.
 - **Slices of cursor arrays**: their elements aren't contiguous in logical order (DESIGN §4.10).

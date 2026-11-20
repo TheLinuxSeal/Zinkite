@@ -6,7 +6,7 @@
 //   del [n]       delete n characters after the cursor
 //   show          print the line, with | at the cursor
 
-class LineBuffer {
+root LineBuffer {              // a root, since a cursor array needs two regions (DESIGN §6.6)
     u32[.~.] text;              // code points; a cursor array, so edits at the cursor are O(1)
                                 // no constructor: new LineBuffer() starts with text empty
 
