@@ -431,7 +431,7 @@ for (var& e : counts) {                          // insertion order
   - `remove(key)` fails with `status.MISSING` when the key is missing;
   - `has(key)`, `len` and `clear()`;
   - for-each visits entries in insertion order, each with a read-only `key` and a writable `value`.
-- **Layout**: Python's compact dict (since 3.6), kept in one block. Goose's direct table is still being weighed against it (§17).
+- **Layout** (Decided): Python's compact dict (since 3.6), kept in one block. It was chosen over Goose's direct table after measuring both (§15): it builds, grows and iterates faster and uses less memory, while the direct table finds keys up to 1.75× faster in maps too big for the CPU cache.
   - Entries are appended in insertion order. Each holds the key, the value, and the key's hash when the key is costly to hash, such as a string.
   - An index of 1-, 2- or 4-byte slot numbers, sized to the table, finds them by linear probing. It sits in the same block, after the entries' spare room.
   - **Growing rebuilds only the index**, after the new spare room, from the stored hashes or by hashing cheap keys again. Entries never move. So a reference from `getOrAdd` or a for-each by reference survives later inserts.
@@ -1476,6 +1476,24 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 
   So it doesn't replace the gap for cursor arrays, whose main use is editing in one place. It is available as a choice instead: a `$` after an array's slots selects it (§4.1).
 
+**Hash maps**: measured on 2026-11-19 (`bench/hashmap_layouts.c`, median of 5 runs). Both layouts live in one region on their own reservation, store a 32-bit hash per entry, and run the same keys in the same order. The direct table is Goose's: one array of slots, doubled and rehashed in place. The compact one is §4.14's entries then index. Nanoseconds per operation, `u64` keys and `i64` values:
+
+| Keys | Layout | Insert | Of which growing | Hit | Miss | Update | Iterate | Memory per key |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 1,000 | direct | 17.5 | 6.1 | 2.7 | 4.4 | 3.3 | 1.63 | 49 B |
+| | compact | 5.7 | 2.1 | 2.7 | 3.0 | 3.4 | 0.30 | 37 B |
+| 100,000 | direct | 43.2 | 25.4 | 10.7 | 13.3 | 12.0 | 7.55 | 63 B |
+| | compact | 21.6 | 7.6 | 15.5 | 11.3 | 16.4 | 0.86 | 37 B |
+| 1,000,000 | direct | 49.9 | 23.0 | 29.9 | 29.9 | 95.2 | 7.61 | 50 B |
+| | compact | 31.4 | 9.5 | 46.7 | 23.9 | 146.5 | 1.37 | 32 B |
+| 10,000,000 | direct | 67.5 | 19.8 | 54.1 | 57.6 | 205.5 | 5.87 | 40 B |
+| | compact | 67.8 | 15.3 | 94.8 | 85.5 | 303.2 | 1.66 | 31 B |
+
+- **The direct table finds keys faster once the map outgrows the cache**, 1.3–1.75× from about 100,000 keys up, since a hit is one memory access instead of two. Below that, the two are equal.
+- **The compact layout builds 1.5–3× faster up to a million keys**, grows 1.3–3× faster because only its index is rebuilt, iterates 3.5–6× faster, and uses 25–48% less memory, since an empty index slot is 4 bytes instead of a whole entry. Misses are usually faster too, except at 10 million keys.
+- **String keys (8–24 bytes) follow the same pattern.** At a million keys: hits 141 against 209 ns for the direct table, inserts 71 against 107 ns and misses 76 against 104 ns for the compact one, and 64 against 39 MB.
+- "Update" is `getOrAdd` of a key that is already there, then an increment. Removals weren't measured.
+
 **Not measured yet**: long-running programs that keep adding and removing data, where memory only comes back to the data stack at scope exit (§3.4).
 
 ---
@@ -1512,7 +1530,7 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 
 **Arrays**
 - **Hash map literals** with entries (`["a": 1]`), and `m[key]` indexing (`GRAMMAR.md` §8).
-- **Hash map layout** (§4.14): the entries-then-index block, or Goose's direct table, one array of slots with hash tags that doubles and rehashes in place. The direct table reads memory once per lookup instead of twice, but references from `getOrAdd` last only until the next insert, and iteration order isn't defined. Both keep a map in one region.
+- **A second map type with Goose's direct layout**, for large maps that are mostly read. In maps too big for the CPU cache it finds keys 1.3–1.75× faster than `hashmap`, but iterates in no fixed order, and its references last only until the next insert (§15).
 - **Making a window** (`T[<.<]`): the type is in §4.2, but nothing creates one yet.
 - `*` on unbounded editable arrays (`T[..>*]`) (§4.6).
 - Slices of arrays whose elements aren't stored in order: cursor, chunked (`$`), reversed (`>..`) and ring-buffer capped arrays. Logical order is the natural choice for what a slice shows (§4.3, §4.10).
