@@ -1,5 +1,5 @@
 //! `zink`, the command-line tool (DESIGN §14.4). Only the front end exists so
-//! far, so the commands that work are `zink parse` and `zink lex`.
+//! far, so the commands that work are `zink check`, `zink parse` and `zink lex`.
 
 use std::process::ExitCode;
 
@@ -11,6 +11,7 @@ const USAGE: &str = "\
 usage: zink <command> [arguments]
 
 commands that work so far:
+  zink check FILE...            parse and type-check each file as its own program
   zink parse [--tree] FILE...   parse each file and report errors; --tree prints the syntax tree
   zink lex FILE                 print the tokens of a file
 
@@ -20,11 +21,12 @@ planned (DESIGN §14.4):
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("check") => check(&args[1..]),
         Some("parse") => parse(&args[1..]),
         Some("lex") => lex(&args[1..]),
         Some("build" | "run") => {
             eprintln!(
-                "zink: `{}` isn't implemented yet; only `zink parse` and `zink lex` work so far",
+                "zink: `{}` isn't implemented yet; only `zink check`, `zink parse` and `zink lex` work so far",
                 args[0]
             );
             ExitCode::from(2)
@@ -35,7 +37,7 @@ fn main() -> ExitCode {
         }
         Some(other) if other.ends_with(".zn") => {
             eprintln!(
-                "zink: running programs isn't implemented yet; try `zink parse {}`",
+                "zink: running programs isn't implemented yet; try `zink check {}`",
                 other
             );
             ExitCode::from(2)
@@ -55,6 +57,52 @@ fn read(path: &str) -> Option<SourceFile> {
             None
         }
     }
+}
+
+fn check(args: &[String]) -> ExitCode {
+    if args.is_empty() {
+        eprintln!("usage: zink check FILE...");
+        return ExitCode::from(2);
+    }
+    let (mut errors, mut warnings) = (0, 0);
+    for path in args {
+        let Some(file) = read(path) else {
+            errors += 1;
+            continue;
+        };
+        let diags = zink::check(std::slice::from_ref(&file));
+        for d in &diags[0] {
+            eprint!("{}", diag::render(&file, d));
+            match d.severity {
+                Severity::Error => errors += 1,
+                Severity::Warning => warnings += 1,
+            }
+        }
+    }
+    let files = plural(args.len(), "file");
+    if errors > 0 {
+        eprintln!(
+            "{} and {} in {}",
+            plural(errors, "error"),
+            plural(warnings, "warning"),
+            files
+        );
+        ExitCode::FAILURE
+    } else if warnings > 0 {
+        eprintln!(
+            "checked {} with no errors and {}",
+            files,
+            plural(warnings, "warning")
+        );
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("checked {} with no errors", files);
+        ExitCode::SUCCESS
+    }
+}
+
+fn plural(n: usize, word: &str) -> String {
+    format!("{} {}{}", n, word, if n == 1 { "" } else { "s" })
 }
 
 fn parse(args: &[String]) -> ExitCode {

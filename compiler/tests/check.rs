@@ -1,0 +1,973 @@
+//! Type checker tests: programs that must check cleanly, and one test per
+//! rule that must be rejected, with the message it gives.
+
+use zink::diag::{Severity, render};
+use zink::source::SourceFile;
+
+fn diags(text: &str) -> Vec<(Severity, String)> {
+    let file = SourceFile::new("test.zn", text);
+    let out = zink::check(std::slice::from_ref(&file));
+    out[0]
+        .iter()
+        .map(|d| {
+            (
+                d.severity,
+                format!(
+                    "{}{}",
+                    d.message,
+                    d.help
+                        .as_ref()
+                        .map_or(String::new(), |h| format!(" | {}", h))
+                ),
+            )
+        })
+        .collect()
+}
+
+fn errors(text: &str) -> Vec<String> {
+    diags(text)
+        .into_iter()
+        .filter(|d| d.0 == Severity::Error)
+        .map(|d| d.1)
+        .collect()
+}
+
+fn warnings(text: &str) -> Vec<String> {
+    diags(text)
+        .into_iter()
+        .filter(|d| d.0 == Severity::Warning)
+        .map(|d| d.1)
+        .collect()
+}
+
+/// Wraps statements in `void main()`.
+fn body(stmts: &str) -> String {
+    format!("void main() {{\n{}\n}}\n", stmts)
+}
+
+#[track_caller]
+fn ok(text: &str) {
+    let file = SourceFile::new("test.zn", text);
+    let out = zink::check(std::slice::from_ref(&file));
+    if !out[0].is_empty() {
+        let shown: String = out[0].iter().map(|d| render(&file, d)).collect();
+        panic!("expected no diagnostics, got:\n{}", shown);
+    }
+}
+
+#[track_caller]
+fn rejects(text: &str, needle: &str) {
+    let errs = errors(text);
+    assert!(
+        errs.iter().any(|e| e.contains(needle)),
+        "expected an error containing {:?}, got {:#?}",
+        needle,
+        errs
+    );
+}
+
+#[track_caller]
+fn warns(text: &str, needle: &str) {
+    let ws = warnings(text);
+    assert!(
+        ws.iter().any(|e| e.contains(needle)),
+        "expected a warning containing {:?}, got {:#?}",
+        needle,
+        ws
+    );
+    assert!(
+        errors(text).is_empty(),
+        "expected no errors, got {:#?}",
+        errors(text)
+    );
+}
+
+// ---------------------------------------------------------------- whole programs
+
+#[test]
+fn example_programs_check() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples");
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "zn") {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let errs = errors(&text);
+            assert!(
+                errs.is_empty(),
+                "{} had errors: {:#?}",
+                path.display(),
+                errs
+            );
+            // The only warning allowed is the one about unwritten library packages.
+            for w in warnings(&text) {
+                assert!(
+                    w.contains("isn't written yet") || w.contains("aren't written yet"),
+                    "{}: {}",
+                    path.display(),
+                    w
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn grammar_complete_example_checks() {
+    let grammar =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../GRAMMAR.md")).unwrap();
+    let section = grammar.find("## 7. A complete example").unwrap();
+    let start = grammar[section..].find("```\n").unwrap() + section + 4;
+    let end = grammar[start..].find("\n```").unwrap() + start;
+    ok(&grammar[start..end]);
+}
+
+// ---------------------------------------------------------------- literals and numbers (DESIGN §9.1, §9.2)
+
+#[test]
+fn literals_take_their_type_from_where_they_are_used() {
+    ok(&body(
+        "u8 b = 200; f64 x = 0.5; var i = 0; i64 big = 100000 * 100000; u32 c = 'a'; u8 comma = ','; f32 h = 1.5f32; i64 m = -1;",
+    ));
+    rejects(&body("u8 b = 300;"), "300 doesn't fit in u8");
+    rejects(&body("u8 b = 200 + 100;"), "300 doesn't fit in u8");
+    rejects(&body("u8 b = -1;"), "-1 doesn't fit in u8");
+    rejects(&body("u8 e = 'é';"), "isn't ASCII");
+    rejects(&body("u16 c = '\\u{1F600}';"), "doesn't fit in u16");
+    rejects(&body("i64 x = 1.5;"), "expected i64");
+    rejects(&body("i64 x = 300u8;"), "");
+    ok(&body("i64 x = 300i64;"));
+}
+
+#[test]
+fn implicit_conversions_never_lose_information() {
+    ok(&body(
+        "i8 a = 1; i32 b = a; u8 c = 1; i32 d = c; u32 e = 1; i64 f = e; f64 g = e; f32 h = 1.0f32; f64 k = h;",
+    ));
+    rejects(
+        &body("i64 x = 1; i32 y = x;"),
+        "i64 doesn't convert to i32 implicitly",
+    );
+    rejects(
+        &body("i32 x = 1; u32 y = x;"),
+        "i32 doesn't convert to u32 implicitly",
+    );
+    rejects(&body("u64 x = 1; i64 y = x;"), "u64 doesn't convert to i64");
+    rejects(&body("f64 x = 1.0; i64 y = x;"), "truncates toward zero");
+    rejects(&body("i64 n = 1; f64 x = n;"), "i64 doesn't convert to f64");
+}
+
+#[test]
+fn mixed_integer_arithmetic() {
+    ok(&body(
+        "u8 b = 1; i32 n = 2; i32 r = n + b; u32 c = 3; i64 len = 4; i64 s = len - c; u32 d = c - 1; u8 e = b + 1;",
+    ));
+    rejects(
+        &body("u32 c = 1; i32 d = 2; var x = c + d;"),
+        "no type holds every u32 and every i32",
+    );
+    rejects(
+        &body("u64 h = 1; i64 len = 2; var x = h % len;"),
+        "no type holds every u64 and every i64",
+    );
+    rejects(
+        &body("i32 n = 1; i64 len = 2; n += len;"),
+        "i64 doesn't convert to i32 implicitly",
+    );
+    rejects(
+        &body("i64 n = 1; f64 x = 2.0; var y = n * x;"),
+        "no type holds every i64 and every f64",
+    );
+    ok(&body("i32 n = 1; f64 x = 2.0; f64 y = n * x;"));
+    rejects(
+        &body("i64 n = 1; var y = n * 2.5;"),
+        "a float literal with an integer",
+    );
+    rejects(&body("f64 x = 1.0; var y = x % 2.0;"), "needs integers");
+    rejects(&body("i64 n = 1; var y = n / 0;"), "divides by zero");
+    rejects(&body("u8 b = 1; var y = b + 300;"), "300 doesn't fit in u8");
+}
+
+#[test]
+fn comparisons() {
+    ok(&body(
+        "u32 c = 0; i32 d = -1; bool x = d < c; u64 h = 1; i64 n = 2; bool y = h == n; u8 b = 1; bool z = b == ',';",
+    ));
+    rejects(
+        &body("u8 b = 1; bool x = b == 300;"),
+        "300 doesn't fit in u8",
+    );
+    rejects(&body("u8 b = 1; bool x = b == 'é';"), "isn't ASCII");
+    rejects(&body("bool x = \"a\" == 1;"), "can't compare");
+    ok(&body(
+        "string a = \"x\"; u8[..>] buf = []; bool x = a == buf; bool y = a < \"y\";",
+    ));
+}
+
+#[test]
+fn casts() {
+    ok(&body(
+        "i64 n = 300; u8 a = (u8) n; u8 b = (u8%) n; u8 c = (u8|) n; u8 d = (u8%) 300; f64 x = (f64) n; i64 t = (i64) 3.7; u8 s = (u8|) x;",
+    ));
+    rejects(&body("u8 a = (u8) 300;"), "300 doesn't fit in u8");
+    rejects(&body("f64 x = 1.5; u8 a = (u8%) x;"), "a float can't wrap");
+    rejects(
+        &body("i64 n = 1; f64 x = (f64%) n;"),
+        "don't apply to a float target",
+    );
+    rejects(
+        &body("string s = \"a\"; i64 n = (i64) s;"),
+        "casts exist only for numbers",
+    );
+    rejects(&body("i64 n = 1; bool b = (bool) n;"), "no cast to bool");
+}
+
+#[test]
+fn bounds_are_not_types() {
+    rejects(&body("int x = 5;"), "write `i64` or `i32`");
+    rejects(&body("float x = 5.0;"), "write `f64`");
+    rejects("class number { }\n", "built-in name");
+}
+
+// ---------------------------------------------------------------- conditions and statements (DESIGN §9.4)
+
+#[test]
+fn conditions() {
+    ok(&body(
+        "u8 err = 0; if (err) { } bool b = true; while (!b) { } u64 n = 1; var x = n ? 1 : 2;",
+    ));
+    rejects(
+        &body("i32 n = 1; if (n) { }"),
+        "a signed integer (i32) isn't a condition",
+    );
+    rejects(
+        &body("f64 x = 1.0; if (x) { }"),
+        "a condition is a bool or an unsigned integer",
+    );
+    rejects(
+        &body("i64 x = 0; if (x = 0) { }"),
+        "an assignment can't be a condition",
+    );
+    rejects(
+        &body("u8 err = 0; bool b = err;"),
+        "expected bool, found u8",
+    );
+    rejects(&body("while (1) { }"), "a number isn't a condition");
+}
+
+#[test]
+fn statements_that_do_nothing() {
+    rejects(&body("i64 a = 1; a + 1;"), "does nothing");
+    rejects(&body("break;"), "`break` is only for loops");
+    rejects(
+        &body("for (;;) { continue nope; }"),
+        "no enclosing loop is labeled `nope`",
+    );
+    ok(&body(
+        "outer: for (var i = 0; i < 3; i++) { for (;;) { break outer; } }",
+    ));
+}
+
+#[test]
+fn names() {
+    rejects(&body("x = 1;"), "unknown name `x`");
+    rejects(&body("foo(1);"), "unknown function `foo`");
+    rejects(
+        &body("i64 a = 1; i64 a = 2;"),
+        "already declared in this block",
+    );
+    rejects(&body("i64 x = _;"), "`_` can't be read");
+    rejects(&body("_ += 1;"), "compound assignment");
+    rejects(
+        "class C { i64 n; static i64 f() { return n; } }\n",
+        "`f` is static",
+    );
+    rejects(
+        "class C { static void f() { var c = this; } }\n",
+        "`this` is only in",
+    );
+    ok("class Item { i64 n; }\nvoid main() { i64 Item = 3; i64 y = Item + 1; }\n");
+}
+
+#[test]
+fn missing_returns() {
+    rejects(
+        "i64 f(bool b) { if (b) { return 1; } }\n",
+        "can reach its end without returning",
+    );
+    ok("i64 f(bool b) { if (b) { return 1; } else { return 2; } }\n");
+    ok("i64 f() { while (true) { } }\n");
+    ok("i64 f(i64 n) { for (;;) { if (n > 0) { return n; } } }\n");
+    rejects("i64 f() { while (true) { break; } }\n", "can reach its end");
+    ok("i64 f() { fail(\"never\"); }\n");
+    ok("i64 f(i64 n) { switch (n) { case 0 => { return 1; } default => { return 2; } } }\n");
+    rejects("void f() { return 1; }\n", "returns nothing");
+    rejects("i64 f() { return; }\n", "needs a value");
+    rejects(
+        "i64 f() { return #1; }\n",
+        "needs a value, even with a status",
+    );
+}
+
+#[test]
+fn var_needs_a_type_to_copy() {
+    rejects(&body("var x = null;"), "doesn't say which type");
+    rejects(
+        &body("var a = [];"),
+        "`[]` takes its type from where it's used",
+    );
+    rejects(&body("var x;"), "needs an initializer");
+    ok(&body("var a = [1, 2, 3]; i64 first = a[0];"));
+}
+
+// ---------------------------------------------------------------- arrays (DESIGN §4)
+
+#[test]
+fn array_capabilities() {
+    ok(&body(
+        "i64[..>] a = []; a +> 1 +> 2; a.push(3); i64[..~] b = []; @_ = b ->; u32[.~.] t = []; t +^ 5; t.seek(0); i64 c = t.cursor;",
+    ));
+    rejects(
+        &body("i64[.] a = [1, 2]; a.push(3);"),
+        "`push` needs an array that can insert at the end",
+    );
+    rejects(
+        &body("i64[.] a = [1, 2]; a +> 3;"),
+        "`+>` needs an array that can insert at the end",
+    );
+    rejects(
+        &body("i64[..>] a = []; @_ = a ->;"),
+        "`->` needs an array that can remove at the end",
+    );
+    rejects(&body("i64[..>] a = []; a.seek(0);"), "needs a cursor");
+    rejects(
+        &body("i64[..>] a = []; i64 c = a.cursor;"),
+        "`cursor` needs a cursor",
+    );
+    rejects(
+        &body("string s = \"abc\"; s.sort();"),
+        "needs an array or a writable view",
+    );
+    rejects(
+        &body("string s = \"abc\"; s +> 'x';"),
+        "a slice can't change its length",
+    );
+    rejects(&body("i64[..>] a = []; i64 x = a[^0];"), "past the end");
+    rejects(
+        &body("i64[..>] a = []; string s = \"x\"; i64 x = a[s];"),
+        "an index is an integer",
+    );
+}
+
+#[test]
+fn slices_and_views() {
+    ok(&body(
+        "u8[..>] buf = []; string s = buf; string t = buf[1:]; u8[:]& w = buf[0:2]; w .= buf[2:4]; i64[..>] xs = []; xs[1:].sort();",
+    ));
+    rejects(
+        &body("u8[:]& w = \"text\";"),
+        "a read-only slice can't become a writable view",
+    );
+    rejects(
+        &body("u32[.~.] t = []; u32[:] s = t[0:1];"),
+        "can't be sliced",
+    );
+    rejects(
+        &body("u32[.~.] t = []; u32[:] s = t;"),
+        "can't be viewed as a slice",
+    );
+}
+
+#[test]
+fn sorting_needs_ordered_elements() {
+    let row = "class Row { string key; f64 num; }\n";
+    ok(&format!(
+        "{}{}",
+        row,
+        body(
+            "Row[..>] rows = []; rows.sort((Row a, Row b) => a.key < b.key); rows.sortBy((Row r) => r.key); rows.radixSortBy((Row r) => r.num);"
+        )
+    ));
+    rejects(
+        &format!("{}{}", row, body("Row[..>] rows = []; rows.sort();")),
+        "needs elements that are `ordered`",
+    );
+    rejects(
+        &format!(
+            "{}{}",
+            row,
+            body("Row[..>] rows = []; rows.radixSortBy((Row r) => r);")
+        ),
+        "a radix sort's key is a number or a string",
+    );
+    rejects(
+        &body("u8[..>] bytes = []; bytes.sort((i64 a, i64 b) => a < b);"),
+        "expected func(u8, u8 => bool)",
+    );
+}
+
+// ---------------------------------------------------------------- functions and overloading (DESIGN §6.5)
+
+#[test]
+fn overloads_are_ranked() {
+    let defs = "i64 f(i64 x) { return x; }\nstring f(u64 x) { return \"u\"; }\nf64 f(f64 x) { return x; }\n";
+    ok(&format!(
+        "{}{}",
+        defs,
+        body("i64 a = f(42); u32 c = 1; string b = f(c); f32 r = 1.0f32; f64 d = f(r);")
+    ));
+    rejects(
+        &format!("{}{}", defs, body("u32 c = 1; i64 a = f(c);")),
+        "expected i64, found string",
+    );
+    let amb = "void g(i32 a, i64 b) { }\nvoid g(i64 a, i32 b) { }\n";
+    rejects(
+        &format!("{}{}", amb, body("i32 x = 1; g(x, x);")),
+        "is ambiguous",
+    );
+}
+
+#[test]
+fn overload_declarations_must_differ_in_a_type() {
+    rejects(
+        "class Item { i64 n; }\nvoid f(Item x) { }\nvoid f(Item& x) { }\n",
+        "declared twice with the same parameter types",
+    );
+    ok(
+        "void f(string s) { }\nvoid f(u8[..>]& b) { }\nvoid main() { u8[..>] buf = []; f(buf); f(\"x\"); }\n",
+    );
+}
+
+#[test]
+fn arguments() {
+    let f = "i64 f(i64 x) { return x; }\n";
+    rejects(
+        &format!("{}{}", f, body("f(1, 2);")),
+        "`f` takes 1 argument, not 2",
+    );
+    rejects(
+        &format!("{}{}", f, body("f(\"x\");")),
+        "expected i64, found string",
+    );
+    rejects(
+        "class Item { i64 n; }\nItem make() { return new Item(1); }\nvoid touch(Item& i) { }\nvoid main() { touch(make()); }\n",
+        "temporary value",
+    );
+    warns(
+        "void touch(i64& n) { }\nvoid main() { i64 n = 1; touch(&n); }\n",
+        "`&` isn't needed",
+    );
+}
+
+#[test]
+fn lambdas_carry_their_types() {
+    ok(&body(
+        "func(i32, i32 => i32) add = (i32 a, i32 b) => a + b; i32 x = add(2, 3); func(i64, i64 => i64) first = (i64 a, i64 _) => a;",
+    ));
+    rejects(
+        &body("func(i32, i32 => i32) add = (i64 a, i64 b) => a + b;"),
+        "expected func(i32, i32 => i32)",
+    );
+    rejects(
+        &body("func(i64 => i64)? f = null; i64 y = f(1);"),
+        "may be null",
+    );
+}
+
+// ---------------------------------------------------------------- generics (DESIGN §10)
+
+#[test]
+fn generic_inference() {
+    let sum = "<T implements number> T sum(T[:] xs) { T total = 0; for (T x : xs) { total += x; } return total; }\n";
+    ok(&format!(
+        "{}{}",
+        sum,
+        body(
+            "i64[..>] ints = []; i64 a = sum(ints); f64[..>] fs = []; f64 b = sum(fs); i64 m = max(3, 5); u8 x = 1; u8 y = max(x, 2);"
+        )
+    ));
+    rejects(
+        &body("u8 a = 1; u32 b = 2; var m = max(a, b);"),
+        "would be both u8 and u32",
+    );
+    rejects(
+        "class Row { i64 n; }\nvoid main() { Row a = new Row(1); Row b = new Row(2); var m = max(a, b); }\n",
+        "and Row isn't",
+    );
+}
+
+#[test]
+fn generic_bodies_use_only_their_bounds() {
+    rejects(
+        "<T implements number> T f(T x) { T k = 1000; return k; }\n",
+        "doesn't fit every type `T` can be",
+    );
+    ok("<T implements number> T f(T x) { T k = 100; return (T) 1000 + x * 2; }\n");
+    rejects(
+        "<T implements ordered> T f(T x) { return x * 2; }\n",
+        "needs `T` to be `number`",
+    );
+    rejects(
+        "<T implements number> T f(T x) { return x % 2; }\n",
+        "needs `T` to be `int`",
+    );
+    rejects(
+        "<T> bool f(T a, T b) { return a < b; }\n",
+        "`T` isn't `ordered`",
+    );
+    ok("<T implements sint> T neg(T x) { return x * -1; }\n");
+    ok(
+        "<K implements hashable> i64 distinct(K[:] xs) { hashset<K> seen = []; for (K x : xs) { seen.add(x); } return seen.len; }\n",
+    );
+    rejects(
+        "<K> i64 distinct(K[:] xs) { hashset<K> seen = []; return seen.len; }\n",
+        "a hashset element must be hashable",
+    );
+}
+
+#[test]
+fn ordered_classes() {
+    let v = "class V implements ordered { u32 major; i32 compareTo(V o) { return major < o.major ? -1 : (major > o.major ? 1 : 0); } }\n";
+    ok(&format!(
+        "{}{}",
+        v,
+        body("V a = new V(1); V b = new V(2); bool x = a < b; var m = max(a, b);")
+    ));
+    rejects(
+        "class V { u32 major; }\nvoid main() { V a = new V(1); bool x = a < a; }\n",
+        "`V` isn't ordered",
+    );
+    rejects(
+        "class V implements ordered { u32 major; }\n",
+        "needs a `compareTo` method",
+    );
+}
+
+// ---------------------------------------------------------------- classes and interfaces (DESIGN §6)
+
+#[test]
+fn interfaces() {
+    let shape = "interface Shape { f64 area(); }\n";
+    ok(&format!(
+        "{}class Circle implements Shape {{ f64 r; f64 area() {{ return r * r; }} }}\n{}",
+        shape,
+        body(
+            "Circle[..>] cs = []; Shape&[..>] shapes = []; shapes.push(cs.push(new Circle(1.0))); f64 t = 0.0; for (Shape& s : shapes) { t += s.area(); if (s instanceof Circle c && c.r > 1.0) { } }"
+        )
+    ));
+    rejects(
+        &format!("{}class Sq implements Shape {{ f64 side; }}\n", shape),
+        "has no method `area`",
+    );
+    rejects(
+        &format!(
+            "{}class Sq implements Shape {{ f64 side; i64 area() {{ return 1; }} }}\n",
+            shape
+        ),
+        "doesn't match",
+    );
+    rejects(
+        &format!("{}{}", shape, body("Shape s;")),
+        "is an interface, which isn't a value type",
+    );
+    rejects(
+        &format!("{}{}", shape, body("var s = new Shape();")),
+        "can't be constructed",
+    );
+    rejects(
+        "class Item { i64 n; }\nvoid main() { Item i = new Item(1); bool b = i instanceof Item; }\n",
+        "tests an interface reference",
+    );
+}
+
+#[test]
+fn constructors() {
+    let rect = "class Rect { f64 w; f64 h; new(f64 w, f64 h) { this.w = w; this.h = h; } new(f64 side) { this.new(side, side); } }\n";
+    ok(&format!(
+        "{}{}",
+        rect,
+        body(
+            "Rect a = new Rect(1.0, 2.0); Rect b = new Rect(3.0); Rect[..>] rs = []; rs.push(new(1.0, 1.0));"
+        )
+    ));
+    rejects(
+        &format!("{}{}", rect, body("Rect a = new Rect(\"x\");")),
+        "expected f64, found string",
+    );
+    ok(
+        "class Row { string line; f64 num; }\nclass Opts { bool on = false; i64 n = 0; }\nclass Words { string[..>] list; }\nvoid main() { var r = new Row(\"a\", 1.0); var o = new Opts(); var w = new Words(); }\n",
+    );
+    rejects(
+        "class Row { string line; f64 num; }\nvoid main() { var r = new Row(\"a\"); }\n",
+        "takes 2 arguments, not 1",
+    );
+    rejects(
+        &body("var x = new(1);"),
+        "takes its class from where the value goes",
+    );
+    rejects(
+        "class C { i64 n; void f() { this.new(1); } }\n",
+        "only in a constructor",
+    );
+}
+
+#[test]
+fn fields() {
+    rejects(
+        "class C { i64[..>] a; i64[..>] b; }\n",
+        "only one growable field",
+    );
+    rejects("class C { u32[.~.] text; }\n", "only a root can hold one");
+    ok("root R { i64[..>] a; i64[..>] b; u32[.~.] text; }\n");
+    rejects(
+        "class C { private i64 n; }\nvoid main() { C c = new C(1); i64 x = c.n; }\n",
+        "private to `C`",
+    );
+    rejects(
+        "class C { i64 n; }\nvoid main() { C c = new C(1); i64 x = c.m; }\n",
+        "has no field `m`",
+    );
+    rejects(
+        "class C { i64 n; }\nvoid main() { C c = new C(1); i64 x = c.n(); }\n",
+        "`n` isn't a function; it is i64",
+    );
+    rejects("class C { i64 n; void delete() { } }\n", "use `defer`");
+    rejects(
+        &body("hashmap<f64, i64> m = [];"),
+        "a hashmap key must be hashable",
+    );
+    rejects(
+        &body("hashmap<string, i64[..>]> m = [];"),
+        "hashmap values can't grow",
+    );
+    rejects(
+        &body("i64[..>][..>] m = [];"),
+        "an array of growable arrays",
+    );
+}
+
+#[test]
+fn enums_and_switch() {
+    let color = "enum Color { RED, GREEN, BLUE }\n";
+    ok(&format!(
+        "{}{}",
+        color,
+        body(
+            "Color c = Color.RED; string s = switch (c) { case RED => \"r\"; case GREEN, BLUE => \"gb\"; }; switch (c) { case RED => println(\"r\"); default => { } }"
+        )
+    ));
+    rejects(
+        &format!(
+            "{}{}",
+            color,
+            body("Color c = Color.RED; string s = switch (c) { case RED => \"r\"; };")
+        ),
+        "must cover every case",
+    );
+    rejects(
+        &format!("{}{}", color, body("Color c = Color.PINK;")),
+        "has no constant `PINK`",
+    );
+    rejects(
+        &format!(
+            "{}{}",
+            color,
+            body("Color c = Color.RED; switch (c) { case PINK => { } default => { } }")
+        ),
+        "isn't a constant of `Color`",
+    );
+    rejects(
+        &body("i64 n = 1; switch (n) { case 1 => { } case 1 => { } default => { } }"),
+        "already covered",
+    );
+    rejects(
+        &body("u8 b = 1; switch (b) { case 300 => { } default => { } }"),
+        "300 doesn't fit in u8",
+    );
+    rejects(
+        &body("string s = \"x\"; switch (s) { case 1 => { } default => { } }"),
+        "this label is an integer, and the switch is on a string",
+    );
+    ok(&body(
+        "i64 n = 2; string s = switch (n) { case 0 => \"none\"; case 1, 2 => { yield \"few\"; } default => \"many\"; };",
+    ));
+    rejects(&body("yield 1;"), "`yield` gives the value of a block arm");
+}
+
+// ---------------------------------------------------------------- references and null (DESIGN §5)
+
+#[test]
+fn null_narrowing() {
+    let node = "class Node { i64 value; Node&? next; }\n";
+    ok(&format!(
+        "{}i64 sum(Node& head) {{ i64 t = 0; Node&? cur = head; while (cur != null) {{ t += cur.value; cur .= cur.next; }} return t; }}\n",
+        node
+    ));
+    ok(&format!(
+        "{}i64 f(Node&? n) {{ if (n == null) {{ return 0; }} return n.value; }}\n",
+        node
+    ));
+    ok(&format!(
+        "{}i64 f(Node&? n) {{ if (n != null && n.value > 0) {{ return n.value; }} return 0; }}\n",
+        node
+    ));
+    rejects(
+        &format!("{}i64 f(Node&? n) {{ return n.value; }}\n", node),
+        "may be null",
+    );
+    rejects(
+        &format!("{}i64 f(Node& n) {{ return n.next.value; }}\n", node),
+        "narrowing doesn't apply to fields",
+    );
+    rejects(
+        &format!(
+            "{}i64 f(Node&? n) {{ if (n != null) {{ n .= n.next; return n.value; }} return 0; }}\n",
+            node
+        ),
+        "may be null",
+    );
+    rejects(
+        &format!("{}void f(Node&? n, Node& m) {{ n = m; }}\n", node),
+        "`=` writes through it",
+    );
+    rejects(
+        &body("i64 x = null;"),
+        "`null` is only for nullable references",
+    );
+    rejects(
+        &body("i64 x = 1; i64 y = 2; x .= y;"),
+        "`.=` rebinds a reference",
+    );
+}
+
+#[test]
+fn references_need_places() {
+    ok(
+        "class Item { i64 n; }\nvoid main() { Item[..>] items = []; items +> new Item(1); Item& r = items[0]; r .= items[0]; var& v = items[0]; for (Item& it : items) { it.n++; } }\n",
+    );
+    rejects(
+        "class Item { i64 n; }\nItem make() { return new Item(1); }\nvoid main() { Item& r = make(); }\n",
+        "temporary value",
+    );
+    rejects(&body("var& x = 1 + 2;"), "temporary value");
+    rejects(
+        &body("string s = \"ab\"; for (u8& b : s) { }"),
+        "can't be referred to with `&`",
+    );
+}
+
+// ---------------------------------------------------------------- statuses (DESIGN §7)
+
+#[test]
+fn status_writes() {
+    ok(
+        "i64 f(i64 x) { if (x < 0) { return #status.INVALID 0; } u8 why = 1; if (x == 0) { return #why 0; } return #(x > 9) x; }\n",
+    );
+    rejects("void f() { return #300; }\n", "a status is a u8");
+    rejects(
+        "void f() { i64 n = 1; return #n; }\n",
+        "`#` takes a u8 or bool variable",
+    );
+    rejects(
+        "void f() { i64 n = 1; return #(n); }\n",
+        "`#( ... )` takes a u8 or a bool",
+    );
+    rejects(
+        "void f() { return #status.not_found; }\n",
+        "isn't a status code",
+    );
+    rejects("void main() { return #1; }\n", "`main` can't set a status");
+    rejects(
+        &body("i64 x = 0; u8 e = @x;"),
+        "`@` reads the status of a call",
+    );
+}
+
+#[test]
+fn dropped_statuses_warn() {
+    warns(
+        &body("i64[..~] a = []; i64 x = a.pop();"),
+        "the status of `pop` can be nonzero, and it is dropped",
+    );
+    warns(&body("i64[..~] a = []; a ->;"), "the status of `->`");
+    warns(
+        "i64 f() { return #1 0; }\nvoid main() { i64 x = f(); }\n",
+        "the status of `f`",
+    );
+    warns(&body("i64 n = i64.parse(\"1\");"), "the status of `parse`");
+    ok(&body(
+        "i64[..~] a = []; i64 x @e = a.pop(); i64 y @_ = a.pop(); @_ = a.pop(); u8 s = @a.pop(); if (@a.pop()) { } x @e = a.pop();",
+    ));
+    ok(&body(
+        "i64[..>] a = []; a.push(1); u8[..>] t = []; t.append(\"x\");",
+    ));
+    warns(
+        &body("i64[..>16] a = []; a.push(1);"),
+        "the status of `push`",
+    );
+    rejects(
+        &body("i64 n @e = i64.parse(\"1\"); @nope = i64.parse(\"2\");"),
+        "`nope` isn't declared",
+    );
+    rejects(
+        &body("i64 n = 0; @n = i64.parse(\"2\");"),
+        "a status goes into a u8",
+    );
+}
+
+#[test]
+fn repeat_loops() {
+    ok(&body(
+        "i64[..~] todo = []; while (i64 t : todo ->) { todo +> t - 1; }",
+    ));
+    ok(
+        "i64 next() { return #1 0; }\nvoid main() { while (i64 x : next()) @why { } if (why != status.END) { } }\n",
+    );
+    rejects(
+        "i64 next() { return 0; }\nvoid main() { while (i64 x : next()) { } }\n",
+        "never sets a status, so the loop would never end",
+    );
+    rejects(
+        "void next() { return #1; }\nvoid main() { while (i64 x : next()) { } }\n",
+        "returns nothing",
+    );
+    ok(
+        "(string, string) pair() { return #1 (\"a\", \"b\"); }\nvoid main() { while ((string k, string v) : pair()) { } }\n",
+    );
+}
+
+#[test]
+fn iterators() {
+    let cd = "class Countdown { i64 n; mut i64 next() { if (n == 0) { return #status.END 0; } n--; return n + 1; } }\n";
+    ok(&format!(
+        "{}{}",
+        cd,
+        body(
+            "for (i64 x : new Countdown(3)) { } Countdown c = new Countdown(2); while (i64 x : c.next()) { }"
+        )
+    ));
+    rejects(
+        &format!(
+            "{}{}",
+            cd,
+            body("Countdown c = new Countdown(3); for (i64 x : c) { }")
+        ),
+        "a for-each over an iterator variable isn't allowed",
+    );
+    ok(&body(
+        "string text = \"a b\"; for (string l : text.lines()) { } for (u32 c : text.codePoints()) { } hashmap<string, i64> m = []; for (var& e : m) { e.value++; }",
+    ));
+    rejects(
+        &body("hashmap<string, i64> m = []; for (var& e : m) { e.key = \"x\"; }"),
+        "a hashmap entry's key can't be changed",
+    );
+}
+
+// ---------------------------------------------------------------- tuples and text (DESIGN §9.5, §4.11)
+
+#[test]
+fn tuples() {
+    let split = "(string, string) split(string s) { return (s, \"\"); }\n";
+    ok(&format!(
+        "{}{}",
+        split,
+        body(
+            "(string a, string b) = split(\"x\"); (a, b) = split(\"y\"); (string w, _) = split(\"z\"); (a, b) = (b, a); _ = split(\"q\");"
+        )
+    ));
+    rejects(
+        &format!("{}{}", split, body("var t = split(\"x\");")),
+        "must be destructured",
+    );
+    rejects(
+        &format!(
+            "{}{}",
+            split,
+            body("(string a, string b, string c) = split(\"x\");")
+        ),
+        "this gives 2 results, and there are 3 targets",
+    );
+    rejects(
+        &body("(i64 a, i64 b) = 5;"),
+        "only a call with several results",
+    );
+}
+
+#[test]
+fn text() {
+    ok(&body(
+        "string s = \"a,b\"; i64 n = 1; f64 x = 2.0; println(\"${n} ${x.fixed(2)} ${n.pad(4)} ${s.trim()} ${n.hex()}\"); var parts = s.split(\",\"); (string a, string b) = s.splitFirst(\",\"); bool c = s.startsWith(\"a\");",
+    ));
+    rejects(
+        "class P { i64 x; }\nvoid main() { P p = new P(1); println(\"${p}\"); }\n",
+        "a class value can't be printed",
+    );
+    rejects(
+        &body("string a = \"x\"; var b = a + \"y\";"),
+        "there's no `+` on strings",
+    );
+    rejects(
+        &body("i64 n = 1; var s = n.fixed(2);"),
+        "has no method `fixed`",
+    );
+    rejects(
+        &body("string s = \"a\"; s.nope();"),
+        "string has no method `nope`",
+    );
+}
+
+#[test]
+fn main_signature() {
+    ok("u8 main(string[.] args) { return 0; }\n");
+    rejects(
+        "i64 main() { return 0; }\n",
+        "`main` returns `void`, or `u8`",
+    );
+    rejects(
+        "void main(i64 n) { }\n",
+        "`main` takes no parameters, or `string[.] args`",
+    );
+}
+
+#[test]
+fn defer_rules() {
+    rejects(
+        &body("defer { return; }"),
+        "a deferred statement can't `return`",
+    );
+    rejects(
+        &body("for (;;) { defer { break; } }"),
+        "can't `return`, `break` or `continue`",
+    );
+    ok(&body("defer { for (;;) { break; } }"));
+    ok(&body("i64[..~] a = []; defer @_ = a.pop();"));
+}
+
+/// Each example with one line deleted, then with one line duplicated: whatever
+/// still parses must type-check to completion, with errors rather than a panic.
+#[test]
+fn edited_examples_never_panic() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "zn") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for i in 0..lines.len() {
+            for dup in [false, true] {
+                let mut edited: Vec<&str> = lines.clone();
+                if dup {
+                    edited.insert(i, lines[i]);
+                } else {
+                    edited.remove(i);
+                }
+                let file = SourceFile::new("edited.zn", edited.join("\n"));
+                let _ = zink::check(std::slice::from_ref(&file));
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 1000);
+}
