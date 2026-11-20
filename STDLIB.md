@@ -11,7 +11,7 @@
 
 | Package | Contents | Tier | § |
 |---|---|---|---|
-| `zink.lang` | imported automatically: output and streams, `status`, `exit`, `fail`, `env`, number parsing and helpers, text methods, array methods, `hashmap`, `hashset`, `pool`, `Iterator` | v1 | 2, 3, 7 |
+| `zink.lang` | imported automatically: output and streams, `status`, `exit`, `fail`, `env`, number parsing and helpers, text methods, array methods, `hashmap`, `hashset`, `pool`, `Handle`, `Iterator` | v1 | 2, 3, 7 |
 | `zink.io` | `File`, `Dir`, `fs`, `path` | v1 | 4 |
 | `zink.os` | `process`, `Command`, `term` | v1 | 5.1–5.2 |
 | `zink.time` | `time`, `Duration`, `Instant`, `Timestamp`, `DateTime` | v1 | 5.3 |
@@ -22,7 +22,7 @@
 | `zink.encoding` | `hex`, `base64` | v1 | 8.4 |
 | `zink.csv` | `CsvReader`, `CsvWriter` | v1 | 9.1 |
 | `zink.data` | the shared parsed tree: `Node`, `Value`, `Entry`, `Kind`, `ParseError`, `Parser`, `DataWriter`, `TreeBuilder` | later | 9.2, 9.7 |
-| `zink.json` | `JsonParser`, `JsonReader`, `JsonWriter`, `json`; JSON and JSON5 | later | 9.3, 9.4 |
+| `zink.json` | `JsonParser`, `JsonReader`, `JsonEvent`, `JsonToken`, `JsonWriter`, `json`; JSON and JSON5 | later | 9.3, 9.4 |
 | `zink.toml` | `TomlParser`, `toml` | later | 9.5 |
 | `zink.yaml` | `YamlParser`, `yaml` | later | 9.6 |
 | `zink.glob`, `zink.regex` | `glob`, `Regex` | later | 9.9 |
@@ -39,7 +39,7 @@
 - **Built-in types are lowercase**, as `string` and `hashmap` already are: `hashset`, `pool`. So are the built-in generic bounds: `number`, `ordered`, `hashable` and the rest (DESIGN §10.1).
 - **Classes with only static members are lowercase**, as `status` already is: `math.sqrt(x)`, `path.join(a, b)`, `fs.remove(p)`.
   - They read as namespaces.
-  - They never collide with a program's own capitalized classes.
+  - They never collide with a program's own capitalized classes. A local variable with the same name, such as `string path`, hides the class inside its scope (DESIGN §8.5).
 - **Format-specific names carry the format**: `JsonParser`, `TomlParser`. Otherwise two wildcard imports would bring in two `Parser`s (DESIGN §8.5).
 - **Overloads share a name when they do the same thing for different inputs** (DESIGN §6.5): `i64.parse(s)` and `i64.parse(s, 16)`, `s.find(x)` and `s.find(x, from)`, and a writer's one `write`, for `string`, `i64`, `f64` and the rest.
 - **Different behaviour gets a different name**, even where the types would tell the calls apart: `sort(less)` and `sortBy(key)`, `parse` and `parsePrefix`.
@@ -105,7 +105,7 @@ void errprintln(string text)
 
 - **They set no status** (DESIGN §4.13), so a bare `println` draws no warning. A failed write is reported on stderr at exit and makes the exit status 1. For code that must check each write, `stdout.write(...)` and `stdout.flush()` fail with `IO`, `NO_SPACE` or `BROKEN_PIPE`.
 - **Writing to stdout after its reader has gone ends the program quietly**, so `BROKEN_PIPE` is only reported for stderr (DESIGN §7.6).
-- **`stdin`, `stdout` and `stderr` are `File` handles** for descriptors 0, 1 and 2, with the methods of §4.1 (Proposed, §11). DESIGN §4.13 only says they have "the same methods as files".
+- **`stdin`, `stdout` and `stderr` are `File` handles** for descriptors 0, 1 and 2, with the methods of §4.1 (Decided), so `File input = stdin;` works.
 - **Buffering**:
   - stdout is line-buffered on a terminal and block-buffered otherwise;
   - stderr is unbuffered;
@@ -144,7 +144,7 @@ EnvIterator env.all()                     // for (EnvVar v : env.all()) { ... v.
 On every number type `T`:
 
 ```
-T T.parse(string s)                   // INVALID, RANGE
+T T.parse(string s)                   // INVALID; RANGE for integer types
 T T.parse(string s, i64 base)         // integer types; base 2–36, no prefix; INVALID, RANGE
 (T, string) T.parsePrefix(string s)   // the number at the start of s, and the rest of s; INVALID, RANGE
 
@@ -161,6 +161,7 @@ bool x.isNaN(), bool x.isFinite()     // float types
 <T implements int> T x.divOr(T d, T fallback)     // x / d, or fallback when d is 0
 ```
 
+- **Floats never fail with `RANGE`.** A value beyond the type's range parses as ±infinity, and one too small as 0, as IEEE 754 rounding and the float casts do (DESIGN §9.1).
 - **`parse` accepts** a sign, then digits, with no spaces and no `_`.
   - Unsigned types take no `-`.
   - `f64.parse` also takes a fraction, an exponent, `inf` and `nan`.
@@ -807,13 +808,13 @@ DESIGN §3.5, made concrete:
 
 ```
 pool<Conn> conns = [];
-Handle h = conns.add(new Conn(fd));      // reuses a freed slot, or grows
+Handle<Conn> h = conns.add(new Conn(fd)); // reuses a freed slot, or grows
 Conn& c @gone = conns.get(h);            // MISSING after h was freed
 @_ = conns.free(h);                      // MISSING when already freed
 for (Conn& c : conns) { ... }            // live slots only
 ```
 
-- **A `Handle` is a slot index and a generation**, 8 bytes in all.
+- **A `Handle<T>` is a slot index and a generation**, 8 bytes in all. Its type argument is the pool's element type, so passing a handle to a pool of another type is a compile error. A handle from a different pool of the same type still type-checks: its generation check usually catches it, and otherwise it reads the wrong slot, a logic bug but never memory corruption.
   - Freeing a slot bumps its generation, so a stale handle fails with `MISSING` instead of reading the slot's next value.
   - On failure, `get` still returns a reference to the slot, which is safe because a pool slot always holds a `T` (REFERENCES §5.4).
 - **`T&` references into a pool are exempt from rule R** (REFERENCES §5.4), and may be stored in fields (REFERENCES §7.4). A stale one reads the replacement: a logic bug, never memory corruption.
@@ -1013,7 +1014,7 @@ for (Value user : cfg.get("users").items()) {
 | `EntryIterator entries()` | an object's entries in document order, as `Entry { string key; Value value; }` | |
 | `string asString()` | | `MISSING`, `TYPE` |
 | `i64 asI64()`, `u64 asU64()` | | `MISSING`, `TYPE`, `RANGE` |
-| `f64 asF64()` | an integer converts | `MISSING`, `TYPE` |
+| `f64 asF64()` | an integer converts; a number beyond `f64`'s range reads as ±infinity | `MISSING`, `TYPE` |
 | `bool asBool()` | | `MISSING`, `TYPE` |
 | `DateTime asDateTime()` | TOML's dates and times (§5.3) | `MISSING`, `TYPE` |
 | `asStringOr(fallback)`, `asI64Or`, `asF64Or`, `asBoolOr` | the fallback when the value is absent or null | `TYPE`, with the fallback |
@@ -1224,16 +1225,19 @@ interface DataWriter {
     mut void write(DateTime d);
     mut void write(Value v);           // a whole parsed subtree
     mut void writeNull();
+    mut void writeNumber(string text); // a number exactly as written, such as the text a reader gave
     mut void finish();                 // TYPE, FULL
 }
 ```
 
 - **`write` is overloaded** (DESIGN §6.5): `w.write(80)` writes an `i64`, a `u32` goes to `write(u64)`, and an `f32` to `write(f64)`.
+- **Numbers keep their text through a copy.** `writeNumber(e.text)` and `write(Value)` write a number exactly as the input spelled it, so `12345678901234567890` and `1.50` survive reformatting.
 - **Only `finish()` sets a status** (§1.3, rule 7).
 - **Misuse is a bug and stops the program**: a value inside an object without a key, `end()` with nothing open, or `finish()` with something still open.
 - **`finish()` fails with**:
   - `TYPE` when a value has no form in the output format, such as a NaN in JSON or a null in TOML. JSON gets `null` in its place, and TOML leaves the key out.
-  - `FULL` when alias expansion hit its limit.
+  - `FULL` when alias expansion hit its limit;
+  - `INVALID` when `writeNumber` was given text that isn't a number in the output format.
 - **The output is complete and well formed even then.**
 
 **`JsonWriter`** streams JSON into a buffer:
@@ -1549,7 +1553,6 @@ while (running) {
 - **Reading into classes**: filling a class from a tree by field name, and writing one out, need compile-time access to fields. That could be a restricted, compile-time-only reflection, or generated methods like Rust's `derive`.
 
 **Library design**
-- **`stdin`, `stdout` and `stderr` as `File` values** (§2.1) rather than a separate stream type.
 - **Scratch space for `stableSort` and `radixSort`**: n/2 and n elements on a scratch data stack. In-place versions avoid it, at some cost in speed.
 - **The `Args` option limit** of 64, and whether to check option names at compile time when they are literals.
 - **Sorted walks**: `fs.walk` returns entries in directory order. Sorting each directory's names needs more buffer space.

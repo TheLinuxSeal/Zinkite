@@ -1,0 +1,120 @@
+#!/usr/bin/env zink
+// cachesim: replay a trace of keys through an LRU cache and report the hit rate.
+// usage: cachesim [-c capacity] [trace]       one key, an unsigned integer, per line
+//
+// The cache is a root (DESIGN §6.6): a pool of nodes and a hash map from key to
+// the node's handle, two growable parts. The nodes form a doubly linked list,
+// most recently used first, through references into the pool (REFERENCES §7.4).
+
+import zink.cli.*;
+import zink.io.*;
+
+class Node<K> {
+    K key;
+    Node<K>&? prev;         // toward the most recently used end
+    Node<K>&? next;         // toward the least recently used end
+}                           // no constructor: new Node<K>(key, null, null)
+
+root LruCache<K implements hashable> {
+    pool<Node<K>> nodes;
+    hashmap<K, Handle<Node<K>>> index;   // key -> its node's slot in nodes
+    Node<K>&? head = null;      // most recently used
+    Node<K>&? tail = null;      // least recently used
+    i64 capacity;
+    i64 hits = 0;
+    i64 misses = 0;
+
+    new(i64 capacity) { this.capacity = capacity; }
+
+    // Makes key the most recently used, adding it if needed; true if it was cached.
+    mut bool touch(K key) {
+        Handle<Node<K>> h @missing = index.get(key);
+        if (!missing) {
+            Node<K>& n @_ = nodes.get(h);       // never stale: an evicted key leaves the index
+            unlink(n);
+            pushFront(n);
+            hits++;
+            return true;
+        }
+        misses++;
+        if (index.len == capacity) { evictLast(); }
+        Handle<Node<K>> fresh = nodes.add(new Node<K>(key, null, null));   // reuses the evicted slot
+        index.put(key, fresh);
+        Node<K>& n @_ = nodes.get(fresh);
+        pushFront(n);
+        return false;
+    }
+
+    // Takes n out of the list and joins its neighbours.
+    mut void unlink(Node<K>& n) {
+        Node<K>&? before = n.prev;
+        Node<K>&? after = n.next;
+        if (before != null) { before.next .= after; } else { head .= after; }
+        if (after != null) { after.prev .= before; } else { tail .= before; }
+        n.prev .= null;
+        n.next .= null;
+    }
+
+    mut void pushFront(Node<K>& n) {
+        Node<K>&? first = head;
+        n.next .= first;
+        if (first != null) { first.prev .= n; } else { tail .= n; }
+        head .= n;
+    }
+
+    mut void evictLast() {
+        Node<K>&? last = tail;
+        if (last == null) { return; }           // last is narrowed from here on (DESIGN §5.1)
+        K key = last.key;
+        unlink(last);
+        Handle<Node<K>> h @_ = index.get(key);
+        @_ = index.remove(key);
+        @_ = nodes.free(h);                     // last now reads whatever reuses the slot; it isn't used again
+    }
+}
+
+u8 main(string[.] args) {
+    Args cli = new Args("cachesim", "Replay a trace of keys through an LRU cache.");
+    cli.option('c', "capacity", "N", "cache size in entries (1000)");
+    cli.positional("trace", "one key per line; stdin when left out");
+    cli.parseOrExit(args);
+
+    i64 capacity @badCapacity = cli.getI64("capacity", 1000);
+    if (badCapacity || capacity < 1) { cli.usageError("--capacity takes a number from 1"); }
+
+    File input = stdin;
+    string file = cli.get("trace", "");
+    if (file != "") {
+        File f @cantOpen = File.open(file);
+        if (cantOpen) {
+            errprintln("cachesim: can't open ${file}: ${status.message(cantOpen)}");
+            return 1;
+        }
+        input = f;
+    }
+
+    LruCache<u64> cache = new LruCache<u64>(capacity);
+    u8[..~] buf = [];                           // one line at a time
+    i64 skipped = 0;
+    while (string line : input.nextLine(buf)) @why {
+        string t = line.trim();
+        if (t == "") { continue; }
+        u64 key @notKey = u64.parse(t);
+        if (notKey) { skipped++; continue; }
+        cache.touch(key);
+    }
+    if (why != status.END) {
+        errprintln("cachesim: read error: ${status.message(why)}");
+        return 1;
+    }
+    if (file != "") { @_ = input.close(); }
+
+    i64 total = cache.hits + cache.misses;
+    f64 rate = total > 0 ? (f64) cache.hits * 100.0 / (f64) total : 0.0;
+    println("capacity  ${capacity}");
+    println("accesses  ${total}");
+    println("hits      ${cache.hits} (${rate.fixed(2)}%)");
+    println("misses    ${cache.misses}");
+    if (skipped > 0) { errprintln("cachesim: skipped ${skipped} lines that weren't keys"); }
+    return 0;
+}

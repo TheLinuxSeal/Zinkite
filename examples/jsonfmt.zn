@@ -1,0 +1,133 @@
+#!/usr/bin/env zink
+// jsonfmt: re-indent JSON. With --sort-keys, rewrite it with every object's keys sorted.
+// usage: jsonfmt [--indent N] [-c] [-s] [file]
+//
+// Without -s it is copied event by event, with no tree in between. With -s it
+// is parsed into a tree first, since sorting needs all of an object's keys.
+
+import zink.cli.*;
+import zink.io.*;
+import zink.data.*;
+import zink.json.*;
+
+// Copies every event from r to w. Fails with the reader's status on malformed JSON.
+void stream(JsonReader& r, JsonWriter& w, u8[..>]& strings) {
+    while (JsonEvent e : r.next()) @why {
+        switch (e.kind) {
+            case BEGIN_OBJECT => w.beginObject();
+            case BEGIN_ARRAY => w.beginArray();
+            case END_OBJECT, END_ARRAY => w.end();
+            case KEY => w.key(e.decode(strings));
+            case STRING => w.write(e.decode(strings));
+            case TRUE => w.write(true);
+            case FALSE => w.write(false);
+            case NULL => w.writeNull();
+            case NUMBER => w.writeNumber(e.text);  // exactly as written, so no digit is lost
+        }
+    }
+    if (why != status.END) { return #(why); }
+}
+
+// One object or array being written: its children are pending[next:end].
+class Frame {
+    i64 next;
+    i64 end;
+    bool isObject;
+}
+
+class Child {
+    string key;         // "" for an array's elements
+    Value value;        // a view into the tree
+}
+
+// If v is an object or an array: starts it, queues its children (an object's
+// sorted by key) and returns true. Otherwise returns false.
+bool open(Value v, JsonWriter& w, Child[..>]& pending, Frame[..>]& stack) {
+    Kind k = v.kind();
+    if (k != Kind.OBJECT && k != Kind.ARRAY) { return false; }
+    i64 start = pending.len;
+    if (k == Kind.OBJECT) {
+        w.beginObject();
+        for (Entry e : v.entries()) { pending +> new Child(e.key, e.value); }
+        pending[start:].stableSortBy((Child c) => c.key);    // only this object's children; repeated keys keep their order
+    } else {
+        w.beginArray();
+        for (Value item : v.items()) { pending +> new Child("", item); }
+    }
+    stack +> new Frame(start, pending.len, k == Kind.OBJECT);
+    return true;
+}
+
+// Writes root with every object's keys sorted. It keeps its own stack of open
+// containers instead of recursing, so deeply nested input can't overflow the
+// native stack, as the parsers don't (STDLIB.md §9.2).
+void writeSorted(Value root, JsonWriter& w) {
+    Child[..>] pending = [];                    // the children of every container reached so far
+    Frame[..~] stack = [];
+    if (!open(root, w, pending, stack)) {
+        w.write(root);
+        return;
+    }
+    while (stack.len > 0) {
+        Frame& top = stack[^1];
+        if (top.next == top.end) {
+            w.end();
+            @_ = stack ->;                      // fine: top isn't used after this
+            continue;
+        }
+        Child c = pending[top.next];
+        top.next++;
+        if (top.isObject) { w.key(c.key); }
+        if (!open(c.value, w, pending, stack)) { w.write(c.value); }
+    }
+}
+
+u8 report(ParseError e, string file) {
+    errprintln("jsonfmt: ${file == "" ? "stdin" : file}:${e.line}:${e.column}: ${e.message}");
+    return 1;
+}
+
+u8 main(string[.] args) {
+    Args cli = new Args("jsonfmt", "Re-indent JSON.");
+    cli.option(0, "indent", "N", "spaces per level (2)");
+    cli.flag('c', "compact", "everything on one line");
+    cli.flag('s', "sort-keys", "sort every object's keys");
+    cli.positional("file", "input file; stdin when left out");
+    cli.parseOrExit(args);
+
+    i64 indent @badIndent = cli.getI64("indent", 2);
+    if (badIndent || indent < 0 || indent > 16) { cli.usageError("--indent takes a number from 0 to 16"); }
+
+    u8[..>] text = [];
+    string file = cli.get("file", "");
+    u8 err = file == "" ? @stdin.readAll(text) : @File.readAll(file, text);
+    if (err) {
+        errprintln("jsonfmt: can't read ${file == "" ? "stdin" : file}: ${status.message(err)}");
+        return 1;
+    }
+
+    u8[..>] strings = [];                       // strings that had escapes, decoded
+    u8[..>] out = [];
+    JsonWriter w = new JsonWriter(out);
+    w.indent = cli.has("compact") ? 0 : indent;
+
+    if (cli.has("sort-keys")) {
+        Node[..>] tree = [];
+        JsonParser p = new JsonParser(text);
+        Value v @bad = p.parse(tree, strings);
+        if (bad) { return report(p.error(), file); }
+        writeSorted(v, w);
+    } else {
+        JsonReader r = new JsonReader(text);
+        u8 bad = @stream(r, w, strings);
+        if (bad) { return report(r.error(), file); }
+    }
+
+    u8 finished = @w.finish();                  // can't fail on JSON the reader or parser accepted; checked anyway
+    if (finished) {
+        errprintln("jsonfmt: ${status.message(finished)}");
+        return 1;
+    }
+    println(out);
+    return 0;
+}

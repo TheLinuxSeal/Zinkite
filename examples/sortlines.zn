@@ -1,0 +1,69 @@
+#!/usr/bin/env zink
+// sortlines: sort lines of text, like a small sort(1).
+// usage: sortlines [-r] [-n | -V] [-u] [--header] [--top N] [file]
+
+import zink.cli.*;
+import zink.io.*;
+
+class Keyed {
+    f64 num;            // the line read as a number, for -n
+    string line;        // a view into the input text
+}
+
+u8 main(string[.] args) {
+    Args cli = new Args("sortlines", "Sort lines of text.");
+    cli.flag('r', "reverse", "largest first");
+    cli.flag('n', "numeric", "compare the number each line starts with; no number counts as 0");
+    cli.flag('V', "natural", "compare runs of digits as numbers: file2 before file10");
+    cli.flag('u', "unique", "print each line once");
+    cli.flag(0, "header", "keep the first line where it is");
+    cli.option(0, "top", "N", "print only the first N lines");
+    cli.positional("file", "input file; stdin when left out");
+    cli.parseOrExit(args);
+
+    bool numeric = cli.has("numeric");
+    bool natural = cli.has("natural");
+    bool reverse = cli.has("reverse");
+    bool unique = cli.has("unique");
+    if (numeric && natural) { cli.usageError("-n and -V can't be combined"); }
+    i64 top @badTop = cli.getI64("top", i64.MAX);
+    if (badTop || top < 0) { cli.usageError("--top takes a number from 0"); }
+
+    u8[..>] text = [];                          // the whole input; it only grows, so views into it stay valid
+    string file = cli.get("file", "");
+    u8 err = file == "" ? @stdin.readAll(text) : @File.readAll(file, text);
+    if (err) {
+        errprintln("sortlines: can't read ${file == "" ? "stdin" : file}: ${status.message(err)}");
+        return 1;
+    }
+
+    string[..~] lines = [];                     // views into text
+    for (string l : text.lines()) { lines +> l; }
+
+    i64 first = cli.has("header") && lines.len > 0 ? 1 : 0;
+    string[:]& body = lines[first:];            // a writable view: sorting it leaves the header alone
+
+    if (numeric) {
+        Keyed[..>] keyed = [];
+        for (string l : body) {
+            (f64 v, _) @_ = f64.parsePrefix(l.trim());     // the leading number, as sort -n reads it; none: 0
+            keyed +> new Keyed(reverse ? -v : v, l);       // -r negates the key, so equal numbers keep their order
+        }
+        if (unique) { keyed.sort((Keyed a, Keyed b) => a.line < b.line); }   // equal lines end up next to each other
+        keyed.radixSortBy((Keyed k) => k.num);  // stable, so equal numbers keep the order they had
+        for (i64 i = 0; i < body.len; i++) { body[i] = keyed[i].line; }
+    } else {
+        if (natural) {
+            body.stableSort((string a, string b) => a.compareNatural(b) < 0);
+        } else {
+            body.sort();
+        }
+        if (reverse) { body.reverse(); }        // no two different lines compare equal here, so nothing reorders
+    }
+
+    if (unique) { lines.dedup(); }              // equal lines are next to each other now
+
+    i64 shown = min(top, lines.len);
+    for (i64 i = 0; i < shown; i++) { println(lines[i]); }
+    return 0;
+}

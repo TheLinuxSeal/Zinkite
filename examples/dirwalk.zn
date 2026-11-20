@@ -7,6 +7,8 @@
 // rejected: a recursive call can't happen while a growable local is in scope
 // (REFERENCES.md §8.4).
 
+import zink.io.*;
+
 class Pending {
     string path;        // a view into `paths`, which only grows
     i64 parent;         // index of the parent in `dirs`, or -1 for the root

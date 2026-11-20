@@ -54,7 +54,7 @@ There are **no aliasing or exclusivity rules**: two references to the same eleme
 ## 3. Roots (rule S)
 
 ### 3.1 Root sets
-Every reference value has a **root set**: the variables whose storage it may point into, plus `static` for static data such as string literals.
+Every reference value has a **root set**: the variables whose storage it may point into, plus `static` for static data such as string literals. For a root (DESIGN §6.6), whose parts are stored separately, the set names the part: `cache.nodes`, not just `cache` (§8.2).
 - A value that contains references has the union of their root sets.
 - A value with no references inside has an empty root set and can be stored anywhere.
 
@@ -303,7 +303,7 @@ L1–L3 keep every link inside its array, and that memory never holds another ty
 - Each stack has one bump pointer. It moves up when a value is placed or grows, and back down when a scope ends.
 
 ### 8.2 Growable fields
-A class has at most one growable field, and it must be the last field, so the value can grow at its end. A root (DESIGN §6.6), Goose's root struct, gives each growable field its own data stack instead. Its value is a record of where each part lives, so it is never copied, and the compiler assigns each root variable's stacks as it does a growable local's. Rules S and R treat the root variable as the base of every reference into its parts.
+A class has at most one growable field, and it must be the last field, so the value can grow at its end. A root (DESIGN §6.6), Goose's root struct, gives each growable field its own data stack instead. Its value is a record of where each part lives, so it is never copied, and the compiler assigns each root variable's stacks as it does a growable local's. A reference into one of its parts is rooted at that part, such as `cache.nodes`, and each part lives as long as the root variable. Rule R checks a removal from one part, such as `cache.index.remove(k)`, only against references into that part, so references into `cache.nodes` stay usable; and a pool part keeps the pool exemption (§5.4).
 
 ### 8.3 Calls and returns
 - **Growing a parameter**: a function that grows a `T[..>]&` parameter grows it on the argument's stack. Its own resizable locals go on other stacks, which its summary records (§4.1).
@@ -339,7 +339,7 @@ Goose marks the entry to a recursive cycle with `recursive fn`. Zinkite finds cy
 - **Slices are read-only; writable views are `T[:]&`** (DESIGN §4.10). A writable view follows the same root rules as a slice, and can only be taken of an array the code may change, so never of a string literal, which lives in read-only memory. Goose instead tracks which views are writable from where they came from, with literals typed `const u8[:]` (Goose §3.10, §9.5). Zinkite writes it in the type, as plain and `&` parameters already say whether a callee may change an argument.
 - **Interface references** follow the same rules as `T&`. The slot they point into keeps its class, so the method table stays right.
 - **Lambdas** passed as parameters are compile-time values. A captured reference keeps its roots, and the lambda can't outlive the call. A `func` stored in a variable or field can't capture (DESIGN §9.3).
-- **Hash maps** (DESIGN §4.14) follow the rules for removable arrays. Their entries never move on insert, so `put` and `getOrAdd` invalidate nothing. `remove` and `clear` are removals under rule R, and may compact the entries. References into a `hashmap` can be held only in local variables and parameters (§5.3). Each map uses two data stacks under rule G, one for its entries and one for its index.
+- **Hash maps** (DESIGN §4.14) follow the rules for removable arrays. Their entries never move on insert, so `put` and `getOrAdd` invalidate nothing. `remove` and `clear` are removals under rule R, and may compact the entries. References into a `hashmap` can be held only in local variables and parameters (§5.3). Each map is one region on one data stack under rule G: its entries, then its index (DESIGN §4.14).
 - **Repeat loops** (`while (T x : call)`, DESIGN §9.4): the header's variables are declared afresh in the body on each pass, and the call is made before they exist. So when the call runs, no binding from the previous pass is live, and the call may remove from what that binding viewed: `stdin.nextLine(buf)` clears `buf` on every pass. Storing `line` in an outer array is still rejected, by §5.3: `buf` is removable, so a view into it can't be stored in an array.
 - **For-each over an iterator** (DESIGN §9.4): the loop keeps the iterator in a hidden local for the whole loop. An iterator that holds a view or a reference into something, like `text.lines()`, keeps it live for the whole loop, so a removal from that data inside the loop is a compile error under rule R. A `mut T& next()` returns references, which follow rule S like any other.
 - **For-each by reference** (`for (Item& it : items)`): the loop variable is a reference rooted at the array, so removing from that array inside the loop body is a compile error under rule R. For-each by value holds no reference; removing inside one is a compile error until DESIGN §17 decides whether to allow it.

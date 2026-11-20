@@ -1,0 +1,128 @@
+#!/usr/bin/env zink
+// stats: summary statistics of numbers, one per line.
+// usage: stats [-i] [--top N] [file]
+//   -i         read integers, and count how often each value occurs
+//   --top N    with -i, print the N most common values (10)
+
+import zink.cli.*;
+import zink.io.*;
+import zink.math.*;
+
+// Everything is computed in f64, so integers beyond 2^53 print rounded, and
+// values near f64's limits can make the mean and stddev overflow to infinity.
+class Summary {
+    i64 count;
+    f64 min;
+    f64 max;
+    f64 mean;
+    f64 stddev;
+    f64 p50;
+    f64 p90;
+    f64 p99;
+}
+
+class Count { i64 value; i64 times; }
+
+// The value at fraction q of the way through xs in sorted order, interpolating
+// between the two nearest values (so the median of an even count is their mean).
+// Reorders xs.
+<T implements number> f64 quantile(T[:]& xs, f64 q) {
+    f64 pos = q * (f64) (xs.len - 1);
+    i64 k = (i64) pos;                          // toward zero: the value at or below pos
+    f64 below = (f64) xs.selectNth(k);
+    if (k + 1 >= xs.len) { return below; }
+    T above @_ = xs[k + 1:].min();              // selectNth left only values >= xs[k] after k
+    return below + (pos - (f64) k) * ((f64) above - below);
+}
+
+// xs must not be empty. Reorders xs.
+<T implements number> Summary summarize(T[:]& xs) {
+    f64 mean = 0.0;                             // Welford's running mean and variance, in f64 whatever T is
+    f64 m2 = 0.0;
+    i64 n = 0;
+    for (T x : xs) {
+        n++;
+        f64 v = (f64) x;
+        f64 delta = v - mean;
+        mean += delta / (f64) n;
+        m2 += delta * (v - mean);
+    }
+    T lo @_ = xs.min();                         // EMPTY can't happen: the caller checked
+    T hi @_ = xs.max();
+    f64 stddev = n > 1 ? math.sqrt(m2 / (f64) (n - 1)) : 0.0;
+    return new Summary(n, (f64) lo, (f64) hi, mean, stddev,
+                       quantile(xs, 0.5), quantile(xs, 0.9), quantile(xs, 0.99));
+}
+
+u8 main(string[.] args) {
+    Args cli = new Args("stats", "Summary statistics of numbers, one per line.");
+    cli.flag('i', "integers", "read integers, and count each value");
+    cli.option(0, "top", "N", "with -i, print the N most common values (10)");
+    cli.positional("file", "input file; stdin when left out");
+    cli.parseOrExit(args);
+
+    bool integers = cli.has("integers");
+    i64 top @badTop = cli.getI64("top", 10);
+    if (badTop || top < 0) { cli.usageError("--top takes a number from 0"); }
+
+    u8[..>] text = [];
+    string file = cli.get("file", "");
+    u8 err = file == "" ? @stdin.readAll(text) : @File.readAll(file, text);
+    if (err) {
+        errprintln("stats: can't read ${file == "" ? "stdin" : file}: ${status.message(err)}");
+        return 1;
+    }
+
+    f64[..>] floats = [];
+    i64[..>] ints = [];
+    hashmap<i64, i64> counts = [];
+    i64 lineNo = 0;
+    i64 bad = 0;
+    i64 firstBad = 0;
+    for (string line : text.lines()) {
+        lineNo++;
+        string t = line.trim();
+        if (t == "") { continue; }
+        if (integers) {
+            i64 v @notInt = i64.parse(t);
+            if (notInt) { bad++; if (firstBad == 0) { firstBad = lineNo; } continue; }
+            ints +> v;
+            i64& c = counts.getOrAdd(v, 0);     // a reference into the map; it survives later inserts
+            c++;
+        } else {
+            f64 v @notNumber = f64.parse(t);
+            if (notNumber || !v.isFinite()) { bad++; if (firstBad == 0) { firstBad = lineNo; } continue; }
+            floats +> v;
+        }
+    }
+    if (bad > 0) { errprintln("stats: skipped ${bad} lines that weren't numbers, the first on line ${firstBad}"); }
+
+    i64 n = integers ? ints.len : floats.len;
+    if (n == 0) {
+        errprintln("stats: no numbers");
+        return 1;
+    }
+
+    Summary s = integers ? summarize(ints) : summarize(floats);
+    println("count   ${s.count}");
+    println("min     ${s.min}");
+    println("max     ${s.max}");
+    println("mean    ${s.mean.fixed(4)}");
+    println("stddev  ${s.stddev.fixed(4)}");
+    println("median  ${s.p50}");
+    println("p90     ${s.p90}");
+    println("p99     ${s.p99}");
+
+    if (integers && top > 0) {
+        Count[..>] common = [];
+        for (var& e : counts) { common +> new Count(e.key, e.value); }
+        common.partialSort(top, (Count a, Count b) => a.times > b.times || (a.times == b.times && a.value < b.value));
+        println("");
+        println("most common:");
+        i64 shown = min(top, common.len);
+        for (i64 i = 0; i < shown; i++) {
+            println("${common[i].times.pad(8)}  ${common[i].value}");
+        }
+    }
+    return 0;
+}

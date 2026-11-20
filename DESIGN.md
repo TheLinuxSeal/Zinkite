@@ -63,7 +63,7 @@ Left out to stay light: inheritance, exceptions, destructors, reflection, dynami
 | Printing | `print` and `println` take text; values are formatted by methods inside `${...}`, such as `${n.hex()}` and `${c.utf8()}` | Decided | 4.13 |
 | Strings | `string` is a view (`u8[:]`); text is stored as `u8` arrays | Decided | 4.11 |
 | Lambdas and `switch` cases | `(i32 a, i32 b) => a + b`, with every parameter's type written; `case 0 => ...`; `->` is the pop operator | Decided | 9.3, 9.4 |
-| Undecided features | The compiler rejects a program that uses a feature still open in §17, and says the feature is undecided | Decided | 17 |
+| Undecided features | The compiler rejects a program that uses a language feature still open in §17 or `GRAMMAR.md` §8, and says the feature is undecided | Decided | 17 |
 | Standard library | Packages under `zink.*`; text that is read goes into caller buffers, computed text is built in place, failures are status codes; JSON, JSON5, TOML and YAML share one parsed tree | Proposed | `STDLIB.md` |
 | Implementation | Compiler in Rust, runtime in C; the compiler emits C, compiled by a built-in TinyCC for `zink run` and by the system C compiler for `zink build` | Decided | 12.5, 14 |
 | Output | Native code, through C; the embedding model is Open (§13) | Decided | 12, 13 |
@@ -217,7 +217,7 @@ There is no `T[k]`: `T[.k]` is the only fixed-size spelling.
 | `<.<` | front and back offsets over existing data | a window that only narrows |
 | a trailing `$` | the same data array, with the index split into chunks of about √n entries (a two-level tiered vector, Goodrich and Kloss 1999) | inserts and removals anywhere cost O(√n); reads take three loads; the cursor is just a position |
 
-- **Parameters take capabilities, not layouts** (Decided). Since a plain parameter is a read-only copy (§5.1), an array the callee changes is passed by reference. A `T[..>]&` parameter accepts any array that can at least be appended to, and the function can only append. The compiler compiles the function once per layout passed to it, since the whole program is visible.
+- **Parameters take capabilities, not layouts** (Decided). Since a plain parameter is a read-only copy (§5.1), an array the callee changes is passed by reference. A `T[..>]&` parameter accepts any array that can at least be appended to, and the function can only append. The slots govern only adding and removing elements, so the function may still write and reorder them, as a sort does. The compiler compiles the function once per layout passed to it, since the whole program is visible.
 - **Reads on a cursor array cost more even when the code never moves the cursor.** Elements stay where they were inserted, so `a[i]` reads the index array first. Arrays that are mostly read should use a type whose cursor slot is `.`.
 - **A lint for unused capabilities** (Decided): a warning when an array's type allows something the code never does. The cursor matters most: `T[~]` is the shortest spelling, but its cursor slot makes every read take two loads (§4.3). The warning would suggest `T[~.~]` when the cursor is never used. It could also suggest adding `$` to a large array whose edits jump around, and removing it when edits stay in one place.
 
@@ -389,7 +389,7 @@ println("cost:  ${x.fixed(2)}");      // 3.14
 
 - **`print(text)` writes to stdout, and `println(text)` adds a newline**, as in Java. Both take text, usually an interpolated string. They set no status (Decided), so a bare `println` draws no warning. A failed write is remembered, reported on stderr at exit, and makes the exit status 1 (§6.4). Writing to a closed pipe ends the program quietly (§7.6). Code that must check each write calls `stdout.write(...)` or `stdout.flush()`, which do set a status.
 - **`errprint(text)` and `errprintln(text)` write to stderr**, for error messages. They stay on the terminal when stdout is redirected to a file or a pipe.
-- **`stdin`, `stdout` and `stderr` are stream objects** with the same methods as files (`print`, `println`, `write`, `readLine`, `readAll`). The four functions are shorthand: `println(x)` is `stdout.println(x)`, and `errprintln(x)` is `stderr.println(x)`, except that the four set no status (below).
+- **`stdin`, `stdout` and `stderr` are `File` handles** for descriptors 0, 1 and 2, with every method of a file (`STDLIB.md` §4.1), so `File input = stdin;` works. The four functions are shorthand: `println(x)` is `stdout.println(x)`, and `errprintln(x)` is `stderr.println(x)`, except that the four set no status (below).
 - **Defaults in `${...}`**: the type decides how a value prints.
 
   | Value | `${x}` prints |
@@ -487,6 +487,9 @@ items[0].heavier(1.0);         // works in place, with no copy
   - `.=` works on reference variables and fields, on link fields (§5.4), and on writable views (§4.10). On a value, it is a compile error that suggests `=`.
 - **`var x = e` copies; `var& x = e` binds a reference** (Decided): `var& c = counts.getOrAdd(word, 0);`.
 - **`T&?` is a nullable reference** and must be narrowed (`if (r != null)`) before use (Decided).
+  - **Narrowing follows the program's flow**: it holds inside `if (r != null)`, and after `if (r == null) { return; }`, or a `break` or `continue` taken when `r` is null.
+  - **It applies to local variables and parameters, not to fields**, since a call could change a field. Copy a field into a local first: `Node&? after = n.next; if (after != null) { ... }`.
+  - **Rebinding the variable with `.=` ends it.**
 - **Parameters** (Decided): a plain parameter is a read-only copy. The compiler passes large ones by pointer when the difference can't be observed. A `T&` parameter lets the callee change the caller's value.
 - **Nothing marks a changeable argument at the call site** (Decided, as in Goose). `File.readAll(path, text)` binds `text` to a `u8[..>]&` parameter, and only the declaration says it may change. Writing `&text` at the call means the same, and draws a warning.
 - **Interface references** are always references: `Shape&` (§6.3).
@@ -562,7 +565,7 @@ first.heavier(2.5);
 - **No inheritance**: `extends` is a compile error. Interfaces (§6.3) provide dynamic dispatch.
 
 ### 6.2 Constructors
-- **Every field must be assigned before a constructor ends**, and can't be read before it is assigned (Decided). Fields with an initializer, and editable arrays, which start empty, count as assigned from the start. There are no zero defaults for the rest.
+- **Every field must be assigned before a constructor ends**, and can't be read before it is assigned (Decided). Fields with an initializer, editable arrays, and `hashmap`, `hashset` and `pool` fields, which all start empty, count as assigned from the start. There are no zero defaults for the rest.
   - **The compiler checks the worst case.** A field counts as assigned at a point only when every path to that point assigns it, as in Java's definite assignment:
     - an `if` may go either way, so a field assigned in one branch only, or in an `if` without an `else`, isn't assigned after it;
     - a `while`, `for`, for-each or repeat loop may run zero times, so what its body assigns doesn't count after it. The exceptions are `while (true)` and `for (;;)`, which end only through a `break`: after one, a field is assigned when it is assigned before every `break` that leaves the loop;
@@ -580,9 +583,10 @@ first.heavier(2.5);
     }
     ```
     The exception is a field with no zero value: a non-nullable reference (`T&`, `Shape&`), or a value that contains one. It must be assigned on every path, failing ones included.
+  - **A reference field is bound by its first assignment**: in a constructor, `this.next = n;` on a field that isn't assigned yet binds it, as an initializer does. Once it is assigned, `=` writes through it and `.=` rebinds it (§5.1).
   - **`this` can't be used until every field is assigned**, except to assign fields. Calling a method on it, passing it or storing it before then is a compile error, since the method could read a field that isn't set yet.
   - **Locals follow the same rule**: a local declared without an initializer can't be read until every path has assigned it.
-- **Default constructor** (Decided): a class that declares no constructor gets one. It takes, in declaration order, every field that has no initializer and isn't an editable array, and assigns each one.
+- **Default constructor** (Decided): a class that declares no constructor gets one. It takes, in declaration order, every field that has no initializer and isn't an editable array, a `hashmap`, a `hashset` or a `pool`, and assigns each one.
   ```
   class Row { string line; string key; f64 num; }
   class Options { bool numeric = false; i64 column = 0; string path = ""; }
@@ -737,7 +741,8 @@ parse(p, input);                    // void parse(Parser& state, string input)
 - **In a class, a second growable field is a compile error that suggests `root`, and so is a cursor-array field**, since a cursor array needs two regions: its data and its index.
 - **Speed**: each part is the top of its own data stack, as a local array is, and the compiler keeps each part's start and length in registers inside loops. Goose measured its root structs against passing the same arrays separately, over 32 million pushes: 85–88 ms either way.
 - **`root` is a keyword only at the start of a type declaration**, so variables and fields named `root` stay legal: `Node& root = tree.push(...)`.
-- **The name**: a root owns its parts' storage, so its variable is the root (§5.2) of every reference into them.
+- **References into a part are rooted at that part** (Decided): a reference into `p.tokens` has the root `p.tokens`, which lives as long as `p`. A root's parts are separate storage, so rule R checks a removal from one part only against references into that part, and the pool exemption (`REFERENCES.md` §5.4) applies to references into a pool part (`REFERENCES.md` §8.2).
+- **The name**: a root owns its parts' storage, so its variable bounds the life of every reference into them (§5.2).
 
 ---
 
@@ -770,7 +775,7 @@ return #1;                         // early exit from a void function or constru
 
 - **`#` takes** one of these:
   - an integer literal from 0 to 255;
-  - a named code (`#status.FULL`);
+  - a named code (`#status.FULL`), or a `u8` or `bool` variable (`#why`);
   - `#( ... )` holding a `u8` or `bool` expression.
 
   Other integer types are an error: write `#((u8) n)` or `#(n != 0)`.
@@ -1004,7 +1009,7 @@ public class Main {
 
 Rules:
 - **`as` renames a declaration for this file only.** The original simple name isn't imported: after `import com.example.MyArray as ExampleArray;`, a bare `MyArray` means whatever it would mean without that line.
-- **Two imports can't bring in the same name.** `import com.example.util.MyArray;` together with `import com.example.MyArray;` is an error, and the message suggests `as`. An import that clashes with a declaration in the same file is also an error. Names that come automatically from `zink.lang` are different: a declaration of the program's own hides the `zink.lang` one wherever it is visible, as a class of your own hides `java.lang`'s in Java (Decided).
+- **Two imports can't bring in the same name.** `import com.example.util.MyArray;` together with `import com.example.MyArray;` is an error, and the message suggests `as`. An import that clashes with a declaration in the same file is also an error. A local variable or parameter hides any class with the same name, imported or declared, inside its scope, as in Java: with `string path` in scope, `path.join(...)` means the variable's method (Decided). Names that come automatically from `zink.lang` are different too: a declaration of the program's own hides the `zink.lang` one wherever it is visible, as a class of your own hides `java.lang`'s in Java (Decided).
 - **Wildcards work as in Java**: an explicit import or alias wins over a wildcard, and a name provided by two wildcards is an error only where it's used.
 - **Only public declarations can be imported** from another package.
 - **Unused imports** are a warning.
@@ -1265,6 +1270,7 @@ enum Color { RED, GREEN, BLUE }
   - Runaway instantiation (`Foo<T>` using `Foo<Pair<T, T>>`) is stopped by a depth limit, or rejected.
   - Only what is used is instantiated. The compiler sees the whole program (no dynamic loading).
   - Generic bodies are type-checked once, against their declared bounds.
+- **Type arguments are inferred from the arguments** (Decided). Each parameter whose type mentions a type parameter fixes it from its argument, and an array passed where a slice (`T[:]` or `T[:]&`) is expected gives its element type: `summarize(ints)` with an `i64[..>]` gives `T = i64`. A literal takes the type the other arguments fix. Arguments that fix one type parameter differently, such as `max(a, b)` with a `u8` and a `u32`, are an error; no conversion is applied to make them agree. Explicit type arguments (`f<i64>(x)`) are Open (`GRAMMAR.md` §8).
 
 ### 10.1 Built-in bounds (Decided)
 A generic body can use only what its bounds allow (§10). Seven bounds for the built-in operations are built in. They are used with `implements`, like interfaces, and `&` combines several: `<T implements ordered & hashable>`.
@@ -1275,7 +1281,7 @@ A generic body can use only what its bounds allow (§10). Seven bounds for the b
 | `uint` | `u8` `u16` `u32` `u64` | what `int` allows, and use as a condition (§9.4) |
 | `int` | every `sint` and `uint` | what `number` allows, plus `%`, the wrapping and saturating operators, bitwise operators and shifts, `T.MIN`, `T.MAX` and the bit methods (`STDLIB.md` §8.1) |
 | `float` | `f32` `f64` | what `number` allows, plus `T.NAN`, `T.INFINITY`, `T.EPSILON`, `isNaN()`, `isFinite()` and the `math` functions |
-| `number` | every `int` and `float` | what `ordered` allows, plus `+`, `-`, `*`, `/`, unary `-`, casts `(T) x`, `T.from(x)` and `T.parse(s)` |
+| `number` | every `int` and `float` | what `ordered` allows, plus `+`, `-`, `*`, `/`, unary `-`, casts between `T` and any number type (`(T) x`, `(f64) t`), `T.from(x)` and `T.parse(s)` |
 | `ordered` | numbers, `bool`, `string`, enums, and classes that implement it | `<`, `<=`, `>`, `>=` and `compareTo` |
 | `hashable` | integers, `bool`, `string`, enums, and classes whose fields are all `hashable` | use as a `hashmap` key or a `hashset` element |
 
@@ -1531,7 +1537,7 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 
 ## 17. Open decisions
 
-**Until an item here is decided, the compiler rejects programs that use it** (Decided). The error says the feature is undecided and names it. Two items the checker meets in ordinary code: removing from an array inside a for-each by value over it, and `${x}` on a class value. Deciding an item later only makes more programs valid, so no program that compiles today can break.
+**Until a language feature listed here is decided, the compiler rejects programs that use it** (Decided). The error says the feature is undecided and names it. The rule covers the language items in this section and the syntax in `GRAMMAR.md` §8. The questions in `STDLIB.md` §11 are about how the library is designed, and gate nothing. Two items the checker meets in ordinary code: removing from an array inside a for-each by value over it, and `${x}` on a class value. Deciding an item later only makes more programs valid, so no program that compiles today can break.
 
 **Memory and references**
 - **Reference rules**: the open questions in `REFERENCES.md` §12, such as following roots per program point and choosing data stacks at run time.
@@ -1749,6 +1755,15 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 127. Copying a root, passing it as a plain parameter, returning it by value, storing it in a class, a root or an array, and a `new Parser()` that isn't assigned to a named variable are compile errors; `Parser&` parameters and fields work.
 128. A second growable field, or a cursor-array field, in a `class` is a compile error that suggests `root`.
 129. `Node& root = tree.push(...)` and a field named `root` compile.
+
+**Second example batch** (`examples/NOTES.md` §5)
+130. In a root holding a pool and a map, removing from the map while references into the pool are live compiles; removing from the map while a reference into the map is live is a compile error.
+131. After `if (r == null) { return; }`, `r` is narrowed for the rest of the block; a field compared with `null` isn't narrowed, and rebinding a narrowed local with `.=` ends its narrowing.
+132. In a constructor, `this.next = n;` binds an unassigned reference field, and a second `=` writes through it; a class with a `hashmap` field and no constructor is built with `new C()`, the map starting empty.
+133. `return #why;` with a `u8` variable `why`, and `return #done;` with a `bool`, compile.
+134. With `string path` in scope, `path.base(x)` calls the variable's method; outside that scope it names the `path` class.
+135. `summarize(ints)` with an `i64[..>]` instantiates `T = i64`; `max(a, b)` with a `u8` and a `u32` is a compile error.
+136. Using a feature still open in §17 is a compile error that names it; calling `stableSort` or importing `zink.json` isn't.
 
 ---
 

@@ -2,6 +2,8 @@
 // csvsort: sort CSV rows by one column (no quoted fields).
 // usage: csvsort [-n] [-r] [-k column] [file]
 
+import zink.io.*;
+
 class Row {
     string line;        // the whole line: a view into the input text
     string key;         // the sort column: a view into the same text

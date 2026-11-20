@@ -314,7 +314,7 @@ Checked after parsing:
 - **Expression statements** must be an assignment, `++`/`--`, a call, or an array operator (`a +> x;`, `a ->;`).
 - **`var`** needs an initializer and can't be `null`. `var` copies and `var&` binds a reference (DESIGN §5.1).
 - **Status writes** (DESIGN §7.2):
-  - an `INT` must be from 0 to 255, and a `qualified_name` must name a `u8` constant, such as `status.FULL`;
+  - an `INT` must be from 0 to 255, and a `qualified_name` must name a `u8` constant, such as `status.FULL`, or a `u8` or `bool` variable, such as `why`;
   - the expression in `#( ... )` must have type `u8` or `bool` (a `bool` counts as 0 or 1), so `#(count)` with an `i64` `count` is an error;
   - `return #1;` without a value is allowed only in a `void` method or a constructor;
   - `return @(g());` is an error that suggests `return #(@(g()));`.
@@ -440,7 +440,7 @@ Checked after parsing:
 - **Lambdas** write every parameter's type, inside parentheses: `(i32 a, i32 b) => a + b`, `(Dog d) => d.age`. `var` isn't allowed there (DESIGN §9.3).
 - **Casts** exist only between number types; interface references use `instanceof` with a binding name (DESIGN §6.3).
   - `(u8) x` stops the program when `x` doesn't fit, `(u8%) x` wraps and `(u8|) x` saturates (DESIGN §9.1). `%` and `|` need an integer target.
-  - In a generic body, `(T) x` casts to the type parameter `T`, which must be bounded by a number bound (DESIGN §10.1).
+  - In a generic body, `(T) x` casts to the type parameter `T`, and `(f64) t` casts a value of type `T` to a concrete type. Either way `T` must be bounded by a number bound (DESIGN §10.1).
 - **`new`** names a class, or leaves it out when the destination's type is known: `items.push(new(1, 0.0))` (DESIGN §6.1).
 - **Array literals** take their type from the destination: `u8[..>] scratch = [];`. An empty `[]` also creates an empty `hashmap`, `hashset` or `pool` (DESIGN §4.14, `STDLIB.md` §7).
 - **`null`** is allowed only where a `T&?` or a nullable function is expected.
@@ -464,7 +464,7 @@ Checked after parsing:
 8. **`#`**: see §1.6. A `#` that isn't a directive may appear only right after `return`.
 9. **Members**: after modifiers, `new (` starts a constructor. Otherwise the parser reads optional type parameters (`<T implements ordered>`), a return type (`void`, a type, or a tuple type in parentheses) and a name; `(` next means a method, anything else a field.
 10. **`switch`**: at the start of a statement it is a statement; anywhere else it is an expression.
-11. **Qualified names** in expressions, such as `com.example.Thing.count`, parse as a chain of `.` selectors and are resolved by the type checker: package, class, then field.
+11. **Qualified names** in expressions, such as `com.example.Thing.count`, parse as a chain of `.` selectors and are resolved by the type checker: a local variable or parameter first, then a package, a class, and a field (DESIGN §8.5).
 12. **`while` headers**: at `while (`, the parser looks for a declaration, or a parenthesized list of them for a tuple result (`while ((string k, string v) : r.next())`), followed by `:`, as rule 4 does at the start of a statement, and takes that as a repeat loop. `?` counts as part of a type only directly after `&`, a link or a `func(...)` type, so `while (a ? b : c)` stays a condition.
 13. **`:` in brackets**: after an expression, a `:` inside `[ ]` separates slice bounds. A conditional `?:` takes its own `:` first, so `a[c ? i : j]` is an index, and a slice that starts at a conditional needs parentheses: `a[(c ? i : j):]`. Both bounds are shift-level expressions, so a bound that uses a comparison or a bitwise operator needs them too: `a[0:(n & 7)]`. An array literal starts at an operand (rule 5), so a `:` in it never means a slice.
 
