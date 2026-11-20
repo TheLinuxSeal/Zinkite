@@ -63,9 +63,10 @@ Left out to stay light: inheritance, exceptions, destructors, reflection, dynami
 | Printing | `print` and `println` take text; values are formatted by methods inside `${...}`, such as `${n.hex()}` and `${c.utf8()}` | Decided | 4.13 |
 | Strings | `string` is a view (`u8[:]`); text is stored as `u8` arrays | Decided | 4.11 |
 | Lambdas and `switch` cases | `(i32 a, i32 b) => a + b`, with every parameter's type written; `case 0 => ...`; `->` is the pop operator | Decided | 9.3, 9.4 |
+| Undecided features | The compiler rejects a program that uses a feature still open in §17, and says the feature is undecided | Decided | 17 |
 | Standard library | Packages under `zink.*`; text that is read goes into caller buffers, computed text is built in place, failures are status codes; JSON, JSON5, TOML and YAML share one parsed tree | Proposed | `STDLIB.md` |
-| Implementation | Compiler in Rust, runtime in C, compiler emits machine code directly (not C) | Decided | 14 |
-| Output | Native code; a bytecode VM backend, run with `zink run --vm` (§14.4); the embedding model is Open (§13) | Decided | 12, 13 |
+| Implementation | Compiler in Rust, runtime in C; the compiler emits C, compiled by a built-in TinyCC for `zink run` and by the system C compiler for `zink build` | Decided | 12.5, 14 |
+| Output | Native code, through C; the embedding model is Open (§13) | Decided | 12, 13 |
 | Program settings | One setting per program, as `#` directives at the top of the file containing `main` | Decided | 8.2 |
 | Conditional compilation | `#if` / `#else` / `#endif` | Decided | 8.3 |
 | Packages and imports | Java-style packages that match directories; `import a.b.C as D` for aliases | Decided | 8.4, 8.5 |
@@ -81,8 +82,8 @@ Left out to stay light: inheritance, exceptions, destructors, reflection, dynami
 | Index modes | `a[i]` checked, `a[%i]` wraps, `a[\|i]` clamps, `a[^k]` from the end | Decided | 4.10 |
 | Slices | `a[i:j]`, `a[i:]`, `a[:j]`, `a[:]`; `T[:]` is a read-only view and `T[:]&` a writable one; an array converts to a slice wherever one is expected | Decided | 4.10 |
 | Name | Zinkite; command `zink`, source files `.zn` | Decided | — |
-| `zink run` | Compiles to a cached native binary, then `exec`s it | Decided | 14.4 |
-| Grammar | `GRAMMAR.md`, version 2 (version 1 kept in `GRAMMAR-refcount.md`) | Proposed | `GRAMMAR.md` |
+| `zink run` | Compiles to a cached native binary with TinyCC, then `exec`s it | Decided | 14.4 |
+| Grammar | `GRAMMAR.md`, version 2 (version 1 kept in `GRAMMAR-refcount.md`) | Decided | `GRAMMAR.md` |
 
 ---
 
@@ -397,6 +398,7 @@ println("cost:  ${x.fixed(2)}");      // 3.14
   | an integer or float | the number, in decimal |
   | `bool` | `true` or `false` |
   | any other array | a list: `[104, 105]` |
+  | a class value | a compile error until default formatting is decided (§17); format its fields instead |
 
 - **Formatting methods** change that, and work in any interpolation: in `print`, in a string, in a buffer, or in a file write. Names:
   - `hex()`, `bin()`: the integer in base 16 or 2;
@@ -404,7 +406,8 @@ println("cost:  ${x.fixed(2)}");      // 3.14
   - `fixed(d)`: a float with `d` decimal places;
   - `utf8()`: a `u32` code point, or an array of them, encoded as UTF-8 text. A value that isn't a code point (a surrogate, or above 0x10FFFF) is written as `�` (U+FFFD), with `status.INVALID`.
 - **They are methods, not global functions**, so common names such as `hex` and `pad` never clash with a program's own. This matches `i32.parse(s)` and `a.divOr(b, 0)`.
-- **They return small capped arrays**: `hex()` of a `u64` fits in `u8[..~16]`. Formatting a number therefore never touches a data stack, and `utf8()` of an array builds its text in place (§3.3).
+- **Methods whose width is fixed by the type return small capped arrays**: `hex()` of a `u64` fits in `u8[..~16]`, so they never touch a data stack.
+- **`pad(w)`, `zeroPad(w)` and `fixed(d)` build their text in place** (§3.3), as `utf8()` of an array does, since their length depends on a value known only at run time (Decided). Inside `${...}`, the usual case, the text goes straight to the output with no temporary (§4.11). `u8[.] s = n.pad(8);` builds it where `s` lives.
 - **A program's own formatting works the same way**: a method or function that returns text, such as `money(cents)`, goes in `${...}` like `hex()`.
 - **No format strings and no format specs** (`printf("%x")`, `${n:x}`), and no separate print function per format (Appendix A.11).
 
@@ -1172,7 +1175,7 @@ enum Color { RED, GREEN, BLUE }
   - any value whose class has an `iterator()` method returning an iterator, as with Java's `Iterable`: `for (Node& n : tree)`.
 
   `for (Item it : items)` copies each element; `for (Item& it : items)` refers to it in place. With an iterator, that takes a `mut T& next()`.
-  - Appending to an array inside its own loop is safe: elements never move (§3.1), and the loop re-reads `len` on each step. Removing from the array inside a by-reference loop is a compile error (§5.3); inside a by-value loop it is Open (§17).
+  - Appending to an array inside its own loop is safe: elements never move (§3.1), and the loop re-reads `len` on each step. Removing from the array inside a by-reference loop is a compile error (§5.3), and inside a by-value loop it is too, until §17 decides otherwise.
 - **Repeat loops** (Decided): `while (T x : call)` makes the call before every pass. While the call's status is 0, its value is bound to `x` and the body runs. When the status is nonzero, the loop ends without running the body.
   ```
   while (Pending p : todo ->) { ... }                    // pops until the stack is empty
@@ -1332,7 +1335,7 @@ A generic body can use only what its bounds allow (§10). Seven bounds for the b
 ## 12. Native compilation and runtime
 
 ### 12.1 Target
-Programs compile to native machine code, so standalone CLI tools carry no VM. Types choose instructions and then disappear, except for interface method tables.
+Programs compile to native machine code, through C (§12.5), so standalone CLI tools carry no VM or interpreter. Types choose instructions and then disappear, except for interface method tables.
 
 ### 12.2 The runtime is a library
 A small C static library linked into every program. It holds:
@@ -1350,26 +1353,31 @@ There is no allocator, no counting and no collector. With dead-code elimination 
 - Direct calls for everything whose type is known, which is every call except through an interface reference.
 - One method table per (class, interface) pair, in static data. An interface call loads the function pointer from the reference's table.
 
-### 12.5 Backends and executables
-- **Decided**: the compiler emits machine code directly, not C, so users don't need a C toolchain. Goose compiles to C; Zinkite keeps its own decision.
-- Backend options:
-  1. **Cranelift** as a library: register allocation and instruction selection for x86-64, AArch64, RISC-V and s390x. Least effort per architecture; code quality below LLVM; a large dependency for the compiler (not for compiled programs).
-  2. **Own backend**: start with x86-64, every IR value in a stack slot with fixed instruction templates, then linear-scan register allocation. Full control, most work.
-  3. **QBE**: small with good code, but emits assembly text and needs `as` and `ld`, which undercuts emitting machine code directly.
-- Producing the executable: the system linker (`ld`/`lld`), or writing the ELF directly (static, no libc, raw syscalls; the `object` crate handles the byte layouts). The runtime is compiled once to a relocatable object that the compiler embeds and applies relocations for.
-- Calling convention: System V ABI on Linux x86-64 and ARM64. The status is an extra return register.
-- Debug info (DWARF via `gimli`): not needed on day one.
+### 12.5 Backends and executables (Decided)
+- **The compiler emits C**: one C file for the whole program, as Goose does. A C compiler then turns it into native code.
+  - `zink run` compiles that C with TinyCC, which is built into `zink`, so running a script needs no C toolchain (§14.4).
+  - `zink build` uses the system's C compiler, gcc or clang, at `-O2`, so the executable gets their full optimizer.
+- **Why C rather than machine code.** This reverses the earlier plan, to emit machine code through Cranelift, on 2026-11-19:
+  - programs run faster, since gcc and clang optimize better than Cranelift, which trades code quality for compile speed;
+  - the compiler is far less work: no instruction selection, register allocation, ELF writer or linker;
+  - it reaches every platform with a C compiler, instead of one CPU at a time;
+  - calling C becomes an ordinary C call (§17).
+- **The costs**: optimized builds need a C compiler installed, which most Linux systems have. TinyCC doesn't optimize, so `zink run` code is noticeably slower than `-O2` in hot loops; `zink run -O` builds with the system compiler instead.
+- **Calling convention**: the platform's C ABI. The status rides in a small returned struct, `{value, status}`, which C compilers return in two registers on Linux x86-64 and AArch64. Large results are built in place through a destination pointer (§3.3).
+- **Debug info** comes from the C compiler's `-g`, with `#line` directives pointing debuggers and messages at the `.zn` source.
+- **TinyCC is LGPL-2.1.** `zink` links it so that those terms are met, for example as a shared library, which keeps the compiler's own code under Apache-2.0.
+- **A direct machine-code backend** stays possible later, over the same typed IR, if depending on a C compiler ever becomes a problem.
 
 ---
 
-## 13. Optional bytecode VM (for embedding)
-- **Another backend over the same typed IR** and the same runtime library. It is linked only into hosts that embed scripts, so CLI tools still carry no VM.
-- **Typed opcodes** (`ADD_I32`, `ADD_F64`, `LOAD_I64`), with no runtime type checks. Data stacks work the same way as in native code.
-- **Not free**: it needs the dispatch loop, a bytecode format, a loader, verification if scripts are untrusted, and a host C API.
-- Hosts usually precompile scripts to bytecode rather than shipping the compiler.
-- Roughly 10–50× slower than native: fine for scripts, not for hot loops.
-- **Alternatives**: AOT-compiled `.so` plugins, or compiled code linked into the host through a C ABI. The embedding model is Open.
-- The host sets program settings through the API (precedence in §8.2).
+## 13. Embedding in other programs (Open)
+How a host program would run Zinkite code is Open. The options:
+- **TinyCC inside the host**: the host links `libtcc` and the runtime, and compiles scripts when it loads them. Loading is fast; the code is unoptimized.
+- **Precompiled plugins**: `zink build` produces a `.so` that the host loads through a C ABI. The code is fully optimized, but scripts must be compiled ahead of time.
+- **A bytecode VM** over the same typed IR: typed opcodes (`ADD_I32`, `ADD_F64`, `LOAD_I64`) with no runtime type checks, and data stacks as in native code. It needs a dispatch loop, a bytecode format, a loader and, for untrusted scripts, verification, and it runs roughly 10–50× slower than native code.
+- **None**: CLI tools don't need embedding.
+
+Whichever is chosen, the host sets program settings through the API (precedence in §8.2), and the open question of references a host holds into a script's data applies (`REFERENCES.md` §12).
 
 ---
 
@@ -1379,40 +1387,40 @@ There is no allocator, no counting and no collector. With dead-code elimination 
 **Rust for the compiler**
 - Compilers are mostly tree and graph transformations. Enums with exhaustive matching flag every place that fails to handle a new AST or IR node.
 - Many passes (parsing, type checking, monomorphization, layout, root inference, IR lowering, codegen): the type system catches most cross-pass refactoring mistakes.
-- The backend ecosystem is in Rust: Cranelift, `object` (ELF), `gimli` (DWARF), encoders such as `iced-x86` or `dynasmrt`.
+- Calling C from Rust is routine, so embedding TinyCC, a C library, costs nothing extra, and running the system C compiler is a process launch.
 - Graph-shaped data is stored in arenas and referred to by integer index.
 - Cargo, tests and fuzzing work out of the box.
 
 **C for the runtime**
 - Tiny, linked into every program, with a clean C ABI for embedding.
-- Compiled once ahead of time to a relocatable object the compiler embeds. No cross-language linking for users.
+- Shipped as C source inside `zink` and compiled with the program's C, once per C compiler and set of flags, then cached. Users never see it.
 
-### 14.2 What emitting machine code requires
-- Instruction selection and register allocation, per architecture.
-- Encoding instructions into bytes.
-- The object and executable format (ELF): sections, symbols, relocations.
-- Linking generated code with the runtime object.
-- Calling conventions shared with the C runtime.
-- Debug info (DWARF), eventually.
+### 14.2 What emitting C requires
+- **C without undefined behaviour.** Checked arithmetic goes through `__builtin_add_overflow` and its siblings, and wrapping arithmetic (`+%`) through unsigned types. `-fwrapv` and `-fno-strict-aliasing` are safety nets, not the plan.
+- **Names**: Zinkite identifiers are mangled into C identifiers that can't clash with C keywords, the C library or the runtime.
+- **`#line` directives**, so C compiler messages and debuggers point at `.zn` lines.
+- **The status** in a small returned struct, and large results built through a destination pointer (§12.5).
+- **Finding the system C compiler** for `zink build` and `zink run -O`: `$CC`, then `cc`, `gcc` and `clang`. A missing one is an error that suggests installing gcc or clang, or building with `--tcc`.
+- **Checking the generated C** under both TinyCC and gcc or clang, since the two must give the same results (§18).
 
 ### 14.3 Build order (Decided)
 1. **Write the reference rules** as a specification before any compiler code. They decide what is safe, and Goose's author credits this kind of spec work for much of that language's quality. Drafted: `REFERENCES.md`.
 2. **Prototype the array layouts in C** and benchmark them (started: `bench/gap_buffer.c`, §15).
 3. **Typed IR**: layouts, slot arrays, references with roots, the status channel; monomorphization done before the IR.
 4. **Root inference and lifetime checks**: the hardest part of the compiler.
-5. **VM backend**: brings up the language without machine code; easier to debug.
-6. **Cranelift native backend**.
-7. **Own backend** later, only if dependency size or code quality becomes a problem.
+5. **C backend with TinyCC**: `zink run` works end to end.
+6. **Optimized builds** through the system C compiler: `zink build`, and `zink run -O`.
+7. **A direct machine-code backend** later, only if depending on a C compiler becomes a problem.
 
 ### 14.4 Command-line tool (Decided)
 The compiler ships as one command, `zink`:
 
 | Command | What it does |
 |---|---|
-| `zink build main.zn -o tool` | Compile to a native executable at the given path |
+| `zink build main.zn -o tool` | Compile to a native executable at the given path, with the system C compiler at `-O2`; `--tcc` uses TinyCC instead |
 | `zink run main.zn [args...]` | Compile into the cache if needed, then run the result |
 | `zink main.zn [args...]` | Same as `zink run`; this is what a `#!/usr/bin/env zink` shebang calls |
-| `zink run --vm main.zn [args...]` | Run on the bytecode VM (§13) instead, for debugging and for checking that both backends agree |
+| `zink run -O main.zn [args...]` | The same, but built with the system C compiler at `-O2`, for scripts with hot loops |
 | `zink cache clean` | Empty the cache |
 
 Native code still needs a compile step, so `zink run` works like `go run` or `cargo run`, with a cache that makes repeat runs as fast as a prebuilt binary:
@@ -1422,19 +1430,19 @@ zink run main.zn arg1 arg2
   1. hash the sources + compiler version + target + build flags
   2. look in the cache for <hash>
        hit  -> go to 4
-       miss -> compile to a native executable
+       miss -> generate C, and compile it with TinyCC (or the system compiler, with -O) to a native executable
   3. write it to a temporary file in the cache, then rename it into place
   4. exec it with arg1 arg2
 ```
 
 Rules:
 - **`exec`, not spawn.** The program replaces the `zink` process, so it keeps the process ID, stdin/stdout/stderr, signals and exit code. Pipes, `$?` and Ctrl-C behave as if the binary were run directly.
-- **Arguments.** `zink`'s own flags go before the source file; everything after it goes to the program unchanged. `zink run --vm main.zn -v` passes `-v` to the program.
-- **Cache key.** The entry file and everything it imports, the compiler version, the target, and the build flags (including `#if` symbols set on the command line). Upgrading Zinkite therefore rebuilds everything, and a binary from an older compiler is never run. File modification times can be checked first to skip rehashing unchanged sources.
+- **Arguments.** `zink`'s own flags go before the source file; everything after it goes to the program unchanged. `zink run -O main.zn -v` passes `-v` to the program.
+- **Cache key.** The entry file and everything it imports, the compiler version, the target, which C compiler builds it, and the build flags (including `#if` symbols set on the command line). Upgrading Zinkite therefore rebuilds everything, and a binary from an older compiler is never run. File modification times can be checked first to skip rehashing unchanged sources.
 - **Cache location.** `$XDG_CACHE_HOME/zink/`, or `~/.cache/zink/` if that is unset. The directory is created with mode 0700 and must be owned by the user, so another user can't plant a binary that `zink run` would execute.
 - **Atomic writes.** Writing to a temporary file and renaming it means two runs at once never see a half-written binary; if both compile, the second rename harmlessly replaces the first.
-- **Cost.** The first run pays for compilation, targeted at tens of milliseconds for a small script with Cranelift or the own backend (LLVM would be much slower). Later runs cost a hash of the sources plus about 1 ms of startup.
-- Compiling in memory and running on the VM by default were considered and rejected (`DESIGN-refcount.md`, Appendix A.19).
+- **Cost.** The first run pays for compilation, targeted at tens of milliseconds for a small script, since TinyCC compiles C very quickly. With `-O`, gcc or clang take longer. Later runs cost a hash of the sources plus about 1 ms of startup.
+- Compiling in memory and jumping into it, and running on a VM by default, were considered and rejected (`DESIGN-refcount.md`, Appendix A.19).
 
 ---
 
@@ -1506,7 +1514,8 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
   - roots inferred without annotations;
   - building in place;
   - relative references;
-  - root structs, which Zinkite calls roots (§6.6).
+  - root structs, which Zinkite calls roots (§6.6);
+  - compiling to C, with TinyCC built in for running from source (§12.5).
 - **Hylo** (formerly Val): mutable value semantics with second-class references.
 - **Rust**: ownership and borrowing; `Vec`, `VecDeque` and slices; `saturating_add`; graphs through indices.
 - **Zig** and **Go**: `defer`. **Zig** also has `+%` and `+|` for wrapping and saturating arithmetic; `i32`/`u8` type names and arbitrary-width integers; implicit integer conversions only where no value is lost; error unions as a light error channel.
@@ -1521,6 +1530,8 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 ---
 
 ## 17. Open decisions
+
+**Until an item here is decided, the compiler rejects programs that use it** (Decided). The error says the feature is undecided and names it. Two items the checker meets in ordinary code: removing from an array inside a for-each by value over it, and `${x}` on a class value. Deciding an item later only makes more programs valid, so no program that compiles today can break.
 
 **Memory and references**
 - **Reference rules**: the open questions in `REFERENCES.md` §12, such as following roots per program point and choosing data stacks at run time.
@@ -1552,13 +1563,13 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 - Integers narrower than a byte (`i4`, `u4`): if wanted, Zig's approach, with any width from 1 to 64 bits that is packed only inside packed classes and arrays, which then can't hand out references (§9.1).
 - Stored closures that capture (§9.3); method references.
 - Static imports and aliases for whole packages (§8.5); the library search path (§8.4).
-- Backend route: Cranelift first (after the VM), own backend later; system linker vs. writing the ELF directly.
-- Embedding model: precompiled bytecode, AOT `.so` plugins, or none; the host C ABI shape.
+- **A direct machine-code backend**, only if depending on a C compiler becomes a problem (§12.5).
+- **Embedding model** (§13): TinyCC inside the host, precompiled `.so` plugins, a bytecode VM, or none; the host C ABI's shape.
 - Smaller syntax items not in the grammar yet (map literals, `?.`, `assert`, `#elif` and others): `GRAMMAR.md` §8.
 - **Standard library**: the open questions in `STDLIB.md` §11.
 
 **Graphics** (needed by the `vendor.*` packages, `STDLIB.md` §10.6)
-- **Calling C**: declaring C functions and linking against C libraries. The runtime needs this too (§12.2).
+- **Calling C**: declaring C functions and linking against C libraries. With the C backend a call is an ordinary C call; what's open is how a declaration is written and which types may cross. The runtime needs this too (§12.2).
 - **C layout for classes**: a way to fix a class's field order, alignment and padding to C's, and to GLSL's `std140` and `std430` rules for uniform and storage buffers, so a slice of it can be uploaded as it is.
 - **Vector and matrix types with arithmetic**, since there is no operator overloading: built-in types such as `f32x4`, or GLSL-like `vec3` and `mat4`, as Odin and Zig have. Otherwise `pos.add(vel.mul(dt))` is the only spelling.
 - **Embedding a file at compile time**, such as a SPIR-V shader, into the binary.
@@ -1657,7 +1668,7 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 64. A second `zink run` of unchanged sources doesn't recompile; changing any imported file, the compiler version or a build flag does.
 65. Two concurrent `zink run`s of the same new script both succeed and never execute a half-written binary.
 66. `zink run` refuses to use a cache directory that is writable by other users or owned by someone else.
-67. `zink run` and `zink run --vm` produce the same output on the whole test suite.
+67. `zink run` (TinyCC) and `zink build` (system C compiler at `-O2`) produce the same output on the whole test suite.
 
 **Hash maps**
 68. For-each over a `hashmap` visits entries in insertion order, and the output is the same across runs although the hash seed differs.

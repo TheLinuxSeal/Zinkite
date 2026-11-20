@@ -168,7 +168,7 @@ bool x.isNaN(), bool x.isFinite()     // float types
 - **Floats round-trip.** `f64.parse` rounds correctly, and `${x}` prints the shortest text that parses back to the same value, so `0.1` prints as `0.1`.
 - **Formatting methods** are in DESIGN §4.13: `hex()`, `bin()`, `pad(w)`, `zeroPad(w)`, `fixed(d)`, `utf8()`. The library adds two:
   - `oct()`, in base 8;
-  - `sci(d)`, scientific notation with `d` digits after the point (`1.50e3`).
+  - `sci(d)`, scientific notation with `d` digits after the point (`1.50e3`). Like `pad(w)` and `fixed(d)`, it builds its text in place, since `d` is known only at run time (DESIGN §4.13).
 - **`T.from(x)` converts with a check that reports.** `u16 port @bad = u16.from(n);` gives 0 with `RANGE` when `n` doesn't fit, where `(u16) n` would stop the program (DESIGN §9.1). From a float it truncates toward zero, as the cast does, and NaN fails with `RANGE`.
 - **`min`, `max` and `clamp` take any `ordered` type**, strings included, with both arguments of the same type. On floats, NaN counts as the largest value (DESIGN §10.1).
 - **Bit operations** are in §8.1.

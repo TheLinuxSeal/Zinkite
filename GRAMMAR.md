@@ -553,7 +553,7 @@ void main(string[.] args) {
 
 ## 8. Not in v2 (Open)
 
-These need a decision before they are added:
+These need a decision before they are added. Until then, the parser rejects them with an error that says the feature is undecided (DESIGN §17):
 - Hash map literals with entries, such as `["a": 1]`, and `m[key]` indexing.
 - Null-safe member access (`?.`) and a null-coalescing operator, for `T&?`.
 - Annotations: `@` now reads statuses (DESIGN §17).
