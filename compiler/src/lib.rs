@@ -4,6 +4,7 @@ pub mod ast;
 pub mod builtins;
 pub mod check;
 pub mod diag;
+pub mod flow;
 pub mod lexer;
 pub mod parser;
 pub mod program;

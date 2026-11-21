@@ -49,10 +49,13 @@ Done:
   tuples, for-each over every kind of collection and iterator, and missing
   `return`s;
 - declarations: interfaces and `implements ordered`, overloads that differ only
-  in `&`, hashable keys, and the field rules for classes and roots.
+  in `&`, hashable keys, and the field rules for classes and roots;
+- definite assignment (DESIGN §6.2): every field assigned on every path through
+  a constructor, judged by the worst case, with failing exits, `this.new`, the
+  fields that have no zero value, and no use of `this` before then; and no local
+  read before every path has assigned it.
 
 Not yet:
-- definite assignment, in constructors and for locals (DESIGN §6.2);
 - `mut` and read-only checks: what plain parameters and non-`mut` methods may
   change;
 - roots and lifetimes (`REFERENCES.md`): rules S and R, and copying roots;
@@ -79,6 +82,7 @@ imports one gets a warning saying so.
 | `src/program.rs` | every declaration in a program, and resolving written types |
 | `src/builtins.rs` | signatures of the built-in functions and methods |
 | `src/check.rs` | the type checker |
+| `src/flow.rs` | the state definite assignment tracks: what is assigned on every path, and on some |
 | `src/main.rs` | the `zink` command |
 | `tests/parse.rs` | parser tests |
 | `tests/check.rs` | type checker tests |

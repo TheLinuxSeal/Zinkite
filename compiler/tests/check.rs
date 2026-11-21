@@ -971,3 +971,367 @@ fn edited_examples_never_panic() {
     }
     assert!(checked > 1000);
 }
+
+// ---------------------------------------------------------------- definite assignment (DESIGN §6.2)
+
+/// A class `R` with fields `w` and `h`, and the given constructor.
+fn rect(ctor: &str) -> String {
+    format!(
+        "class R {{\n    f64 w;\n    f64 h;\n    {}\n    void show() {{ }}\n}}\n",
+        ctor
+    )
+}
+
+#[test]
+fn constructors_assign_every_field() {
+    ok(&rect("new(f64 w, f64 h) { this.w = w; this.h = h; }"));
+    ok(&rect("new() { w = 1.0; h = 2.0; }"));
+    rejects(
+        &rect("new(f64 w) { this.w = w; }"),
+        "the constructor can end here without assigning `h`",
+    );
+    rejects(&rect("new() { }"), "without assigning `w` and `h`");
+    // Fields that start assigned: initializers, editable arrays, hashmaps.
+    ok(
+        "root C { i64 n = 0; i64[..>] xs; hashmap<string, i64> m; i64 k; new(i64 k) { this.k = k; } }\n",
+    );
+    ok("class C { static i64 count; i64 k; new() { k = 1; } }\n");
+}
+
+#[test]
+fn the_worst_path_counts() {
+    // An `if` may go either way.
+    rejects(
+        &rect("new(bool b) { if (b) { w = 1.0; } h = 2.0; }"),
+        "without assigning `w`",
+    );
+    ok(&rect(
+        "new(bool b) { if (b) { w = 1.0; } else { w = 2.0; } h = 2.0; }",
+    ));
+    // A loop may run zero times, except `while (true)` and `for (;;)`, which end by `break`.
+    rejects(
+        &rect("new(i64 n) { for (var i = 0; i < n; i++) { w = 1.0; } h = 2.0; }"),
+        "without assigning `w`",
+    );
+    rejects(
+        &rect("new(bool b) { while (b) { w = 1.0; } h = 2.0; }"),
+        "without assigning `w`",
+    );
+    ok(&rect("new() { while (true) { w = 1.0; break; } h = 2.0; }"));
+    ok(&rect("new() { for (;;) { w = 1.0; break; } h = 2.0; }"));
+    rejects(
+        &rect("new(bool b) { while (true) { if (b) { break; } w = 1.0; } h = 2.0; }"),
+        "without assigning `w`",
+    );
+    // A `do` loop runs at least once.
+    ok(&rect("new(bool b) { do { w = 1.0; } while (b); h = 2.0; }"));
+    // `&&` may skip its right side.
+    rejects(
+        &rect("new(bool b) { if (b && (w = 1.0) > 0.0) { } h = 2.0; }"),
+        "without assigning `w`",
+    );
+    // Only the active branch of an `#if` is checked.
+    ok(&rect(
+        "new() {\n#if debug\nw = 1.0;\n#else\nw = 2.0;\n#endif\nh = 2.0; }",
+    ));
+    rejects(
+        &rect("new() {\n#if debug\nw = 1.0;\n#endif\nh = 2.0; }"),
+        "without assigning `w`",
+    );
+}
+
+#[test]
+fn switches_count_when_every_arm_assigns() {
+    ok(&rect(
+        "new(i64 n) { switch (n) { case 0 => w = 1.0; default => w = 2.0; } h = 1.0; }",
+    ));
+    rejects(
+        &rect("new(i64 n) { switch (n) { case 0 => w = 1.0; case 1 => w = 2.0; } h = 1.0; }"),
+        "without assigning `w`",
+    );
+    rejects(
+        &rect("new(i64 n) { switch (n) { case 0 => w = 1.0; default => { } } h = 1.0; }"),
+        "without assigning `w`",
+    );
+    let e = "enum E { A, B }\n";
+    ok(&format!(
+        "{}{}",
+        e,
+        rect("new(E k) { switch (k) { case A => w = 1.0; case B => w = 2.0; } h = 1.0; }")
+    ));
+    rejects(
+        &format!(
+            "{}{}",
+            e,
+            rect("new(E k) { switch (k) { case A => w = 1.0; } h = 1.0; }")
+        ),
+        "without assigning `w`",
+    );
+}
+
+#[test]
+fn every_successful_exit_counts() {
+    rejects(
+        &rect("new(bool b) { w = 1.0; if (b) { return; } h = 2.0; }"),
+        "the constructor can end here without assigning `h`",
+    );
+    // A failing `return #code;` needn't assign anything (DESIGN §6.2's example).
+    ok(
+        "class R {\n    i64 w; i64 h;\n    new(string spec) {\n        i64 v @bad = i64.parse(spec);\n        if (bad) { return #status.INVALID; }\n        w = v; h = v;\n    }\n}\n",
+    );
+    ok(&rect(
+        "new(bool b) { if (b) { return #1; } w = 1.0; h = 2.0; }",
+    ));
+    // A status that isn't a constant may be 0, which would be a success.
+    rejects(
+        &rect("new(bool b) { if (b) { return #(b); } w = 1.0; h = 2.0; }"),
+        "without assigning `w` and `h`",
+    );
+    rejects(
+        &rect("new(bool b) { if (b) { return #0; } w = 1.0; h = 2.0; }"),
+        "without assigning `w` and `h`",
+    );
+}
+
+#[test]
+fn references_have_no_zero_value() {
+    let node = "class Node { i64 v; }\n";
+    rejects(
+        &format!(
+            "{}class Link {{ Node& to; i64 n; new(Node& t, bool b) {{ if (b) {{ return #1; }} to = t; n = 1; }} }}\n",
+            node
+        ),
+        "`to` has no zero value, so it must be assigned even when the constructor fails",
+    );
+    ok(&format!(
+        "{}class Link {{ Node& to; i64 n; new(Node& t, bool b) {{ to = t; if (b) {{ return #1; }} n = 1; }} }}\n",
+        node
+    ));
+    // A value holding a reference has none either.
+    rejects(
+        &format!(
+            "{}class Link {{ Node& to; }}\nclass Pair {{ Link a; i64 n; new(Link l, bool b) {{ if (b) {{ return #1; }} a = l; n = 1; }} }}\n",
+            node
+        ),
+        "`a` has no zero value",
+    );
+    // A nullable reference has one: null.
+    ok(&format!(
+        "{}class Link {{ Node&? to; i64 n; new(bool b) {{ if (b) {{ return #1; }} to = null; n = 1; }} }}\n",
+        node
+    ));
+}
+
+#[test]
+fn a_reference_field_is_bound_by_its_first_assignment() {
+    let node = "class Node { i64 v; }\nNode make() { return new Node(1); }\n";
+    ok(&format!(
+        "{}class Link {{ Node& to; Node&? prev; new(Node& n) {{ this.to = n; this.prev = null; to = n; }} }}\n",
+        node
+    ));
+    rejects(
+        &format!(
+            "{}class Link {{ Node& to; new() {{ to = make(); }} }}\n",
+            node
+        ),
+        "temporary value",
+    );
+}
+
+#[test]
+fn fields_cant_be_read_before_they_are_assigned() {
+    rejects(
+        &rect("new() { h = w; w = 1.0; }"),
+        "`w` is read before it is assigned",
+    );
+    rejects(
+        &rect("new() { this.h = this.w; this.w = 1.0; }"),
+        "`w` is read before it is assigned",
+    );
+    rejects(
+        &rect("new(bool b) { if (b) { w = 1.0; } h = w; w = 2.0; }"),
+        "`w` may be read before it is assigned",
+    );
+    rejects(
+        &rect("new() { w += 1.0; h = 1.0; }"),
+        "`w` is read before it is assigned",
+    );
+    ok(&rect("new() { w = 1.0; h = w * 2.0; }"));
+    ok(&rect("new() { w = 1.0; h = this.w * 2.0; }"));
+}
+
+#[test]
+fn this_waits_for_every_field() {
+    rejects(
+        &rect("new() { w = 1.0; this.show(); h = 2.0; }"),
+        "`this` can't be used until every field is assigned, and `h` isn't yet",
+    );
+    rejects(
+        &rect("new() { w = 1.0; show(); h = 2.0; }"),
+        "`show` can't be called until every field is assigned",
+    );
+    rejects(
+        &rect("new() { var me = this; w = 1.0; h = 2.0; }"),
+        "and `w` and `h` aren't yet",
+    );
+    ok(&rect("new() { w = 1.0; h = 2.0; this.show(); show(); }"));
+}
+
+#[test]
+fn this_new_delegates() {
+    let base = "new(f64 w, f64 h) { this.w = w; this.h = h; }";
+    ok(&rect(&format!(
+        "{} new(f64 s) {{ f64 side = s * 2.0; this.new(side, side); show(); }}",
+        base
+    )));
+    ok(&rect(&format!(
+        "{} new(string spec) {{ f64 v @bad = f64.parse(spec); if (bad) {{ return #1; }} this.new(v, v); }}",
+        base
+    )));
+    rejects(
+        &rect(&format!("{} new(f64 s) {{ w = s; this.new(s, s); }}", base)),
+        "`w` is assigned before `this.new(...)`",
+    );
+    rejects(
+        &rect(&format!(
+            "{} new(f64 s) {{ this.new(s, s); this.new(s, s); }}",
+            base
+        )),
+        "may already have run",
+    );
+    rejects(
+        &rect(&format!(
+            "{} new(f64 s, bool b) {{ if (b) {{ this.new(s, s); }} this.new(s, 1.0); }}",
+            base
+        )),
+        "may already have run",
+    );
+    rejects(
+        &rect(&format!(
+            "{} new(f64 s) {{ for (;;) {{ this.new(s, s); break; }} }}",
+            base
+        )),
+        "is inside a loop",
+    );
+    rejects(
+        &rect(&format!("{} new(f64 s) {{ this.new(this.w, s); }}", base)),
+        "`w` is read before it is assigned",
+    );
+    rejects(
+        &rect(&format!(
+            "{} new(f64 s, bool b) {{ if (b) {{ this.new(s, s); }} }}",
+            base
+        )),
+        "without assigning `w` and `h`",
+    );
+}
+
+#[test]
+fn locals_are_assigned_before_they_are_read() {
+    rejects(
+        &body("i64 x; println(\"${x}\");"),
+        "`x` is read before it is assigned",
+    );
+    rejects(
+        &body("bool c = true; i64 x; if (c) { x = 1; } println(\"${x}\");"),
+        "`x` may be read before it is assigned",
+    );
+    ok(&body(
+        "bool c = true; i64 x; if (c) { x = 1; } else { x = 2; } println(\"${x}\");",
+    ));
+    rejects(
+        &body("bool c = true; i64 x; while (c) { x = 1; } println(\"${x}\");"),
+        "`x` may be read",
+    );
+    ok(&body(
+        "i64 x; for (;;) { x = 1; break; } println(\"${x}\");",
+    ));
+    ok(&body(
+        "i64 x; outer: for (;;) { for (;;) { x = 1; break outer; } } println(\"${x}\");",
+    ));
+    rejects(
+        &body(
+            "i64 x; for (var i = 0; i < 3; i++) { if (i == 0) { continue; } x = i; } println(\"${x}\");",
+        ),
+        "`x` may be read",
+    );
+    ok(&body(
+        "i64 n = 1; i64 x; switch (n) { case 0 => x = 1; default => x = 2; } println(\"${x}\");",
+    ));
+    rejects(
+        &body("i64 n = 1; i64 x; switch (n) { case 0 => x = 1; } println(\"${x}\");"),
+        "`x` may be read",
+    );
+    ok(&body(
+        "i64 n = 1; i64 x; string s = switch (n) { case 0 => { x = 1; yield \"a\"; } default => { x = 2; yield \"b\"; } }; println(\"${x} ${s}\");",
+    ));
+    rejects(&body("i64 x; x += 1;"), "`x` is read before it is assigned");
+    ok(&body(
+        "bool c = true; f64 x; var y = c ? (x = 1.0) : (x = 2.0); println(\"${x} ${y}\");",
+    ));
+    rejects(
+        &body("bool c = true; f64 x; var y = c ? (x = 1.0) : 2.0; println(\"${x} ${y}\");"),
+        "`x` may be read",
+    );
+}
+
+#[test]
+fn exits_end_a_path() {
+    ok("void f(bool c) { i64 x; if (c) { return; } else { x = 1; } println(\"${x}\"); }\n");
+    ok("void f(bool c) { i64 x; if (c) { x = 1; } else { fail(\"no\"); } println(\"${x}\"); }\n");
+    ok(
+        "void f(i64 n) { i64 x; switch (n) { case 0 => x = 1; default => fail(\"no\"); } println(\"${x}\"); }\n",
+    );
+}
+
+#[test]
+fn other_ways_of_assigning() {
+    let split = "(string, string) split(string s) { return (s, \"\"); }\n";
+    ok(&format!(
+        "{}{}",
+        split,
+        body("string a; string b; (a, b) = split(\"x\"); println(\"${a}${b}\");")
+    ));
+    ok(&body("u8 err; @err = i64.parse(\"1\"); if (err) { }"));
+    ok(&body(
+        "i64 v; u8 err; v @err = i64.parse(\"1\"); println(\"${v}\");",
+    ));
+    rejects(
+        &body("i64 x; defer x = 1; println(\"${x}\");"),
+        "`x` is read before it is assigned",
+    );
+    rejects(
+        &body("i64 x; func(i64 => i64) f = (i64 a) => a + x; x = 1;"),
+        "`x` is read before it is assigned",
+    );
+}
+
+#[test]
+fn reference_locals_are_bound_by_their_first_assignment() {
+    let item = "class Item { i64 n; }\n";
+    ok(&format!(
+        "{}{}",
+        item,
+        body(
+            "Item[..>] items = []; items +> new Item(1); Item& r; r = items[0]; r.n++; r = new Item(2);"
+        )
+    ));
+    rejects(
+        &format!(
+            "{}{}",
+            item,
+            body(
+                "Item[..>] items = []; items +> new Item(1); bool c = true; Item& r; if (c) { r = items[0]; } r = items[0];"
+            )
+        ),
+        "could bind it or write through it",
+    );
+    rejects(
+        &format!(
+            "{}Item make() {{ return new Item(1); }}\n{}",
+            item,
+            body("Item& r; r = make();")
+        ),
+        "temporary value",
+    );
+}

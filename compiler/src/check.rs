@@ -14,6 +14,7 @@ use crate::ast::{
 };
 use crate::builtins::{self, Need, NumCaps, SeqKind, Sig};
 use crate::diag::{Diagnostic, Severity};
+use crate::flow::Flow;
 use crate::program::{
     ClassKind, FieldInfo, Lookup, MethodInfo, Program, Scope, active, starts_empty,
 };
@@ -45,6 +46,36 @@ pub fn check(files: &[ast::File]) -> Vec<(usize, Diagnostic)> {
 struct Local {
     name: String,
     ty: Ty,
+    /// Declared without a value, so definite assignment tracks it (DESIGN §6.2).
+    slot: Option<usize>,
+}
+
+/// A field a constructor must assign.
+struct CtorField {
+    name: String,
+    slot: usize,
+    /// A non-nullable reference, or a value holding one: it must be assigned even on a failing exit.
+    no_zero: bool,
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn join_names(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [a] => a.clone(),
+        [rest @ .., last] => format!("{} and {}", rest.join(", "), last),
+    }
+}
+
+/// A `return #code;` whose code is a constant other than 0.
+fn failing_status(st: &ast::StatusWrite) -> bool {
+    match st {
+        ast::StatusWrite::Int(n) => *n != 0,
+        ast::StatusWrite::Name(q) => {
+            q.parts.len() == 2 && q.parts[0].name == "status" && q.parts[1].name != "OK"
+        }
+        ast::StatusWrite::Expr(_) => false,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,6 +116,17 @@ struct Checker<'p, 'a> {
     last_can_fail: Option<bool>,
     /// A label waiting for the loop it names.
     pending_label: Option<String>,
+    /// Definite assignment: the state here, and how many slots the function has used.
+    flow: Flow,
+    nslots: usize,
+    /// Per enclosing loop, innermost last: its label, and the states its `break`s and `continue`s leave.
+    flow_loops: Vec<(Option<String>, Vec<Flow>, Vec<Flow>)>,
+    /// Per enclosing block arm of a switch expression: the states at its `yield`s.
+    yield_flows: Vec<Vec<Flow>>,
+    /// In a constructor: the fields it must assign.
+    ctor_fields: Vec<CtorField>,
+    /// Set while typing the target of a plain assignment, so the write isn't taken for a read.
+    writing: bool,
 }
 
 fn is_status_const(name: &str) -> bool {
@@ -120,6 +162,12 @@ impl<'p, 'a> Checker<'p, 'a> {
             fns: Vec::new(),
             last_can_fail: None,
             pending_label: None,
+            flow: Flow::default(),
+            nslots: 0,
+            flow_loops: Vec::new(),
+            yield_flows: Vec::new(),
+            ctor_fields: Vec::new(),
+            writing: false,
         }
     }
 
@@ -177,6 +225,7 @@ impl<'p, 'a> Checker<'p, 'a> {
         self.locals.push(Local {
             name: name.name.clone(),
             ty,
+            slot: None,
         });
         self.scopes.last_mut().expect("a scope").push(id);
         id
@@ -198,6 +247,13 @@ impl<'p, 'a> Checker<'p, 'a> {
     }
 
     fn begin(&mut self, kind: FnKind, name: &str, ret: Ty, is_static: bool, tparams: Vec<TParam>) {
+        if kind != FnKind::Lambda {
+            self.flow = Flow::default();
+            self.nslots = 0;
+            self.flow_loops.clear();
+            self.yield_flows.clear();
+            self.ctor_fields.clear();
+        }
         self.fns.push(FnCtx {
             kind,
             name: name.to_string(),
@@ -311,11 +367,25 @@ impl<'p, 'a> Checker<'p, 'a> {
             for ctor in &c.ctors {
                 let Some(d) = ctor.decl else { continue };
                 self.begin(FnKind::Ctor, "new", Ty::Void, false, ctps.clone());
+                for f in c.fields.iter().filter(|f| !f.is_static) {
+                    let slot = self.new_slot();
+                    if f.init.is_some() || starts_empty(&f.ty) {
+                        self.flow.preset(slot);
+                    }
+                    let no_zero = self.no_zero(&f.ty, &mut Vec::new());
+                    self.ctor_fields.push(CtorField {
+                        name: f.name.clone(),
+                        slot,
+                        no_zero,
+                    });
+                }
                 for (p, ty) in d.params.iter().zip(&ctor.params) {
                     self.type_rules(ty, p.ty.span);
                     self.declare_name(&p.name, ty.clone());
                 }
                 self.block(&d.body);
+                let end = d.body.span.end as usize;
+                self.check_ctor_end(Span::new(end.saturating_sub(1), end), false);
                 self.end();
             }
             for m in &c.methods {
@@ -893,10 +963,24 @@ impl<'p, 'a> Checker<'p, 'a> {
         self.pending_label.take()
     }
 
-    fn loop_body(&mut self, label: Option<String>, body: &Stmt) {
-        self.cur_mut().loops.push(label);
+    /// Checks a loop's body. Returns the states its `break`s and its `continue`s leave.
+    fn loop_body(&mut self, label: Option<String>, body: &Stmt) -> (Vec<Flow>, Vec<Flow>) {
+        self.cur_mut().loops.push(label.clone());
+        self.flow_loops.push((label, Vec::new(), Vec::new()));
         self.stmt(body);
         self.cur_mut().loops.pop();
+        let (_, breaks, continues) = self.flow_loops.pop().expect("a loop");
+        (breaks, continues)
+    }
+
+    /// Sets the state after a loop. `exit` is the state where its condition ends it, if it can;
+    /// `back` are the states that go around again, which a later `break` may have passed through.
+    fn loop_exit(&mut self, exit: Option<Flow>, breaks: Vec<Flow>, back: Vec<Flow>) {
+        let mut out = Flow::join_all(exit.into_iter().chain(breaks));
+        for b in &back {
+            out.absorb_maybe(b);
+        }
+        self.flow = out;
     }
 
     /// Ends the narrowing of locals that `body` rebinds, since a loop may come back to its start.
@@ -931,9 +1015,12 @@ impl<'p, 'a> Checker<'p, 'a> {
                 self.unnarrow_rebound(body);
                 let base = self.narrowed.clone();
                 self.cond(cond);
+                let after_cond = self.flow.clone();
                 let (t, _) = self.facts(cond);
                 self.narrowed.extend(t);
-                self.loop_body(label, body);
+                let (breaks, mut back) = self.loop_body(label, body);
+                back.push(self.take_flow());
+                self.loop_exit((!is_true(cond)).then_some(after_cond), breaks, back);
                 self.narrowed = base;
             }
             S::Repeat {
@@ -966,9 +1053,12 @@ impl<'p, 'a> Checker<'p, 'a> {
                         "use `while (true)` with a `break` (DESIGN §9.4)",
                     );
                 }
+                let after_source = self.flow.clone();
                 self.push_scope();
                 self.bind_loop_target(target, &t, source.span);
-                self.loop_body(label, body);
+                let (breaks, mut back) = self.loop_body(label, body);
+                back.push(self.take_flow());
+                self.loop_exit(Some(after_source), breaks, back);
                 self.pop_scope();
                 self.narrowed = base;
             }
@@ -976,8 +1066,16 @@ impl<'p, 'a> Checker<'p, 'a> {
                 let label = self.take_label();
                 self.unnarrow_rebound(body);
                 let base = self.narrowed.clone();
-                self.loop_body(label, body);
+                let (breaks, continues) = self.loop_body(label, body);
+                let end = self.take_flow();
+                self.flow = Flow::join_all(std::iter::once(end).chain(continues));
                 self.cond(cond);
+                let after_cond = self.flow.clone();
+                self.loop_exit(
+                    (!is_true(cond)).then_some(after_cond.clone()),
+                    breaks,
+                    vec![after_cond],
+                );
                 self.narrowed = base;
             }
             S::For {
@@ -1004,10 +1102,16 @@ impl<'p, 'a> Checker<'p, 'a> {
                     let (t, _) = self.facts(c);
                     self.narrowed.extend(t);
                 }
-                self.loop_body(label, body);
+                let after_cond = self.flow.clone();
+                let (breaks, continues) = self.loop_body(label, body);
+                let end = self.take_flow();
+                self.flow = Flow::join_all(std::iter::once(end).chain(continues));
                 for u in update {
                     self.expr_stmt(u);
                 }
+                let back = self.take_flow();
+                let exits = cond.as_ref().is_some_and(|c| !is_true(c));
+                self.loop_exit(exits.then_some(after_cond), breaks, vec![back]);
                 self.narrowed = base;
                 self.pop_scope();
             }
@@ -1020,11 +1124,14 @@ impl<'p, 'a> Checker<'p, 'a> {
                 let label = self.take_label();
                 let it = self.expr(iter, None);
                 let (elem, by_ref) = self.iter_elem(&it, iter);
+                let after_iter = self.flow.clone();
                 self.push_scope();
                 self.bind_local_type(ty, name, &elem, by_ref, iter.span);
                 self.unnarrow_rebound(body);
                 let base = self.narrowed.clone();
-                self.loop_body(label, body);
+                let (breaks, mut back) = self.loop_body(label, body);
+                back.push(self.take_flow());
+                self.loop_exit(Some(after_iter), breaks, back);
                 self.narrowed = base;
                 self.pop_scope();
             }
@@ -1048,7 +1155,10 @@ impl<'p, 'a> Checker<'p, 'a> {
                         "a deferred statement can't `return`, `break` or `continue` (DESIGN §6.4)",
                     );
                 }
+                // It runs when the block ends; what it assigns doesn't count before then.
+                let saved = self.flow.clone();
                 self.stmt(inner);
+                self.flow = saved;
             }
             S::Yield(e) => self.yield_stmt(e, s.span),
             S::Labeled { label, stmt } => {
@@ -1082,15 +1192,19 @@ impl<'p, 'a> Checker<'p, 'a> {
     fn if_stmt(&mut self, cond: &Expr, then: &Stmt, els: Option<&Stmt>) {
         self.push_scope(); // `instanceof` bindings
         self.cond(cond);
+        let after_cond = self.flow.clone();
         let (t, f) = self.facts(cond);
         let saved = self.narrowed.clone();
         self.narrowed.extend(t.iter().copied());
         self.stmt(then);
+        let then_flow = std::mem::replace(&mut self.flow, after_cond);
         let after_then = std::mem::replace(&mut self.narrowed, saved.clone());
         self.narrowed.extend(f.iter().copied());
         if let Some(e) = els {
             self.stmt(e);
         }
+        let else_flow = self.take_flow();
+        self.flow = Flow::join(then_flow, else_flow);
         let after_else = std::mem::replace(&mut self.narrowed, saved);
         let then_exits = !completes(then);
         let else_exits = els.is_some_and(|e| !completes(e));
@@ -1122,6 +1236,21 @@ impl<'p, 'a> Checker<'p, 'a> {
                 self.err(l.span, format!("no enclosing loop is labeled `{}`", l.name));
             }
             _ => {}
+        }
+        let flow = self.take_flow();
+        let target = match label {
+            None => self.flow_loops.len().checked_sub(1),
+            Some(l) => self
+                .flow_loops
+                .iter()
+                .rposition(|x| x.0.as_deref() == Some(l.name.as_str())),
+        };
+        if let Some(i) = target {
+            if kw == "break" {
+                self.flow_loops[i].1.push(flow);
+            } else {
+                self.flow_loops[i].2.push(flow);
+            }
         }
     }
 
@@ -1171,6 +1300,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                     self.expr(v, None);
                     self.err(v.span, "a constructor returns nothing; `return;` and `return #code;` leave it early (DESIGN §6.2)");
                 }
+                self.check_ctor_end(span, status.is_some_and(failing_status));
             }
             FnKind::Method | FnKind::Main => match (value, &ret) {
                 (None, Ty::Void) => {}
@@ -1202,6 +1332,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                 }
             },
         }
+        self.flow = Flow::unreachable();
     }
 
     fn status_write(&mut self, st: &ast::StatusWrite, span: Span) {
@@ -1259,6 +1390,7 @@ impl<'p, 'a> Checker<'p, 'a> {
         let Some((want, _)) = self.cur().yields.last().cloned() else {
             self.expr(e, None);
             self.err(span, "`yield` gives the value of a block arm in a switch expression, and there is none here");
+            self.flow = Flow::unreachable();
             return;
         };
         let t = self.expr(e, want.as_ref());
@@ -1272,6 +1404,10 @@ impl<'p, 'a> Checker<'p, 'a> {
         };
         if let Some(y) = self.cur_mut().yields.last_mut() {
             y.1 = Some(merged);
+        }
+        let flow = self.take_flow();
+        if let Some(y) = self.yield_flows.last_mut() {
+            y.push(flow);
         }
     }
 
@@ -1299,6 +1435,9 @@ impl<'p, 'a> Checker<'p, 'a> {
                 e.span,
                 "this expression's value isn't used, so the statement does nothing",
             );
+        }
+        if never_returns(e) {
+            self.flow = Flow::unreachable();
         }
     }
 
@@ -1339,7 +1478,11 @@ impl<'p, 'a> Checker<'p, 'a> {
                     Ty::Unknown
                 }
             };
-            self.declare(&v.name, ty);
+            let id = self.declare(&v.name, ty);
+            if v.init.is_none() && declared.is_some() {
+                let slot = self.new_slot();
+                self.locals[id].slot = Some(slot);
+            }
             if let Some(c) = &v.capture {
                 self.declare_name(c, Ty::u8());
             }
@@ -1582,7 +1725,13 @@ impl<'p, 'a> Checker<'p, 'a> {
                 Target::Decl(lt, name) => self.bind_local_type(lt, name, et, false, value.span),
                 Target::Existing(Name::Discard(_)) => {}
                 Target::Existing(Name::Ident(id)) => {
+                    let slot = self.name_slot(&id.name);
+                    self.writing = true;
                     let lt = self.ident(&id.name, id.span);
+                    self.writing = false;
+                    if let Some(s) = slot {
+                        self.flow.assign(s);
+                    }
                     let to = lt.unref().clone();
                     if !matches!(lt, Ty::TypeName(_)) {
                         self.expect_at(et, &to, id.span, true);
@@ -1594,6 +1743,9 @@ impl<'p, 'a> Checker<'p, 'a> {
 
     fn status_dest(&mut self, c: &Name) {
         let Name::Ident(id) = c else { return };
+        if let Some(s) = self.name_slot(&id.name) {
+            self.flow.assign(s);
+        }
         let t = match self.lookup_local(&id.name) {
             Some(l) => self.locals[l].ty.clone(),
             None => match self.field_type(&id.name, id.span) {
@@ -1740,7 +1892,10 @@ impl<'p, 'a> Checker<'p, 'a> {
         let mut seen: Vec<String> = Vec::new();
         let mut has_default = false;
         let mut arm_ty: Option<Ty> = None;
+        let start = self.flow.clone();
+        let mut ends: Vec<Flow> = Vec::new();
         for rule in &sw.rules {
+            self.flow = start.clone();
             match &rule.labels {
                 None => {
                     if has_default {
@@ -1786,10 +1941,20 @@ impl<'p, 'a> Checker<'p, 'a> {
             }
             if is_expr {
                 let (t, span) = match &rule.body {
-                    SwitchBody::Expr(x) => (self.expr(x, want), x.span),
+                    SwitchBody::Expr(x) => {
+                        let t = self.expr(x, want);
+                        if never_returns(x) {
+                            self.flow = Flow::unreachable();
+                        }
+                        (t, x.span)
+                    }
                     SwitchBody::Block(b) => {
                         self.cur_mut().yields.push((want.cloned(), None));
+                        self.yield_flows.push(Vec::new());
                         self.block(b);
+                        let yields = self.yield_flows.pop().unwrap_or_default();
+                        let fall = self.take_flow();
+                        self.flow = Flow::join_all(yields.into_iter().chain(std::iter::once(fall)));
                         let y = self.cur_mut().yields.pop().and_then(|y| y.1);
                         if completes_all(&b.stmts) {
                             self.err(b.span, "this arm can reach its end without `yield`ing a value (DESIGN §9.4)");
@@ -1814,19 +1979,16 @@ impl<'p, 'a> Checker<'p, 'a> {
                     SwitchBody::Block(b) => self.block(b),
                 }
             }
+            ends.push(self.take_flow());
         }
+        let all_constants = matches!(kind, K::Enum(id) if self.prog.classes[id].constants.iter().all(|c| seen.contains(c)));
+        // Without a `default`, a statement switch may run no arm at all.
+        let every_path = is_expr || has_default || all_constants;
+        self.flow = Flow::join_all(ends.into_iter().chain((!every_path).then_some(start)));
         if !is_expr {
             return Ty::Void;
         }
-        let covered = has_default
-            || match kind {
-                K::Enum(id) => self.prog.classes[id]
-                    .constants
-                    .iter()
-                    .all(|c| seen.contains(c)),
-                K::Any => true,
-                _ => false,
-            };
+        let covered = has_default || all_constants || matches!(kind, K::Any);
         if !covered {
             self.err_help(
                 sw.span,
@@ -1962,7 +2124,10 @@ impl<'p, 'a> Checker<'p, 'a> {
                 self.err(e.span, "`_` can't be read; it only discards (DESIGN §7.3)");
                 Ty::Unknown
             }
-            E::This => self.this_ty(e.span),
+            E::This => {
+                self.this_use(e.span, "`this` can't be used");
+                self.this_ty(e.span)
+            }
             E::ThisNew(args) => self.this_new(args, e.span, consumed),
             E::PrimMember { prim, name } => self.prim_const(*prim, name),
             E::New { class, args } => self.new_expr(class.as_ref(), args, want, e.span, consumed),
@@ -1999,13 +2164,17 @@ impl<'p, 'a> Checker<'p, 'a> {
             }
             E::Cond { cond, then, els } => {
                 self.cond(cond);
+                let after_cond = self.flow.clone();
                 let (t, f) = self.facts(cond);
                 let saved = self.narrowed.clone();
                 self.narrowed.extend(t);
                 let a = self.expr_c(then, want, consumed);
+                let then_flow = std::mem::replace(&mut self.flow, after_cond);
                 self.narrowed = saved.clone();
                 self.narrowed.extend(f);
                 let b = self.expr_c(els, want, consumed);
+                let else_flow = self.take_flow();
+                self.flow = Flow::join(then_flow, else_flow);
                 self.narrowed = saved;
                 if let Some(w) = want
                     && self.rank(&a, w).is_some()
@@ -2058,6 +2227,17 @@ impl<'p, 'a> Checker<'p, 'a> {
             E::Cast { ty, mode, expr } => self.cast(ty, *mode, expr, e.span),
             E::Postfix { op, expr } => self.postfix(*op, expr, e.span, consumed),
             E::Member { expr, name } => {
+                // In a constructor, `this.x` reads one field, which needs only that field assigned.
+                if matches!(expr.kind, E::This) && self.in_ctor() {
+                    let bt = self.this_ty(expr.span);
+                    let writing = std::mem::take(&mut self.writing);
+                    if let Some(slot) = self.ctor_field(&name.name)
+                        && !writing
+                    {
+                        self.read_slot(slot, &name.name, name.span, true);
+                    }
+                    return self.member_of(&bt, expr, name);
+                }
                 let bt = self.expr(expr, None);
                 self.member_of(&bt, expr, name)
             }
@@ -2180,7 +2360,13 @@ impl<'p, 'a> Checker<'p, 'a> {
     }
 
     fn ident(&mut self, name: &str, span: Span) -> Ty {
+        let writing = std::mem::take(&mut self.writing);
         if let Some(id) = self.lookup_local(name) {
+            if let Some(slot) = self.locals[id].slot
+                && !writing
+            {
+                self.read_slot(slot, name, span, false);
+            }
             let l = &self.locals[id];
             if let Ty::Nullable(inner) = &l.ty
                 && self.narrowed.contains(&id)
@@ -2190,6 +2376,11 @@ impl<'p, 'a> Checker<'p, 'a> {
             return l.ty.clone();
         }
         if let Some(t) = self.field_type(name, span) {
+            if let Some(slot) = self.ctor_field(name)
+                && !writing
+            {
+                self.read_slot(slot, name, span, true);
+            }
             return t;
         }
         if self.tparam(name).is_some() {
@@ -2456,6 +2647,11 @@ impl<'p, 'a> Checker<'p, 'a> {
         let ptys: Vec<Ty> = params.iter().map(|p| self.resolve(&p.ty)).collect();
         let tps = self.tparams();
         let is_static = self.fn_static();
+        // The body sees what is assigned where the lambda is made; its own assignments,
+        // returns and loops don't change the state around it.
+        let outer_flow = self.flow.clone();
+        let outer_loops = std::mem::take(&mut self.flow_loops);
+        let outer_yields = std::mem::take(&mut self.yield_flows);
         self.begin(FnKind::Lambda, "lambda", Ty::Unknown, is_static, tps);
         for (p, t) in params.iter().zip(&ptys) {
             self.declare_name(&p.name, t.clone());
@@ -2486,6 +2682,9 @@ impl<'p, 'a> Checker<'p, 'a> {
             }
         };
         self.end();
+        self.flow = outer_flow;
+        self.flow_loops = outer_loops;
+        self.yield_flows = outer_yields;
         Ty::Func(ptys, Box::new(ret))
     }
 
@@ -2511,7 +2710,14 @@ impl<'p, 'a> Checker<'p, 'a> {
             self.expr_c(value, None, consumed);
             return Ty::Void;
         }
+        let slot = if matches!(op, AssignOp::Assign | AssignOp::Rebind) {
+            self.target_slot(target)
+        } else {
+            None
+        };
+        self.writing = slot.is_some();
         let tt = self.expr(target, None);
+        self.writing = false;
         if !self.is_place(target) && !matches!(tt, Ty::Ref(_) | Ty::Unknown) {
             self.err(
                 target.span,
@@ -2551,9 +2757,31 @@ impl<'p, 'a> Checker<'p, 'a> {
                 {
                     self.narrowed.remove(&id);
                 }
+                if let Some(s) = slot {
+                    self.flow.assign(s);
+                }
                 tt
             }
             AssignOp::Assign => {
+                // The first assignment to a reference binds it (DESIGN §6.2).
+                let is_ref = matches!(&tt, Ty::Ref(_) | Ty::View(_))
+                    || matches!(&tt, Ty::Nullable(x) if matches!(**x, Ty::Ref(_)));
+                if let Some(s) = slot
+                    && is_ref
+                    && !self.flow.is_def(s)
+                {
+                    if self.flow.is_maybe(s) {
+                        self.err_help(
+                            target.span,
+                            "this reference is assigned on some paths to here and not on others, so `=` could bind it or write through it",
+                            "assign it on every path first, or rebind it with `.=` (DESIGN §5.1)",
+                        );
+                    }
+                    let vt = self.expr_c(value, Some(&tt), consumed);
+                    self.expect(&vt, &tt, value);
+                    self.flow.assign(s);
+                    return tt;
+                }
                 let to = match &tt {
                     Ty::Ref(x) => (**x).clone(),
                     Ty::View(e) => Ty::Slice(e.clone()),
@@ -2566,6 +2794,9 @@ impl<'p, 'a> Checker<'p, 'a> {
                 };
                 let vt = self.expr_c(value, Some(&to), consumed);
                 self.expect(&vt, &to, value);
+                if let Some(s) = slot {
+                    self.flow.assign(s);
+                }
                 to
             }
             _ => {
@@ -2847,11 +3078,15 @@ impl<'p, 'a> Checker<'p, 'a> {
         match op {
             And | Or => {
                 self.cond(l);
+                // The right side may not run, so what it assigns counts only as "maybe".
+                let after_left = self.flow.clone();
                 let saved = self.narrowed.clone();
                 let (t, f) = self.facts(l);
                 self.narrowed.extend(if op == And { t } else { f });
                 self.cond(r);
                 self.narrowed = saved;
+                let after_right = self.take_flow();
+                self.flow = Flow::join(after_left, after_right);
                 Ty::bool()
             }
             Eq | Ne | Lt | Gt | Le | Ge => {
@@ -3483,6 +3718,9 @@ impl<'p, 'a> Checker<'p, 'a> {
                         );
                         return Ty::Unknown;
                     }
+                    if usable.iter().any(|m| !m.is_static) {
+                        self.this_use(name_span, &format!("`{}` can't be called", name));
+                    }
                     let sigs = self.method_sigs(cls, &self.self_type(cls).class_args(), &usable);
                     return self.resolve_call(name, sigs, None, args, span, consumed);
                 }
@@ -3917,6 +4155,26 @@ impl<'p, 'a> Checker<'p, 'a> {
             self.err(span, "`this.new(...)` calls another constructor, so it is only in a constructor (DESIGN §6.2)");
             return Ty::Void;
         };
+        // It runs at most once on any path, before anything assigns a field (DESIGN §6.2).
+        if !self.flow_loops.is_empty() {
+            self.err(span, "`this.new(...)` is inside a loop, so it could run more than once; it runs at most once (DESIGN §6.2)");
+        } else if self.flow.maybe_delegated() {
+            self.err(span, "`this.new(...)` may already have run on a path to here; it runs at most once (DESIGN §6.2)");
+        } else {
+            let assigned: Vec<String> = self
+                .ctor_fields
+                .iter()
+                .filter(|f| self.flow.is_maybe(f.slot))
+                .map(|f| format!("`{}`", f.name))
+                .collect();
+            if !assigned.is_empty() {
+                self.err_help(
+                    span,
+                    format!("{} {} assigned before `this.new(...)`, which assigns every field", join_names(&assigned), if assigned.len() == 1 { "is" } else { "are" }),
+                    "before `this.new(...)`, statements may only compute its arguments (DESIGN §6.2)",
+                );
+            }
+        }
         let c = &self.prog.classes[cls];
         let sigs: Vec<Sig> = c
             .ctors
@@ -3928,7 +4186,162 @@ impl<'p, 'a> Checker<'p, 'a> {
             })
             .collect();
         self.resolve_call("this.new", sigs, None, args, span, consumed);
+        let slots: Vec<usize> = self.ctor_fields.iter().map(|f| f.slot).collect();
+        self.flow.delegate(slots);
         Ty::Void
+    }
+
+    // ------------------------------------------------------------ definite assignment (DESIGN §6.2)
+
+    fn take_flow(&mut self) -> Flow {
+        std::mem::replace(&mut self.flow, Flow::unreachable())
+    }
+
+    fn new_slot(&mut self) -> usize {
+        self.nslots += 1;
+        self.nslots - 1
+    }
+
+    /// Whether the innermost function that isn't a lambda is a constructor.
+    fn in_ctor(&self) -> bool {
+        self.fns
+            .iter()
+            .rev()
+            .find(|f| f.kind != FnKind::Lambda)
+            .is_some_and(|f| f.kind == FnKind::Ctor)
+    }
+
+    /// The slot of a field the current constructor must assign.
+    fn ctor_field(&self, name: &str) -> Option<usize> {
+        if !self.in_ctor() {
+            return None;
+        }
+        self.ctor_fields
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.slot)
+    }
+
+    /// The slot a bare name refers to: a local declared without a value, or a field in a constructor.
+    fn name_slot(&self, name: &str) -> Option<usize> {
+        match self.lookup_local(name) {
+            Some(id) => self.locals[id].slot,
+            None => self.ctor_field(name),
+        }
+    }
+
+    /// The slot a plain assignment to `target` fills.
+    fn target_slot(&self, target: &Expr) -> Option<usize> {
+        match &target.kind {
+            E::Ident(n) => self.name_slot(n),
+            E::Member { expr, name } if matches!(expr.kind, E::This) => self.ctor_field(&name.name),
+            _ => None,
+        }
+    }
+
+    fn read_slot(&mut self, slot: usize, name: &str, span: Span, field: bool) {
+        if self.flow.is_def(slot) {
+            return;
+        }
+        let some = self.flow.is_maybe(slot);
+        let msg = if some {
+            format!(
+                "`{}` may be read before it is assigned: some paths to here don't assign it",
+                name
+            )
+        } else {
+            format!("`{}` is read before it is assigned", name)
+        };
+        let help = if field {
+            "in a constructor, a field can't be read until every path to the read has assigned it (DESIGN §6.2)"
+        } else if some {
+            "assign it on every path before this, as with an `else` (DESIGN §6.2)"
+        } else {
+            "give it a value where it's declared, or assign it first (DESIGN §6.2)"
+        };
+        self.err_help(span, msg, help);
+    }
+
+    /// The fields not yet assigned on every path; with `failing`, only those with no zero value.
+    fn unassigned_fields(&self, failing: bool) -> Vec<String> {
+        if self.flow.delegated() {
+            return Vec::new();
+        }
+        self.ctor_fields
+            .iter()
+            .filter(|f| !self.flow.is_def(f.slot) && (!failing || f.no_zero))
+            .map(|f| format!("`{}`", f.name))
+            .collect()
+    }
+
+    /// A constructor ends here, successfully or with a constant nonzero status.
+    fn check_ctor_end(&mut self, span: Span, failing: bool) {
+        if !self.in_ctor() || self.cur().kind != FnKind::Ctor {
+            return;
+        }
+        let missing = self.unassigned_fields(failing);
+        if missing.is_empty() {
+            return;
+        }
+        let list = join_names(&missing);
+        if failing {
+            let verb = if missing.len() == 1 { "has" } else { "have" };
+            self.err_help(
+                span,
+                format!("{} {} no zero value, so it must be assigned even when the constructor fails", list, verb),
+                "a failing `return #code;` leaves the other fields at their zero values, but a non-nullable reference has none (DESIGN §6.2)",
+            );
+        } else {
+            self.err_help(
+                span,
+                format!("the constructor can end here without assigning {}", list),
+                "every field without an initializer is assigned on every path through a constructor, or by `this.new(...)`; only a failing `return #code;` needn't (DESIGN §6.2)",
+            );
+        }
+    }
+
+    /// `this` is used for something other than assigning or reading one field.
+    fn this_use(&mut self, span: Span, what: &str) {
+        if !self.in_ctor() {
+            return;
+        }
+        let missing = self.unassigned_fields(false);
+        if missing.is_empty() {
+            return;
+        }
+        let verb = if missing.len() == 1 {
+            "isn't"
+        } else {
+            "aren't"
+        };
+        self.err_help(
+            span,
+            format!("{} until every field is assigned, and {} {} yet", what, join_names(&missing), verb),
+            "a method could read a field that isn't set, so until then `this` is only for assigning fields (DESIGN §6.2)",
+        );
+    }
+
+    /// A non-nullable reference, or a value holding one, which has no zero value.
+    fn no_zero(&self, t: &Ty, seen: &mut Vec<ClassId>) -> bool {
+        match t {
+            Ty::Ref(_) => true,
+            Ty::Class(id, args) => {
+                let c = &self.prog.classes[*id];
+                if !matches!(c.kind, ClassKind::Class | ClassKind::Root) || seen.contains(id) {
+                    return false;
+                }
+                seen.push(*id);
+                let map = self.class_subst(*id, args);
+                let found = c
+                    .fields
+                    .iter()
+                    .filter(|f| !f.is_static)
+                    .any(|f| self.no_zero(&f.ty.subst(&map), seen));
+                seen.pop();
+                found
+            }
+            _ => false,
+        }
     }
 
     /// Chooses an overload (DESIGN §6.5), checks the arguments and returns the result type.
