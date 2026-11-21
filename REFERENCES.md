@@ -222,6 +222,7 @@ A value is **variable-size** when its size isn't fixed by its type: a frozen arr
   - their cursor slot must be `.`, since a cursor array's holes are reused by elements of the same size;
   - `clear` works, under rule R.
 - **V4, building in place**: while a value is being built in place in an array, nothing may grow that array (Goose §4.2). `items.push(make(items))` is an error when `make` can grow `items`.
+- **V5, built in order**: a variable-size record is written from its start, so a constructor of a variable-size class assigns each variable-size field at most once, by a statement directly in its body (not inside an `if`, a loop or an expression), in the order the fields are declared, and none after `this.new(...)`, which writes them all. A field it doesn't assign gets its initializer, in its place. Fixed-size fields are assigned anywhere. A constructor that fails leaves the zero value: zeroed fixed-size fields and empty arrays.
 
 ```
 class Order { i32 id; u8[.*] customer; }

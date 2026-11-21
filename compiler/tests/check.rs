@@ -1907,3 +1907,46 @@ void main() {
         assert!(got.contains(w), "{} / {}", got, w);
     }
 }
+
+/// A record's constructor writes it from its start: its variable-size fields are assigned
+/// in declaration order, each by a statement of its own, and none after `this.new`.
+#[test]
+fn record_constructors_write_in_order() {
+    let e = errors(
+        r##"class A {
+    u8[.*] first;
+    i32 n;
+    u8[.*] second;
+
+    new(string x) {
+        second = x;
+        first = x;
+        n = 1;
+    }
+
+    new(string x, bool flag) {
+        n = 2;
+        if (flag) { first = x; } else { first = "no"; }
+        second = x;
+    }
+
+    new(string x, i32 k) {
+        this.new(x);
+        second = "again";
+    }
+}
+
+void main() {}
+"##,
+    );
+    let want = [
+        "`first` is assigned after `second`, which is declared after it",
+        "`first` is variable-size, so it's assigned by a statement of its own",
+        "`first` is variable-size, so it's assigned by a statement of its own",
+        "`second` was already written by `this.new(...)`",
+    ];
+    assert_eq!(e.len(), want.len(), "{:#?}", e);
+    for (got, w) in e.iter().zip(want) {
+        assert!(got.contains(w), "{} / {}", got, w);
+    }
+}

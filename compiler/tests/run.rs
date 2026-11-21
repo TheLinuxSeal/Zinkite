@@ -3239,3 +3239,123 @@ void main() {
         "5\nalexander 2\n9\n",
     );
 }
+
+/// Constructors of a record's own: computing its fields, leaving one to its initializer,
+/// delegating with `this.new`, and failing, which leaves the zero record. Records returned
+/// by functions and through an interface, built where they're kept (DESIGN §3.3): into a
+/// variable, an array, another record and a parameter, through two levels of `return`, and
+/// from a parameter's field.
+#[test]
+fn record_constructors_and_returns() {
+    prints(
+        r##"interface Maker { Item make(i32 n); }
+
+class Item {
+    u8[.*] sku;
+    i32 qty;
+    u8[.*] note = "none";
+    u8[.*] origin;
+
+    // Computes its fields; leaves `note` to its initializer.
+    new(string line) {
+        (string code, string rest) = line.splitFirst(":");
+        i32 n @_ = i32.parse(rest.trim());
+        qty = n;
+        this.sku = code.trim().toUpper();
+        origin = "parsed";
+    }
+
+    new(string sku, i32 qty) {
+        this.new("${sku}:${qty}");
+    }
+
+    new(string sku, i32 qty, string note) {
+        this.sku = sku;
+        this.qty = qty;
+        this.note = note;
+        if (qty < 0) { return #status.INVALID; }
+        this.origin = "checked";
+    }
+}
+
+class Order { i32 id; Item first; Item[.*] rest; }
+
+Item make(string sku) { return new Item(sku, 3); }
+
+Item built(string sku) {
+    Item it = new Item(sku, 4, "built");
+    it.qty += 1;
+    return it;
+}
+
+Item pickFirst(Order o) { return o.first; }
+
+Item twice(string sku) { return make(sku); }
+
+class Factory implements Maker {
+    Item make(i32 n) { return new Item("F${n}", n, "factory"); }
+}
+
+void show(Item it) { print("[${it.sku} ${it.qty} ${it.note} ${it.origin}]"); }
+
+void main() {
+    Item a = new Item(" abc : 7 ");
+    show(a);
+    Item b = new Item("xyz", 2);
+    show(b);
+    Item bad @err = new Item("neg", -1, "oops");
+    show(bad);
+    println(" ${err}");
+
+    Item m = make("m1");
+    Item k = built("k1");
+    Item t = twice("t1");
+    show(m); show(k); show(t);
+    println("");
+
+    Item[..>] items = [];
+    items +> make("in-array");
+    items +> built("in-array-too");
+    for (Item& it : items) { show(it); }
+    println("");
+
+    Order o = new Order(1, make("first"), [built("r1"), make("r2")]);
+    show(o.first);
+    for (Item& it : o.rest) { show(it); }
+    show(pickFirst(o));
+    println("");
+
+    Factory f = new Factory();
+    Maker& mk = f;
+    Item fi = mk.make(9);
+    show(fi);
+    show(mk.make(10));
+    println(" ${make("len").sku.len}");
+}
+"##,
+        "[ABC 7 none parsed][XYZ 2 none parsed][ 0  ] 22
+[M1 3 none parsed][k1 5 built checked][T1 3 none parsed]
+[IN-ARRAY 3 none parsed][in-array-too 5 built checked]
+[FIRST 3 none parsed][r1 5 built checked][R2 3 none parsed][FIRST 3 none parsed]
+[F9 9 factory checked][F10 10 factory checked] 3
+",
+    );
+    // A recursive function passes where to build the record down to the bottom.
+    prints(
+        r##"class Item { u8[.*] sku; i32 qty; }
+
+
+Item chain(i32 n) {
+    if (n == 0) { return new Item("bottom", 0); }
+    return chain(n - 1);
+}
+
+void main() {
+
+    Item c = chain(5);
+    println(c.sku);
+}
+"##,
+        "bottom\n",
+    );
+}

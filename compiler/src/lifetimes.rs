@@ -450,7 +450,10 @@ impl<'p, 'a> Analysis<'p, 'a> {
         match t {
             Ty::Array(_, k) => k.cap == CapKind::None,
             Ty::Map(..) | Ty::Set(_) | Ty::Pool(_) => true,
-            Ty::Class(id, _) => self.prog.classes[*id].kind == ClassKind::Root,
+            // A variable-size record lives on a data stack of its own too.
+            Ty::Class(id, _) => {
+                self.prog.classes[*id].kind == ClassKind::Root || self.prog.variable_size(t)
+            }
             _ => false,
         }
     }
@@ -961,10 +964,15 @@ impl<'p, 'a> Analysis<'p, 'a> {
                             if sccs[g].is_some() && sccs[g] == sccs[i] {
                                 for &l in &c.in_scope {
                                     let lv = &f.locals[l as usize];
+                                    let what = if self.prog.variable_size(&lv.ty) {
+                                        "a variable-size record"
+                                    } else {
+                                        "growable"
+                                    };
                                     errs.push((
                                         c.span,
-                                        format!("`{}` is growable and in scope during this call, which can recurse back into `{}`", lv.name, f.name),
-                                        "a growable local would need a new data stack on every call; pass it in by reference from outside the cycle (REFERENCES §8.4)".into(),
+                                        format!("`{}` is {} and in scope during this call, which can recurse back into `{}`", lv.name, what, f.name),
+                                        format!("{} local would need a new data stack on every call; pass it in by reference from outside the cycle (REFERENCES §8.4)", if what == "growable" { "a growable" } else { "such a" }),
                                     ));
                                 }
                                 for s in &c.by_value {

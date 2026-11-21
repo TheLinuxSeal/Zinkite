@@ -682,3 +682,23 @@ void main() {
         e[0]
     );
 }
+
+/// A variable-size record lives on a data stack of its own, so a recursive call can't
+/// happen while one is in scope (REFERENCES §8.4).
+#[test]
+fn records_in_scope_block_recursion() {
+    let e = errors(
+        r##"class Item { u8[.*] sku; i32 qty; }
+
+i32 depth(i32 n) {
+    Item here = new Item("level", n);
+    if (n == 0) { return here.qty; }
+    return depth(n - 1) + here.qty;
+}
+
+void main() { println("${depth(3)}"); }
+"##,
+    );
+    assert_eq!(e.len(), 1, "{:#?}", e);
+    assert!(e[0].contains("`here` is a variable-size record and in scope during this call, which can recurse back into `depth`"), "{}", e[0]);
+}

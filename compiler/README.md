@@ -85,7 +85,10 @@ Done:
   of variable-size values is only added to at its end, cleared and looped over, by
   reference, never indexed, sliced, popped, reordered or given a cursor (V3). V4 is
   met by the code generator rather than refused: a record whose building calls
-  code that could grow its array is built aside and moved to the array's end.
+  code that could grow its array is built aside and moved to the array's end. A
+  constructor of a variable-size class assigns its variable-size fields in order,
+  each by a statement of its own (V5). A variable-size local, like a growable one,
+  can't be in scope during a recursive call (§8.4).
 
 Not yet:
 - rule L (links) of `REFERENCES.md`, and rule G's check that nothing grows an array
@@ -131,9 +134,16 @@ array literals included, so `book +> new Order(1, "alice", [new Item("SKU-7", 1,
 is `zr_rvec`, which keeps its byte length beside its count; a for-each walks it with
 each type's size function. A million items with a short SKU take 16 MB inline,
 against 35 MB as `string` views into one buffer, and 20 passes over them take
-0.10 s against 0.07 s, since finding the next record decodes its lengths. Not yet:
-an explicit constructor of a variable-size class, returning one from a function,
-and variable-size values in hash maps, pools and tuples.
+0.10 s against 0.07 s, since finding the next record decodes its lengths.
+
+A constructor of a variable-size class is a C function that writes the record at a
+destination and gives its length: fixed-size fields through the packed struct,
+variable-size ones at the end of what's written so far, which V5 makes possible; a
+failing one writes the zero record. A function returning a record takes the same
+hidden destination an array result does (DESIGN §3.3): the local it returns starts
+there, `return new R(...)` builds there, and `return g(x);` passes it on, so
+`Item m = make("m1");` writes the item once, in `m`. Not yet: variable-size values
+in hash maps, pools and tuples.
 
 `pool<T>` (DESIGN §3.5) is one grow-only array of slots on a data stack, each
 `{generation, next free, value}`, with the free slots in a list through `next`

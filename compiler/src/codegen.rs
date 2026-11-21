@@ -144,6 +144,11 @@ struct Gen<'p, 'a> {
     vs_fns: HashMap<String, String>,
     /// Structs laid out packed: the fixed part of a variable-size record (DESIGN §11).
     packed: HashSet<String>,
+    /// In the constructor of a variable-size record: its type, and the first of its
+    /// variable-size fields not written yet (records.rs).
+    rec_ctor: Option<(Ty, usize)>,
+    /// Where a constructor called while building a record puts its status.
+    build_status: Option<String>,
 }
 
 fn c_string(s: &[u8]) -> String {
@@ -302,6 +307,8 @@ impl<'p, 'a> Gen<'p, 'a> {
             lib_done: HashSet::new(),
             vs_fns: HashMap::new(),
             packed: HashSet::new(),
+            rec_ctor: None,
+            build_status: None,
         }
     }
 
@@ -442,7 +449,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             match self.facts.names.get(&key(v.span)) {
                 Some(NameRes::Local(d)) if !params.contains(d) => {
                     let t = self.facts.locals.get(d).map(|t| self.sb(t))?;
-                    (layout(&t) == Some(Layout::Vec)).then_some(*d)
+                    (layout(&t) == Some(Layout::Vec) || self.vs_class(&t)).then_some(*d)
                 }
                 _ => None,
             }
@@ -768,7 +775,10 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
             let record = self.vs(&Ty::Class(id, Vec::new()));
             for (i, k) in c.ctors.iter().enumerate() {
-                if matches!(c.kind, ClassKind::Class | ClassKind::Root) && !lib && !record {
+                if matches!(c.kind, ClassKind::Class | ClassKind::Root)
+                    && !lib
+                    && (!record || k.decl.is_some())
+                {
                     self.ctor(id, i, k);
                     self.drain_lambdas();
                 }
@@ -887,15 +897,12 @@ impl<'p, 'a> Gen<'p, 'a> {
         let c = &self.prog.classes[id];
         let span = m.decl.name.span;
         let m_ret = self.sb(&m.ret);
-        if self.vs_class(&m_ret) {
-            self.unsupported(span, "returning a variable-size record");
-        }
         self.begin_fn(id, m_ret.clone(), m.can_fail, !m.is_static, false);
         self.is_main = c.kind == ClassKind::Script && m.name == "main";
-        let ret = self.ret_c(&m_ret, m.can_fail, span);
+        let ret = self.ret_c_of(&m_ret, m.can_fail, span);
         let mut params = Vec::new();
-        // An array result is built where the caller says (DESIGN §3.3).
-        if dst_ret(&m_ret) {
+        // An array or record result is built where the caller says (DESIGN §3.3).
+        if self.returns_into(&m_ret) {
             self.dst_fn = true;
             params.push("void *_dst".to_string());
             if let Some(body) = &m.decl.body {
@@ -954,6 +961,10 @@ impl<'p, 'a> Gen<'p, 'a> {
     /// Constructor `idx` of class `id` as the C function `name`, in the current
     /// instantiation.
     fn ctor_as(&mut self, id: ClassId, _idx: usize, k: &crate::program::CtorInfo, name: String) {
+        if self.vs(&Ty::Class(id, self.cur_cargs.clone())) {
+            self.record_ctor(id, k, name);
+            return;
+        }
         let c = &self.prog.classes[id];
         let span = c.span;
         self.begin_fn(id, Ty::Void, k.can_fail, true, true);
@@ -1355,16 +1366,29 @@ impl<'p, 'a> Gen<'p, 'a> {
             // built there (DESIGN §3.2, §3.3). The name reads as the record itself.
             if self.vs_class(&ty) {
                 let site = self.site();
-                self.line(&format!("{} *{} = ({} *)zr_stack({});", ct, name, ct, site));
+                // The record the function returns starts in its caller's storage.
+                let at = if self.result_local == Some(key(v.name.span)) {
+                    format!("(_dst ? _dst : zr_stack({}))", site)
+                } else {
+                    format!("zr_stack({})", site)
+                };
+                self.line(&format!("{} *{} = ({} *){};", ct, name, ct, at));
                 self.locals
                     .insert(key(v.name.span), (format!("(*{})", name), ty.clone()));
-                if v.capture.is_some() {
-                    self.unsupported(v.name.span, "a status beside a variable-size record");
-                    continue;
-                }
+                // A failing constructor's or function's status goes to the capture.
+                let status = match &v.capture {
+                    Some(Name::Ident(c)) => {
+                        let (cn, _) = self.new_local(c);
+                        self.line(&format!("uint8_t {} = 0;", cn));
+                        Some(cn)
+                    }
+                    _ => None,
+                };
                 if let Some(init) = &v.init {
                     let cur = self.tmp("cur");
+                    self.build_status = status;
                     let b = self.build(&cur, init, &ty);
+                    self.build_status = None;
                     self.line(&format!(
                         "{{ uint8_t *{} = (uint8_t *){}; {}}}",
                         cur, name, b
@@ -1703,6 +1727,11 @@ impl<'p, 'a> Gen<'p, 'a> {
         let ret = self.ret.clone();
         if self.is_ctor {
             self.run_defers(0);
+            if self.rec_ctor.is_some() {
+                let end = self.record_ctor_end(&st);
+                self.line(&end);
+                return;
+            }
             if self.fails {
                 self.line(&format!("return {};", st));
             } else {
@@ -1713,6 +1742,9 @@ impl<'p, 'a> Gen<'p, 'a> {
         let val = value.map(|v| {
             if !self.dst_fn {
                 return self.expr(v, &ret);
+            }
+            if self.vs_class(&ret) {
+                return self.record_return(v, &ret, span);
             }
             // Into the caller's destination, when it gave one: the result local is already
             // there, and a call is passed it, unless the result local is in use, which the
@@ -1738,7 +1770,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                 sz = sz
             )
         });
-        let rc = self.ret_c(&ret, self.fails, span);
+        let rc = self.ret_c_of(&ret, self.fails, span);
         match (self.fails, val) {
             (true, Some(v)) => {
                 let t = self.tmp("ret");
@@ -2440,6 +2472,7 @@ impl<'p, 'a> Gen<'p, 'a> {
         };
         let (val, st) = match (c.fails, c.ret == Ty::Void) {
             (true, true) => ("0".to_string(), r.clone()),
+            (true, false) if self.vs_class(&c.ret) => (format!("(*{}.v)", r), format!("{}.s", r)),
             (true, false) => (format!("{}.v", r), format!("{}.s", r)),
             (false, true) => ("0".to_string(), "0".to_string()),
             (false, false) => (r.clone(), "0".to_string()),
@@ -2528,6 +2561,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             E::Call { .. } | E::New { .. } | E::ThisNew(_) => {
                 let c = self.call_any(e);
                 let code = match (c.fails, c.ret == Ty::Void) {
+                    (true, false) if self.vs_class(&c.ret) => format!("(*({}).v)", c.code),
                     (true, false) => format!("({}).v", c.code),
                     _ => c.code,
                 };
@@ -3041,6 +3075,11 @@ impl<'p, 'a> Gen<'p, 'a> {
                 Name::Discard(_) => String::new(),
             };
             return format!("({{ {} {} {} = {}; }})", pre, set, p, val);
+        }
+        if op == AssignOp::Assign
+            && let Some(code) = self.record_field_write(target, value)
+        {
+            return code;
         }
         match op {
             AssignOp::Rebind => {
@@ -3764,6 +3803,14 @@ impl<'p, 'a> Gen<'p, 'a> {
                     fails,
                 }
             }
+            E::ThisNew(args) if self.rec_ctor.is_some() => {
+                let code = self.record_this_new(args, e.span);
+                CallOut {
+                    code,
+                    ret: Ty::Void,
+                    fails: true,
+                }
+            }
             E::ThisNew(args) => {
                 let st = self.construct("(*self)", args, e.span);
                 let fails = matches!(self.facts.calls.get(&key(e.span)), Some(f) if matches!(f.origin, Origin::Ctor(c, i) if self.prog.classes[c].ctors[i].can_fail));
@@ -3891,12 +3938,17 @@ impl<'p, 'a> Gen<'p, 'a> {
                 };
                 let r = settle(&r);
                 // Where to build an array result (DESIGN §3.3).
-                let into = m.c_name.is_none() && dst_ret(&r);
+                let into = m.c_name.is_none() && self.returns_into(&r);
                 if into {
                     cargs.insert(0, direct.clone().unwrap_or_else(|| "NULL".into()));
                 }
                 let mut code = format!("{}({})", fname, cargs.join(", "));
-                if into {
+                if into && self.vs_class(&r) {
+                    // A pointer to the record, read as the record itself.
+                    if !fails {
+                        code = format!("(*({}))", code);
+                    }
+                } else if into {
                     code = self.array_result(code, &r, fails, &direct, e.span);
                 }
                 CallOut {

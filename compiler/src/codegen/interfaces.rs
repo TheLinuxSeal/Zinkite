@@ -56,10 +56,10 @@ impl<'p, 'a> Gen<'p, 'a> {
                 continue;
             }
             let ret = m.ret.subst(&map);
-            let rc = self.ret_c(&ret, m.can_fail, span);
+            let rc = self.ret_c_of(&ret, m.can_fail, span);
             let mut ps = vec!["void *".to_string()];
-            // Where an array result goes (DESIGN §3.3), before the value.
-            if dst_ret(&settle(&ret)) {
+            // Where an array or record result goes (DESIGN §3.3), before the value.
+            if self.returns_into(&settle(&ret)) {
                 ps.insert(0, "void *".to_string());
             }
             for p in &m.params {
@@ -129,11 +129,11 @@ impl<'p, 'a> Gen<'p, 'a> {
             };
             let (fname, _) = self.method_ref(cls, mi, Some(&cls_ty), &[], span);
             let class_fails = prog.classes[cls].methods[mi].can_fail;
-            let rc = self.ret_c(&ret, im.can_fail, span);
+            let rc = self.ret_c_of(&ret, im.can_fail, span);
             let thunk = format!("{}_m{}", name, j);
             let mut ps = vec!["void *self".to_string()];
             let mut call = vec![format!("({}*)self", cc)];
-            if dst_ret(&settle(&ret)) {
+            if self.returns_into(&settle(&ret)) {
                 ps.insert(0, "void *_dst".to_string());
                 call.insert(0, "_dst".to_string());
             }
@@ -267,7 +267,7 @@ impl<'p, 'a> Gen<'p, 'a> {
         let map = self.class_map(id, &iargs);
         let ret = settle(&m.ret.subst(&map));
         let fails = m.can_fail;
-        let into = dst_ret(&ret);
+        let into = self.returns_into(&ret);
         if into {
             cargs.insert(0, direct.clone().unwrap_or_else(|| "NULL".into()));
         }
@@ -280,7 +280,11 @@ impl<'p, 'a> Gen<'p, 'a> {
             i,
             cargs.join(", ")
         );
-        if into {
+        if into && self.vs_class(&ret) {
+            if !fails {
+                code = format!("(*({}))", code);
+            }
+        } else if into {
             code = self.array_result(code, &ret, fails, &direct, span);
         }
         CallOut { code, ret, fails }

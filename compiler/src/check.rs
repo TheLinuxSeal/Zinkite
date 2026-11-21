@@ -532,6 +532,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                 let end = d.body.span.end as usize;
                 self.check_ctor_end(Span::new(end.saturating_sub(1), end), false);
                 self.end();
+                self.record_ctor_order(id, &d.body);
             }
             for m in &c.methods {
                 for (p, ty) in m.decl.params.iter().zip(&m.params) {
@@ -4631,6 +4632,140 @@ impl<'p, 'a> Checker<'p, 'a> {
         {
             let private = ms.iter().all(|m| m.is_private);
             self.hidden(owner, &ms[0].name, private, span);
+        }
+    }
+
+    /// A variable-size record is written from its start (REFERENCES §6), so a constructor
+    /// of one assigns each variable-size field at most once, by a statement directly in its
+    /// body, in the order the fields are declared, and none after `this.new(...)`, which
+    /// writes them all. Fixed-size fields are assigned anywhere.
+    fn record_ctor_order(&mut self, id: ClassId, body: &ast::Block) {
+        let prog = self.prog;
+        if !prog.variable_size(&self.self_type(id)) {
+            return;
+        }
+        let vars: Vec<String> = prog.classes[id]
+            .fields
+            .iter()
+            .filter(|f| !f.is_static && prog.variable_size(&f.ty))
+            .map(|f| f.name.clone())
+            .collect();
+        let mut next = 0;
+        let mut delegated = false;
+        for s in &body.stmts {
+            if let S::Expr(e) = &s.kind {
+                if let Some((name, span)) = self.var_field_target(e, &vars) {
+                    let k = vars.iter().position(|v| *v == name).unwrap_or(0);
+                    if delegated {
+                        self.err_help(
+                            span,
+                            format!("`{}` was already written by `this.new(...)`", name),
+                            "a variable-size field is written once (REFERENCES §6, V1)",
+                        );
+                    } else if k < next {
+                        let msg = format!(
+                            "`{}` is assigned after `{}`, which is declared after it",
+                            name,
+                            vars[next - 1]
+                        );
+                        self.err_help(span, msg, "a variable-size record is written from its start, so assign its variable-size fields in the order they're declared (REFERENCES §6)");
+                    }
+                    next = next.max(k + 1);
+                    continue;
+                }
+                let delegation = |x: &Expr| {
+                    matches!(&x.kind, E::ThisNew(_))
+                        || matches!(&x.kind, E::StatusAssign { value, .. } if matches!(value.kind, E::ThisNew(_)))
+                };
+                if delegation(e) {
+                    delegated = true;
+                    continue;
+                }
+            }
+            let mut nested = Vec::new();
+            self.var_field_assigns_in(s, &vars, &mut nested);
+            for (name, span) in nested {
+                self.err_help(
+                    span,
+                    format!("`{}` is variable-size, so it's assigned by a statement of its own in the constructor's body", name),
+                    "not inside an `if`, a loop or an expression; choose its value with `?:` (REFERENCES §6)",
+                );
+            }
+        }
+    }
+
+    /// `this.f = e` or `f = e`, where `f` is one of `vars`: its name and where it is.
+    fn var_field_target(&self, e: &Expr, vars: &[String]) -> Option<(String, Span)> {
+        let E::Assign { target, .. } = &e.kind else {
+            return None;
+        };
+        let name = match &target.kind {
+            E::Member { expr, name } if matches!(expr.kind, E::This) => name.name.clone(),
+            E::Ident(n)
+                if matches!(
+                    self.facts.names.get(&key(target.span)),
+                    Some(NameRes::Field(..))
+                ) =>
+            {
+                n.clone()
+            }
+            _ => return None,
+        };
+        vars.contains(&name).then_some((name, target.span))
+    }
+
+    fn var_field_assigns_in(&self, s: &Stmt, vars: &[String], out: &mut Vec<(String, Span)>) {
+        let in_expr = |e: &Expr, out: &mut Vec<(String, Span)>| {
+            fn walk(me: &Checker, e: &Expr, vars: &[String], out: &mut Vec<(String, Span)>) {
+                if let Some(t) = me.var_field_target(e, vars) {
+                    out.push(t);
+                }
+                for x in expr_children(e) {
+                    walk(me, x, vars, out);
+                }
+            }
+            walk(self, e, vars, out);
+        };
+        match &s.kind {
+            S::Expr(e) => in_expr(e, out),
+            S::Local(d) => {
+                for v in &d.decls {
+                    if let Some(i) = &v.init {
+                        in_expr(i, out);
+                    }
+                }
+            }
+            S::Return { value: Some(v), .. } => in_expr(v, out),
+            S::Block(b) => b
+                .stmts
+                .iter()
+                .for_each(|s| self.var_field_assigns_in(s, vars, out)),
+            S::If { cond, then, els } => {
+                in_expr(cond, out);
+                self.var_field_assigns_in(then, vars, out);
+                if let Some(e) = els {
+                    self.var_field_assigns_in(e, vars, out);
+                }
+            }
+            S::While { body, .. }
+            | S::Repeat { body, .. }
+            | S::DoWhile { body, .. }
+            | S::For { body, .. }
+            | S::ForEach { body, .. }
+            | S::Labeled { stmt: body, .. }
+            | S::Defer(body) => self.var_field_assigns_in(body, vars, out),
+            S::Switch(sw) => {
+                for r in &sw.rules {
+                    match &r.body {
+                        ast::SwitchBody::Block(b) => b
+                            .stmts
+                            .iter()
+                            .for_each(|s| self.var_field_assigns_in(s, vars, out)),
+                        ast::SwitchBody::Expr(x) => in_expr(x, out),
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
