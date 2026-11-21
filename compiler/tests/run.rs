@@ -255,13 +255,14 @@ fn bugs_stop_the_program_with_their_location() {
 fn unsupported_features_are_reported_not_miscompiled() {
     let file = SourceFile::new(
         "prog.zn",
-        "void main() { hashmap<string, i64> m = []; m.put(\"a\", 1); }\n",
+        "i64 apply(func(i64 => i64) f, i64 x) { return f(x); }\nvoid main() { i64 k = 3; println(\"${apply((i64 x) => x * k, 2)}\"); }\n",
     );
     let (diags, c) = zink::compile_c(std::slice::from_ref(&file));
     assert!(c.is_none());
     assert!(diags[0].iter().any(|d| {
-        d.message
-            .contains("the C backend doesn't support hash maps yet")
+        d.message.contains(
+            "the C backend doesn't support a lambda that captures, passed to a function of your own yet",
+        )
     }));
 }
 
@@ -1115,4 +1116,271 @@ true 0 true 0 0 34 -255 0
 two
 "#,
     );
+}
+
+/// Lambdas (DESIGN §9.3): comparators, keys and predicates inlined into the array
+/// methods, a block body with `return`s, a captured local, and function values passed to
+/// a function. Maps and sets (DESIGN §4.14): every method, for-each in insertion order and
+/// writing through it, a `getOrAdd` reference that survives 100000 inserts, compaction
+/// after removals keeping the order, and a map in a class field.
+#[test]
+fn lambdas_maps_and_sets() {
+    prints(
+        r#"class Row {
+    string key;
+    i64 num;
+}
+
+class Index {
+    hashmap<string, i64> seen = [];
+
+    mut i64 note(string w) {
+        i64& c = this.seen.getOrAdd(w, 0);
+        c++;
+        return c;
+    }
+}
+
+i64 twice(func(i64 => i64) f, i64 x) {
+    return f(f(x));
+}
+
+i64 square(i64 x) {
+    return x * x;
+}
+
+void main() {
+    // Comparators, keys and predicates, inlined; one captures a local.
+    Row[..~] rows = [];
+    rows +> new Row("pear", 3) +> new Row("apple", 7) +> new Row("fig", 3) +> new Row("kiwi", 1) +> new Row("date", 7);
+    rows.stableSort((Row a, Row b) => a.num < b.num);
+    for (Row& r : rows) { print("${r.key}:${r.num} "); }
+    println("");
+    rows.sortBy((Row r) => r.key);
+    for (Row& r : rows) { print("${r.key} "); }
+    println("");
+    rows.sortByDescending((Row r) => r.num);
+    for (Row& r : rows) { print("${r.num} "); }
+    println("sorted ${rows.isSortedBy((Row r) => -r.num)}");
+    i64 limit = 3;
+    println("any ${rows.any((Row r) => r.num > limit)} all ${rows.all((Row r) => r.num >= 1)} count ${rows.count((Row r) => r.num == limit)}");
+    i64 at @missing = rows.findIndex((Row r) => r.key == "fig");
+    i64 none @gone = rows.findIndex((Row r) => r.key == "plum");
+    println("fig at ${at} ${missing}, plum ${none} ${gone == status.MISSING}");
+    i64 total = rows.fold(0, (i64 acc, Row r) => acc + r.num);
+    println("total ${total}");
+
+    i64[..~] xs = [5, 3, 9, 1, 7, 3, 3, 8];
+    xs.partialSort(3, (i64 a, i64 b) => a > b);
+    println("top three ${xs[0]} ${xs[1]} ${xs[2]}");
+    xs.sort((i64 a, i64 b) => {
+        if (a % 2 != b % 2) {
+            return a % 2 == 0;
+        }
+        return a < b;
+    });
+    println("evens first ${xs}");
+    xs.dedup();
+    println("dedup ${xs}");
+    xs.retain((i64 x) => x != 9 && x > limit - 2);
+    println("retain ${xs}");
+    string[..~] words = ["b", "a", "c", "a"];
+    words.sort();
+    words.dedup();
+    println("words ${words.len} ${words[0]}${words[1]}${words[2]}");
+
+    // Function values: a lambda in a variable, a function by name, passed as a parameter.
+    func(i64 => i64) inc = (i64 x) => x + 1;
+    println("inc ${inc(41)} twice ${twice(inc, 5)} ${twice((i64 x) => x * 3, 2)}");
+
+    // Maps.
+    hashmap<string, i64> m = [];
+    m.put("one", 1);
+    m.put("two", 2);
+    m.put("three", 3);
+    m.put("two", 22);
+    i64 two @_ = m.get("two");
+    i64 four @nf = m.get("four");
+    println("len ${m.len} two ${two} four ${four} ${nf == status.MISSING} has ${m.has("three")} ${m.has("ten")} or ${m.getOr("ten", -1)}");
+    for (var& e : m) { e.value *= 10; }
+    for (var e : m) { print("${e.key}=${e.value} "); }
+    println("");
+    u8 st1 = @m.remove("one");
+    u8 st2 = @m.remove("one");
+    println("removed ${st1} again ${st2 == status.MISSING} len ${m.len}");
+
+    // A reference from getOrAdd survives inserts; entries never move.
+    hashmap<i64, i64> big = [];
+    i64& first = big.getOrAdd(-1, 100);
+    for (i64 i = 0; i < 100000; i++) { big.put(i, i * 2); }
+    first += 5;
+    i64 back @_ = big.get(-1);
+    i64 mid @_ = big.get(50000);
+    println("big ${big.len} first ${back} mid ${mid}");
+    // Removing more than half compacts the entries, keeping insertion order.
+    for (i64 i = 0; i < 99990; i++) { @_ = big.remove(i); }
+    for (var e : big) { print("${e.key} "); }
+    println("len ${big.len}");
+    big.clear();
+    println("cleared ${big.len} ${big.has(99995)}");
+
+    hashset<string> seen = [];
+    i64 fresh = 0;
+    for (string w : "a b a c b a".splitBy(" ")) { if (seen.add(w)) { fresh++; } }
+    for (string w : seen) { print(w); }
+    println(" fresh ${fresh} len ${seen.len}");
+
+    Index ix = new Index();
+    i64 n1 = ix.note("x");
+    i64 n2 = ix.note("x");
+    i64 n3 = ix.note("y");
+    println("index ${n1} ${n2} ${n3} ${ix.seen.len}");
+}
+"#,
+        r#"kiwi:1 pear:3 fig:3 apple:7 date:7 
+apple date fig kiwi pear 
+7 7 3 3 1 sorted true
+any true all true count 2
+fig at 2 0, plum 0 true
+total 21
+top three 9 8 7
+evens first [8, 1, 3, 3, 3, 5, 7, 9]
+dedup [8, 1, 3, 5, 7, 9]
+retain [8, 3, 5, 7]
+words 3 abc
+inc 42 twice 7 18
+len 3 two 22 four 0 true has true false or -1
+one=10 two=220 three=30 
+removed 0 again true len 2
+big 100001 first 105 mid 100000
+-1 99990 99991 99992 99993 99994 99995 99996 99997 99998 99999 len 11
+cleared 0 false
+abc fresh 3 len 3
+index 1 2 1 2
+"#,
+    );
+}
+
+/// Function values in a local, a class field, an array and a nullable field.
+#[test]
+fn function_values() {
+    prints(
+        r#"i64 square(i64 x) { return x * x; }
+class Op { func(i64 => i64) f; func(i64 => i64)? g = null; }
+void main() {
+  func(i64 => i64) f = (i64 x) => square(x);
+  Op o = new Op((i64 x) => x - 1);
+  func(i64 => i64)[..~] fs = [];
+  fs +> f;
+  fs +> o.f;
+  i64 v = 3;
+  for (func(i64 => i64) h : fs) { v = h(v); }
+  println("${f(4)} ${o.f(10)} ${v} ${o.g == null}");
+}
+"#,
+        r#"16 9 8 true
+"#,
+    );
+}
+
+/// Random puts, removals, `getOrAdd`s and gets against a plain-array model.
+#[test]
+fn maps_against_a_model() {
+    prints(
+        r#"u64 seed = 5;
+
+i64 below(i64 n) {
+    seed = seed *% 6364136223846793005 +% 1442695040888963407;
+    return (i64) ((seed >> 33) % (u64) n);
+}
+
+void main() {
+    hashmap<i64, i64> m = [];
+    // The model: present[k] and value[k] for keys 0..999.
+    bool[..>] present = [];
+    i64[..>] value = [];
+    for (i64 k = 0; k < 1000; k++) { present +> false; value +> 0; }
+    i64 bad = 0;
+    for (i64 step = 0; step < 200000; step++) {
+        i64 k = below(1000);
+        i64 op = below(4);
+        if (op == 0) {
+            m.put(k, step);
+            present[k] = true;
+            value[k] = step;
+        } else if (op == 1) {
+            u8 st = @m.remove(k);
+            if ((st == 0) != present[k]) { bad++; }
+            present[k] = false;
+        } else if (op == 2) {
+            i64& r = m.getOrAdd(k, -step);
+            if (!present[k]) { present[k] = true; value[k] = -step; }
+            if (r != value[k]) { bad++; }
+            r += 1;
+            value[k] += 1;
+        } else {
+            i64 v @st = m.get(k);
+            if ((st == 0) != present[k] || (st == 0 && v != value[k])) { bad++; }
+        }
+    }
+    i64 n = 0;
+    for (var e : m) {
+        n++;
+        if (!present[e.key] || value[e.key] != e.value) { bad++; }
+    }
+    i64 live = 0;
+    for (bool p : present) { if (p) { live++; } }
+    println("mismatches ${bad}, entries ${n} of ${live}, len ${m.len}");
+}
+"#,
+        "mismatches 0, entries 656 of 656, len 656\n",
+    );
+}
+
+/// `examples/wordfreq.zn` on stdin: a hashmap of views into the text, a for-each over it
+/// and `partialSort` with a lambda. Checked against a Python version of the same rules.
+#[test]
+fn wordfreq_example_runs() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples/wordfreq.zn");
+    let file = SourceFile::new(path, std::fs::read_to_string(path).unwrap());
+    let (diags, c) = zink::compile_c(std::slice::from_ref(&file));
+    let Some(c) = c else {
+        panic!(
+            "didn't compile: {:?}",
+            diags[0]
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+        )
+    };
+    let exe = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("wordfreq");
+    zink::driver::compile(&c, &exe, false).unwrap();
+    use std::io::Write;
+    let mut child = Command::new(&exe)
+        .arg("4")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            r#"The cat and the dog. The END, the end; Ünïcode wörds stay whole: wörds!
+A cat
+"#
+            .as_bytes(),
+        )
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        r#"      4 the
+      2 cat
+      2 end
+      2 wörds
+"#
+    );
+    assert_eq!(out.status.code(), Some(0));
 }

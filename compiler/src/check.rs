@@ -4059,8 +4059,10 @@ impl<'p, 'a> Checker<'p, 'a> {
         consumed: bool,
     ) -> Ty {
         let prog = self.prog;
-        if let Some(id) = self.lookup_local(name) {
-            let t = self.locals[id].ty.clone();
+        // A function value in a local: read like any name, so it's resolved for later
+        // passes, checked as assigned, and counted as a capture inside a lambda.
+        if self.lookup_local(name).is_some() {
+            let t = self.ident(name, name_span);
             return self.call_value(&t, name, args, span, consumed);
         }
         if let Some(cls) = self.class {
@@ -4104,8 +4106,9 @@ impl<'p, 'a> Checker<'p, 'a> {
                     }
                     return t;
                 }
-                if let Some(f) = c.fields.iter().find(|f| f.name == name) {
-                    let t = f.ty.clone();
+                if c.fields.iter().any(|f| f.name == name)
+                    && let Some(t) = self.field_type(name, name_span)
+                {
                     return self.call_value(&t, name, args, span, consumed);
                 }
             }
@@ -4120,8 +4123,9 @@ impl<'p, 'a> Checker<'p, 'a> {
                 let sigs = self.method_sigs(script, &[], &ms);
                 return self.resolve_call(name, sigs, None, args, span, consumed);
             }
-            if let Some(f) = prog.classes[script].fields.iter().find(|f| f.name == name) {
-                let t = f.ty.clone();
+            if prog.classes[script].fields.iter().any(|f| f.name == name)
+                && let Some(t) = self.field_type(name, name_span)
+            {
                 return self.call_value(&t, name, args, span, consumed);
             }
         }

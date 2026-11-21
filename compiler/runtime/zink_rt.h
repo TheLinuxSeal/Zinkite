@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/random.h>
+#include <time.h>
 #include <unistd.h>
 
 #define ZR_NORETURN __attribute__((noreturn))
@@ -71,6 +73,14 @@ static ZR_UNUSED int64_t zr_sm(void) {
 }
 
 static ZR_UNUSED void zr_sr(int64_t m) { zr_scratch_top = zr_scratch_base + m; }
+
+/* Room on the scratch stack until the end of the statement, as a sort's buffer. */
+static ZR_UNUSED void *zr_scratch_alloc(size_t sz) {
+    zr_sm();
+    void *d = zr_scratch_top;
+    zr_scratch_top += (sz + 15) & ~(size_t)15;
+    return d;
+}
 
 /* A copy of a temporary on the scratch stack, so a slice of it lasts to the end of its
  * statement. */
@@ -990,8 +1000,110 @@ static ZR_UNUSED uint8_t zr_next_line(int fd, zr_vec *v, zr_slice *out) {
 
 static zr_vec zr_args;
 
+/* ------------------------------------------------------------ hash maps (DESIGN §4.14) */
+
+/* A random seed per run, so inputs can't be crafted to collide; iteration follows
+ * insertion order, so output is the same on every run. */
+static uint64_t zr_seed;
+
+static void zr_seed_init(void) {
+    if (getrandom(&zr_seed, sizeof zr_seed, GRND_NONBLOCK) != (ssize_t)sizeof zr_seed)
+        zr_seed = (uint64_t)time(NULL) ^ ((uint64_t)getpid() << 32) ^ (uint64_t)(uintptr_t)&zr_seed;
+    zr_seed |= 1;
+}
+
+/* Multiply into 128 bits and fold: the mixing step of wyhash. */
+static inline uint64_t zr_mum(uint64_t a, uint64_t b) {
+    zr_u128 p = (zr_u128)a * b;
+    return (uint64_t)p ^ (uint64_t)(p >> 64);
+}
+
+static ZR_UNUSED inline uint64_t zr_hash_u64(uint64_t x) {
+    return zr_mum(x ^ zr_seed, 0x9e3779b97f4a7c15ull);
+}
+
+static ZR_UNUSED inline uint64_t zr_hash_u128(zr_u128 x) {
+    return zr_mum(zr_hash_u64((uint64_t)x) ^ (uint64_t)(x >> 64), 0xa0761d6478bd642full);
+}
+
+static ZR_UNUSED uint64_t zr_hash_bytes(const void *p, int64_t n) {
+    const uint8_t *b = (const uint8_t *)p;
+    uint64_t h = zr_seed ^ zr_mum((uint64_t)n, 0xe7037ed1a0b428dbull);
+    while (n >= 8) {
+        uint64_t w;
+        memcpy(&w, b, 8);
+        h = zr_mum(h ^ w, 0xa0761d6478bd642full);
+        b += 8;
+        n -= 8;
+    }
+    uint64_t t = 0;
+    memcpy(&t, b, (size_t)n);
+    return zr_mum(h ^ t, 0x8ebc6af09c88c6e3ull);
+}
+
+/* A hashmap or hashset: Python's compact dict on one data stack. Entries are appended
+ * in insertion order from the stack's base and never move on insert; removing marks
+ * one dead. The index, at half the reservation, holds entry numbers plus one (0 empty,
+ * all ones removed) in 1, 2, 4 or 8 bytes, as few as the capacity allows, and is
+ * rebuilt when the entries outgrow it. Each map's entry type and operations are
+ * generated with the program. */
+typedef struct {
+    char *e;
+    int64_t n;     /* entries used, dead ones included */
+    int64_t live;  /* the map's length */
+    int64_t cap;   /* entries before the index is rebuilt */
+    char *ix;
+    int64_t mask;  /* index slots, less one */
+    int w;         /* bytes per index slot */
+} zr_map;
+
+static ZR_UNUSED zr_map zr_map_new(void *base) {
+    zr_map m;
+    memset(&m, 0, sizeof m);
+    m.e = (char *)base;
+    m.ix = (char *)base + ZR_STACK_BYTES / 2;
+    return m;
+}
+
+static inline uint64_t zr_ix_dead(const zr_map *m) { return m->w == 8 ? UINT64_MAX : ((uint64_t)1 << (8 * m->w)) - 1; }
+
+static inline uint64_t zr_ix_get(const zr_map *m, int64_t i) {
+    switch (m->w) {
+        case 1: return ((uint8_t *)m->ix)[i];
+        case 2: return ((uint16_t *)m->ix)[i];
+        case 4: return ((uint32_t *)m->ix)[i];
+        default: return ((uint64_t *)m->ix)[i];
+    }
+}
+
+static inline void zr_ix_set(zr_map *m, int64_t i, uint64_t v) {
+    switch (m->w) {
+        case 1: ((uint8_t *)m->ix)[i] = (uint8_t)v; break;
+        case 2: ((uint16_t *)m->ix)[i] = (uint16_t)v; break;
+        case 4: ((uint32_t *)m->ix)[i] = (uint32_t)v; break;
+        default: ((uint64_t *)m->ix)[i] = v; break;
+    }
+}
+
+/* Sizes an empty index for `cap` entries, at most two thirds full. */
+static ZR_UNUSED void zr_map_size(zr_map *m, int64_t cap) {
+    if (cap < 8) cap = 8;
+    m->cap = cap;
+    m->w = cap < 250 ? 1 : cap < 65530 ? 2 : cap < 4294967290ll ? 4 : 8;
+    int64_t slots = 16;
+    while (slots < cap + cap / 2 + 1) slots *= 2;
+    m->mask = slots - 1;
+    memset(m->ix, 0, (size_t)slots * (size_t)m->w);
+}
+
+static ZR_UNUSED void zr_map_clear(zr_map *m) {
+    m->n = m->live = 0;
+    if (m->cap) memset(m->ix, 0, (size_t)(m->mask + 1) * (size_t)m->w);
+}
+
 static ZR_UNUSED void zr_start(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
+    zr_seed_init();
     zr_slice *a = (zr_slice *)zr_stack(1);
     for (int i = 1; i < argc; i++) { a[i - 1].p = argv[i]; a[i - 1].n = (int64_t)strlen(argv[i]); }
     zr_args.p = a;

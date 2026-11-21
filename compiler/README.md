@@ -102,14 +102,34 @@ It covers script files, classes, enums, constructors and methods, statuses,
 every number type including `i128` and `u128` (as `__int128`),
 references, strings and interpolation, every array kind, slices (except of cursor,
 chunked and reversed arrays on data stacks, which are undecided), every statement
-form, casts and
-the integer rules, and for-each over arrays and text iterators. Bugs stop the
-program with the file and line, and exit status 1. `examples/linebuf.zn` runs.
+form, casts and the integer rules, lambdas and function values, hash maps and
+sets, and for-each over arrays, maps, sets and text iterators. Bugs stop the
+program with the file and line, and exit status 1. `examples/linebuf.zn` and
+`examples/wordfreq.zn` run.
 
-Not yet: hash maps, generics, interfaces, lambdas and sorting with them, iterators
-in variables, comparing class values, and the library packages that aren't written
-yet (`zink.io`, `zink.cli` and the others). Of `stdin`, only `readAll` and
-`nextLine` work so far. Using any of the rest is a clear error, not wrong code.
+Lambdas (DESIGN §9.3): one passed to a built-in, such as a comparator, key or
+predicate, is inlined where the built-in uses it, its parameters pointing at the
+elements, so it costs what a handwritten loop would and may capture anything in
+scope. One used as a value is a C function reached through a pointer, as a stored
+`func` can't capture. The sort family (`sort`, `stableSort`, `sortBy`,
+`sortByDescending`, `radixSortBy`, `partialSort` and the others) is a stable merge
+sort; `partialSort` keeps a heap of the smallest, O(n log k). Also `isSorted`,
+`findIndex`, `any`, `all`, `count`, `retain`, `dedup` and `fold`.
+
+`hashmap` and `hashset` (DESIGN §4.14) follow Python's compact dict on one data
+stack: entries appended in insertion order, never moved by an insert; an index of
+1-, 2-, 4- or 8-byte slots, as narrow as the capacity allows, at half the stack's
+reservation, rebuilt when the entries outgrow it; removal marks an entry dead and
+compacts once more than half are. String keys keep their hash. Hashing mixes with a
+128-bit multiply (wyhash's step) and a random seed per run. Keys can be integers,
+`bool`, enums and strings; class keys aren't supported yet.
+
+Not yet: generics, interfaces, a capturing lambda passed to a function of the
+program's own (which needs that function specialized per lambda), `filter`, `map`
+and the other methods that build a new array, iterators in variables, comparing
+class values, and the library packages that aren't written yet (`zink.io`,
+`zink.cli` and the others). Of `stdin`, only `readAll` and `nextLine` work so far.
+Using any of the rest is a clear error, not wrong code.
 
 Arrays on data stacks, by layout:
 - changing only at the end (`T[..>]`, `T[..~]`, frozen ones): a header `{p, n}`

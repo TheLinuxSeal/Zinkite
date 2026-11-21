@@ -26,6 +26,14 @@ use crate::source::{SourceFile, Span};
 use crate::token::Prim;
 use crate::types::*;
 
+mod lambdas;
+mod maps;
+mod sorting;
+
+use lambdas::PendingLambda;
+use maps::MapOps;
+use sorting::Order;
+
 pub const RUNTIME: &str = include_str!("../runtime/zink_rt.h");
 
 /// Generates the C for a program that checked without errors.
@@ -89,6 +97,17 @@ struct Gen<'p, 'a> {
     used_scratch: bool,
     /// The type of the value the last `with_status` evaluated.
     last_status_ret: Ty,
+    /// Function-pointer typedefs, by signature, and their text.
+    fn_types: HashMap<String, String>,
+    fn_typedefs: String,
+    /// Lambdas used as values, still to generate, and the C names given to them.
+    pending_lambdas: Vec<PendingLambda>,
+    lambda_names: HashMap<(u32, u32), String>,
+    /// Inlined lambda block bodies being generated: result, end label, result type.
+    inline_ret: Vec<(String, String, Ty)>,
+    /// Each `hashmap` and `hashset` type's operations, and their C text.
+    maps: HashMap<String, MapOps>,
+    helpers: String,
 }
 
 fn c_string(s: &[u8]) -> String {
@@ -176,9 +195,10 @@ fn min_max(p: Prim) -> (String, String) {
     (lo.to_string(), hi.to_string())
 }
 
-/// An array whose header points at elements on a data stack.
+/// An array whose header points at elements on a data stack, or a map or set on one.
 fn on_stack(t: &Ty) -> bool {
     matches!(t, Ty::Array(_, k) if k.cap != CapKind::Capped)
+        || matches!(t, Ty::Map(..) | Ty::Set(_))
 }
 
 fn is_ref(t: &Ty) -> bool {
@@ -224,6 +244,13 @@ impl<'p, 'a> Gen<'p, 'a> {
             pending_label: None,
             used_scratch: false,
             last_status_ret: Ty::Void,
+            fn_types: HashMap::new(),
+            fn_typedefs: String::new(),
+            pending_lambdas: Vec::new(),
+            lambda_names: HashMap::new(),
+            inline_ret: Vec::new(),
+            maps: HashMap::new(),
+            helpers: String::new(),
         }
     }
 
@@ -344,9 +371,12 @@ impl<'p, 'a> Gen<'p, 'a> {
                 name
             }
             Ty::Null => "void*".into(),
-            Ty::Func(..) => self.unsupported(span, "function values"),
-            Ty::Map(..) => self.unsupported(span, "hash maps"),
-            Ty::Set(_) => self.unsupported(span, "hash sets"),
+            Ty::Func(ps, r) => self.fn_type(ps, r, span),
+            Ty::Map(..) | Ty::Set(_) => "zr_map".into(),
+            Ty::MapEntry(..) => match self.map_ops(t, span) {
+                Some(ops) => ops.entry,
+                None => "int".into(),
+            },
             Ty::Pool(_) | Ty::Handle(_) => self.unsupported(span, "pools"),
             Ty::Param(_) => self.unsupported(span, "generics"),
             Ty::Iter(_) => self.unsupported(span, "iterators stored in variables"),
@@ -470,6 +500,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                 }
             }
         }
+        self.drain_lambdas();
         // Functions.
         for (id, c) in prog.classes.iter().enumerate() {
             if !c.type_params.is_empty() {
@@ -485,10 +516,12 @@ impl<'p, 'a> Gen<'p, 'a> {
                     continue;
                 }
                 self.method(id, i, m);
+                self.drain_lambdas();
             }
             for (i, k) in c.ctors.iter().enumerate() {
                 if matches!(c.kind, ClassKind::Class | ClassKind::Root) {
                     self.ctor(id, i, k);
+                    self.drain_lambdas();
                 }
             }
         }
@@ -663,6 +696,8 @@ impl<'p, 'a> Gen<'p, 'a> {
         for (name, _, _) in &self.defs {
             let _ = writeln!(out, "typedef struct {} {};", name, name);
         }
+        // Function pointers may name the structs before they are defined.
+        out.push_str(&self.fn_typedefs);
         // Definitions, each after the structs it holds by value.
         let mut done: HashSet<String> = HashSet::new();
         let defs = std::mem::take(&mut self.defs);
@@ -693,6 +728,8 @@ impl<'p, 'a> Gen<'p, 'a> {
         }
         out.push('\n');
         out.push_str(&self.protos);
+        out.push('\n');
+        out.push_str(&self.helpers);
         let _ = writeln!(
             out,
             "\nstatic void zr_init_statics(void) {{\n{}}}\n",
@@ -1033,6 +1070,10 @@ impl<'p, 'a> Gen<'p, 'a> {
 
     /// An empty array on data stacks of its own: one, or two for a cursor array.
     fn stack_init(&mut self, ty: &Ty) -> String {
+        if matches!(ty, Ty::Map(..) | Ty::Set(_)) {
+            let a = self.site();
+            return format!("zr_map_new(zr_stack({}))", a);
+        }
         match layout(ty) {
             Some(Layout::Cur) => {
                 let (a, b) = (self.site(), self.site());
@@ -1096,6 +1137,13 @@ impl<'p, 'a> Gen<'p, 'a> {
     /// The code that stores `init` into `place`, of type `ty`: arrays on data stacks are
     /// filled in place, text is built in place (DESIGN §3.3, §4.11).
     fn store_into(&mut self, place: &str, ty: &Ty, init: &Expr) -> String {
+        // A map or set starts empty on its data stack; `[]` is all that makes one.
+        if matches!(ty, Ty::Map(..) | Ty::Set(_)) {
+            if matches!(&init.kind, E::ArrayLit(items) if items.is_empty()) {
+                return "(void)0".into();
+            }
+            return self.unsupported(init.span, "copying a map");
+        }
         if let Ty::Array(el, _) = ty
             && matches!(layout(ty), Some(Layout::Deq | Layout::Cur | Layout::Chk))
         {
@@ -1177,6 +1225,9 @@ impl<'p, 'a> Gen<'p, 'a> {
     }
 
     fn return_(&mut self, status: Option<&ast::StatusWrite>, value: Option<&Expr>, span: Span) {
+        if self.inline_return(value) {
+            return;
+        }
         let st = match status {
             None => "0".to_string(),
             Some(ast::StatusWrite::Int(n)) => n.to_string(),
@@ -1354,6 +1405,12 @@ impl<'p, 'a> Gen<'p, 'a> {
                 body,
                 None,
             );
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
+        if matches!(it.unref(), Ty::Map(..) | Ty::Set(_)) {
+            self.map_for_each(label, name, iter, body, by_ref);
             self.indent -= 1;
             self.line("}");
             return;
@@ -2095,7 +2152,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                 };
                 (format!("(({}){})", prim_c(*prim), v), Ty::Prim(*prim))
             }
-            E::Lambda { .. } => (self.unsupported(e.span, "lambdas"), t),
+            E::Lambda { .. } => (self.lambda_value(e), t),
             E::InstanceOf { .. } => (self.unsupported(e.span, "`instanceof`"), t),
             E::ArrayLit(_) => (self.unsupported(e.span, "an array literal here"), t),
             E::Discard => ("0".into(), t),
@@ -2207,6 +2264,12 @@ impl<'p, 'a> Gen<'p, 'a> {
                     }
                     None => (self.unsupported(span, "this field"), t),
                 }
+            }
+            // An entry's key is read-only (the checker sees to it); its value is writable.
+            Ty::MapEntry(k, _) if name.name == "key" => (format!("{}k", acc), (**k).clone()),
+            Ty::MapEntry(_, v) if name.name == "value" => (format!("{}v", acc), (**v).clone()),
+            Ty::Map(..) | Ty::Set(_) if name.name == "len" => {
+                (format!("((int64_t){}live)", acc), Ty::i64())
             }
             Ty::Array(_, k) if k.cap == CapKind::Chunked && name.name == "cursor" => {
                 (format!("{}pos", acc), Ty::i64())
@@ -3259,6 +3322,21 @@ impl<'p, 'a> Gen<'p, 'a> {
                     fails,
                 }
             }
+            Origin::Value => {
+                let ft = settle(&self.ty(callee));
+                let f = self.expr(callee, &ft);
+                let params = fact.params.clone();
+                let cargs: Vec<String> = args
+                    .iter()
+                    .zip(&params)
+                    .map(|(a, p)| self.expr(&a.expr, p))
+                    .collect();
+                CallOut {
+                    code: format!("({})({})", f, cargs.join(", ")),
+                    ret,
+                    fails: false,
+                }
+            }
             Origin::Builtin => {
                 let name = fact.name.clone();
                 let params = fact.params.clone();
@@ -3595,6 +3673,9 @@ impl<'p, 'a> Gen<'p, 'a> {
                 ),
                 _ => ok(self.unsupported(span, &format!("`{}` on numbers", m)), ret),
             };
+        }
+        if matches!(recv_t, Ty::Map(..) | Ty::Set(_)) {
+            return self.map_method(base, m, args, ret, span);
         }
         let Some(el) = recv_t.elem().cloned() else {
             return ok(
@@ -3982,85 +4063,124 @@ impl<'p, 'a> Gen<'p, 'a> {
                     el,
                 )
             }
-            "sort" | "stableSort" | "sortDescending"
-                if args.is_empty() && (matches!(el, Ty::Prim(_)) || el.is_string()) =>
-            {
-                let less = if el.is_string() {
-                    "zr_cmp(_x, _y) < 0".to_string()
-                } else {
-                    "_x < _y".to_string()
-                };
-                let less = if m == "sortDescending" {
-                    less.replace("_x", "_q")
-                        .replace("_y", "_x")
-                        .replace("_q", "_y")
-                } else {
-                    less
-                };
-                self.used_scratch = true;
-                // A stable merge sort over a scratch copy: of the elements, or on a cursor
-                // array of its index, so the elements stay where they are.
-                let gathered = arr.gather();
-                let (setup, item, value, finish) = match lay {
-                    Layout::Cur | Layout::Chk => {
-                        let (setup, finish) = gathered.unwrap_or_default();
-                        (
-                            setup,
-                            "uint32_t".to_string(),
-                            format!("(({}*){}->d.data)", ec, a),
-                            finish,
-                        )
+            "sort" | "stableSort" | "sortDescending" | "sortBy" | "stableSortBy"
+            | "sortByDescending" | "radixSort" | "radixSortBy" | "partialSort"
+            | "partialSortBy" => {
+                let partial = m.starts_with("partial");
+                let fa = if partial { args.get(1) } else { args.first() };
+                let desc = m.contains("Descending");
+                let order = match fa {
+                    None => Order::Natural,
+                    Some(f) if m.contains("By") => {
+                        let (_, kt) = self.fn_sig(&f.expr);
+                        Order::Key(&f.expr, kt)
                     }
-                    Layout::Capped => (
-                        format!("int64_t _n = {a}->n; {ec} *_d = {a}->e;", a = a, ec = ec),
-                        ec.clone(),
-                        String::new(),
-                        String::new(),
-                    ),
-                    // Made one block first, as for a slice, so slices taken since the
-                    // last change still show the same positions (DESIGN §4.10).
-                    Layout::Ring | Layout::Gap => (
-                        format!(
-                            "int64_t _n = {len}; {ec} *_d = ({ec} *){span};",
-                            len = len,
-                            ec = ec,
-                            span = arr.span("0")
-                        ),
-                        ec.clone(),
-                        String::new(),
-                        String::new(),
-                    ),
-                    _ => (
-                        format!(
-                            "int64_t _n = {a}->n; {ec} *_d = ({ec}*){a}->p;",
-                            a = a,
-                            ec = ec
-                        ),
-                        ec.clone(),
-                        String::new(),
-                        String::new(),
-                    ),
+                    Some(f) => Order::Less(&f.expr),
                 };
-                let get = |x: &str| {
-                    if value.is_empty() {
-                        x.to_string()
-                    } else {
-                        format!("{}[{}]", value, x)
+                let (setup, item, value, finish) = self.reorder_view(&arr, &len);
+                let body = if partial {
+                    let top = arg(self, 0);
+                    self.partial_sort_code(&item, &value, &top, &order, desc, &el, span)
+                } else {
+                    self.merge_sort_code(&item, &value, "_n", &order, desc, &el, span)
+                };
+                ok(
+                    format!("({{ {} {} {} {} }})", ptr, setup, body, finish),
+                    Ty::Void,
+                )
+            }
+            "isSorted" | "isSortedBy" => {
+                let order = match args.first() {
+                    None => Order::Natural,
+                    Some(f) if m == "isSortedBy" => {
+                        let (_, kt) = self.fn_sig(&f.expr);
+                        Order::Key(&f.expr, kt)
                     }
+                    Some(f) => Order::Less(&f.expr),
+                };
+                let less =
+                    self.order_less(&order, false, &arr.at("_i"), &arr.at("(_i - 1)"), &el, span);
+                ok(
+                    format!(
+                        "({{ {} bool _ok = true; for (int64_t _i = 1; _i < {}; _i++) if ({}) {{ _ok = false; break; }} _ok; }})",
+                        ptr, len, less
+                    ),
+                    Ty::bool(),
+                )
+            }
+            "findIndex" if args.len() == 1 => {
+                let pred = self.apply(&args[0].expr, &[arr.at("_i")]);
+                let rt = self.result_ty(&Ty::i64(), span);
+                fail(
+                    format!(
+                        "({{ {} {} _r = {{0, {}}}; for (int64_t _i = 0; _i < {}; _i++) if ({}) {{ _r.v = _i; _r.s = 0; break; }} _r; }})",
+                        ptr,
+                        rt,
+                        status_code("MISSING"),
+                        len,
+                        pred
+                    ),
+                    Ty::i64(),
+                )
+            }
+            "any" | "all" | "count" if args.len() == 1 => {
+                let pred = self.apply(&args[0].expr, &[arr.at("_i")]);
+                let (init, step, done, t) = match m {
+                    "any" => ("false", "{ _r = true; break; }", "", Ty::bool()),
+                    "all" => ("true", "", "{ _r = false; break; }", Ty::bool()),
+                    _ => ("0", "_r++;", "", Ty::i64()),
+                };
+                let ct = self.cty(&t, span);
+                let test = if done.is_empty() {
+                    format!("if ({}) {}", pred, step)
+                } else {
+                    format!("if (!{}) {}", pred, done)
                 };
                 ok(
                     format!(
-                        "({{ {ptr} {setup} {item} *_tmp = ({item}*)zr_scratch_begin().p; for (int64_t _w = 1; _w < _n; _w *= 2) {{ for (int64_t _lo = 0; _lo < _n; _lo += 2 * _w) {{ int64_t _mid = _lo + _w < _n ? _lo + _w : _n, _hi = _lo + 2 * _w < _n ? _lo + 2 * _w : _n, _i = _lo, _j = _mid, _k = _lo; while (_i < _mid && _j < _hi) {{ {ec} _x = {gj}, _y = {gi}; if ({less}) _tmp[_k++] = _d[_j++]; else _tmp[_k++] = _d[_i++]; }} while (_i < _mid) _tmp[_k++] = _d[_i++]; while (_j < _hi) _tmp[_k++] = _d[_j++]; }} memcpy(_d, _tmp, (size_t)_n * sizeof *_d); }} {finish} }})",
+                        "({{ {} {} _r = {}; for (int64_t _i = 0; _i < {}; _i++) {} _r; }})",
+                        ptr, ct, init, len, test
+                    ),
+                    t,
+                )
+            }
+            // Kept elements move down in place, in order.
+            "retain" | "dedup"
+                if matches!(lay, Layout::Vec | Layout::Deq | Layout::Capped)
+                    && (args.len() == 1) == (m == "retain") =>
+            {
+                let (aw, ai) = (arr.at("_w"), arr.at("_i"));
+                let (start, keep) = if m == "retain" {
+                    ("0", self.apply(&args[0].expr, &[arr.at("_i")]))
+                } else {
+                    let eq = self.natural_eq(&arr.at("_i"), &arr.at("(_w - 1)"), &el, span);
+                    ("1", format!("!{}", eq))
+                };
+                ok(
+                    format!(
+                        "({{ {ptr} int64_t _n = {len}, _w = _n < {start} ? _n : {start}; for (int64_t _i = _w; _i < _n; _i++) if ({keep}) {{ if (_w != _i) {aw} = {ai}; _w++; }} {a}->n = _w; }})",
                         ptr = ptr,
-                        setup = setup,
-                        item = item,
-                        ec = ec,
-                        gj = get("_d[_j]"),
-                        gi = get("_d[_i]"),
-                        less = less,
-                        finish = finish
+                        len = len,
+                        start = start,
+                        keep = keep,
+                        aw = aw,
+                        ai = ai,
+                        a = a
                     ),
                     Ty::Void,
+                )
+            }
+            "fold" if args.len() == 2 => {
+                let acc_t = ret.clone();
+                let ac = self.cty(&acc_t, span);
+                let init = self.expr(&args[0].expr, &acc_t);
+                let step = self.apply(&args[1].expr, &["_acc".to_string(), arr.at("_i")]);
+                ok(
+                    format!(
+                        "({{ {} {} _acc = {}; for (int64_t _i = 0; _i < {}; _i++) {{ {} _nx = {}; _acc = _nx; }} _acc; }})",
+                        ptr, ac, init, len, ac, step
+                    ),
+                    acc_t,
                 )
             }
             "append" if is_u8 => {
