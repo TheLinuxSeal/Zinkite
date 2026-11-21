@@ -55,9 +55,13 @@ Done:
   fields that have no zero value, and no use of `this` before then; and no local
   read before every path has assigned it.
 
+- `mut` and read-only checks: plain parameters are read-only copies, a method
+  that isn't `mut` can't change its object or call one that is, a writable view
+  needs an array the code may change, and a lambda's captures are read-only and
+  never assigned after they're initialized. A reference bound to something the
+  code can't change can't be written through.
+
 Not yet:
-- `mut` and read-only checks: what plain parameters and non-`mut` methods may
-  change;
 - roots and lifetimes (`REFERENCES.md`): rules S and R, and copying roots;
 - the lint for unused array capabilities (DESIGN §4.3).
 

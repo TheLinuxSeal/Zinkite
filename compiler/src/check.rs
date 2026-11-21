@@ -6,7 +6,7 @@
 //! Not yet: definite assignment, `mut` and read-only checks, root and lifetime
 //! rules (REFERENCES.md) and the unused-capability lint.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     self, AssignOp, BinOp, CaseLabel, Expr, ExprKind as E, LambdaBody, LocalType, Name, PostfixOp,
@@ -48,6 +48,30 @@ struct Local {
     ty: Ty,
     /// Declared without a value, so definite assignment tracks it (DESIGN §6.2).
     slot: Option<usize>,
+    /// A plain parameter: a read-only copy (DESIGN §5.1).
+    param: bool,
+    /// `fns.len()` where it was declared: a lambda deeper than that captures it.
+    depth: usize,
+    /// How many loops enclosed its declaration, to tell when an assignment may repeat.
+    loop_depth: usize,
+    /// A reference bound to something the code can't change: why. Nothing may be written through it.
+    ro_bind: Option<String>,
+    /// A reference that something was written through, so it can't be bound to read-only data.
+    write_use: Option<Span>,
+    /// Read by a lambda, and assigned after its initialization; reported once.
+    captured: bool,
+    reassigned: bool,
+    final_reported: bool,
+}
+
+/// Why something can't be changed here, and what to do instead.
+struct Ro {
+    msg: String,
+    help: String,
+}
+
+fn is_ref_ty(t: &Ty) -> bool {
+    matches!(t, Ty::Ref(_)) || matches!(t, Ty::Nullable(x) if matches!(**x, Ty::Ref(_)))
 }
 
 /// A field a constructor must assign.
@@ -91,6 +115,8 @@ enum FnKind {
 struct FnCtx {
     kind: FnKind,
     name: String,
+    /// A `mut` method, which may change its object (DESIGN §6.1).
+    is_mut: bool,
     ret: Ty,
     is_static: bool,
     tparams: Vec<TParam>,
@@ -127,6 +153,10 @@ struct Checker<'p, 'a> {
     ctor_fields: Vec<CtorField>,
     /// Set while typing the target of a plain assignment, so the write isn't taken for a read.
     writing: bool,
+    /// The type each expression got, by span, for the read-only checks.
+    types: HashMap<(u32, u32), Ty>,
+    /// Whether the last call chosen is a `mut` method.
+    last_call_mut: bool,
 }
 
 fn is_status_const(name: &str) -> bool {
@@ -168,6 +198,8 @@ impl<'p, 'a> Checker<'p, 'a> {
             yield_flows: Vec::new(),
             ctor_fields: Vec::new(),
             writing: false,
+            types: HashMap::new(),
+            last_call_mut: false,
         }
     }
 
@@ -226,6 +258,14 @@ impl<'p, 'a> Checker<'p, 'a> {
             name: name.name.clone(),
             ty,
             slot: None,
+            param: false,
+            depth: self.fns.len(),
+            loop_depth: self.flow_loops.len(),
+            ro_bind: None,
+            write_use: None,
+            captured: false,
+            reassigned: false,
+            final_reported: false,
         });
         self.scopes.last_mut().expect("a scope").push(id);
         id
@@ -234,6 +274,15 @@ impl<'p, 'a> Checker<'p, 'a> {
     fn declare_name(&mut self, name: &Name, ty: Ty) {
         if let Name::Ident(id) = name {
             self.declare(id, ty);
+        }
+    }
+
+    /// A parameter. A plain one is a read-only copy; a `T&` one refers to the caller's value.
+    fn declare_param(&mut self, name: &Name, ty: Ty) {
+        if let Name::Ident(id) = name {
+            let plain = !is_ref_ty(&ty) && !matches!(ty, Ty::View(_));
+            let l = self.declare(id, ty);
+            self.locals[l].param = plain;
         }
     }
 
@@ -257,6 +306,7 @@ impl<'p, 'a> Checker<'p, 'a> {
         self.fns.push(FnCtx {
             kind,
             name: name.to_string(),
+            is_mut: false,
             ret,
             is_static,
             tparams,
@@ -381,7 +431,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                 }
                 for (p, ty) in d.params.iter().zip(&ctor.params) {
                     self.type_rules(ty, p.ty.span);
-                    self.declare_name(&p.name, ty.clone());
+                    self.declare_param(&p.name, ty.clone());
                 }
                 self.block(&d.body);
                 let end = d.body.span.end as usize;
@@ -404,9 +454,20 @@ impl<'p, 'a> Checker<'p, 'a> {
                 } else {
                     FnKind::Method
                 };
+                if m.is_mut && m.is_static {
+                    self.err_help(
+                        m.decl.name.span,
+                        format!(
+                            "`{}` is static, so it has no object for `mut` to change",
+                            m.name
+                        ),
+                        "drop `mut`; static fields can be changed from any function (DESIGN §6.1)",
+                    );
+                }
                 self.begin(kind, &m.name, m.ret.clone(), m.is_static, tps);
+                self.cur_mut().is_mut = m.is_mut;
                 for (p, ty) in m.decl.params.iter().zip(&m.params) {
-                    self.declare_name(&p.name, ty.clone());
+                    self.declare_param(&p.name, ty.clone());
                 }
                 self.block(body);
                 if m.ret != Ty::Void && !is_main && completes_all(&body.stmts) {
@@ -1127,6 +1188,12 @@ impl<'p, 'a> Checker<'p, 'a> {
                 let after_iter = self.flow.clone();
                 self.push_scope();
                 self.bind_local_type(ty, name, &elem, by_ref, iter.span);
+                if let Name::Ident(n) = name
+                    && let Some(id) = self.lookup_local(&n.name)
+                    && is_ref_ty(&self.locals[id].ty)
+                {
+                    self.bind_ref(id, iter);
+                }
                 self.unnarrow_rebound(body);
                 let base = self.narrowed.clone();
                 let (breaks, mut back) = self.loop_body(label, body);
@@ -1328,7 +1395,16 @@ impl<'p, 'a> Checker<'p, 'a> {
                         );
                     }
                     let t = self.expr(v, Some(r));
-                    self.expect(&t, r, v);
+                    if self.expect(&t, r, v)
+                        && (is_ref_ty(r) || matches!(r, Ty::View(_)))
+                        && let Some(ro) = self.read_only_returned(v)
+                    {
+                        self.err_help(
+                            v.span,
+                            format!("can't return a reference to this: {}", ro.msg),
+                            ro.help,
+                        );
+                    }
                 }
             },
         }
@@ -1478,7 +1554,16 @@ impl<'p, 'a> Checker<'p, 'a> {
                     Ty::Unknown
                 }
             };
+            let is_view = matches!(ty, Ty::View(_));
+            let is_ref = is_ref_ty(&ty);
             let id = self.declare(&v.name, ty);
+            if let Some(init) = &v.init {
+                if is_ref {
+                    self.bind_ref(id, init);
+                } else if is_view && declared.is_some() {
+                    self.need_writable(init, "can't take a writable view of this");
+                }
+            }
             if v.init.is_none() && declared.is_some() {
                 let slot = self.new_slot();
                 self.locals[id].slot = Some(slot);
@@ -1729,6 +1814,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                     self.writing = true;
                     let lt = self.ident(&id.name, id.span);
                     self.writing = false;
+                    self.write_name(&id.name, id.span);
                     if let Some(s) = slot {
                         self.flow.assign(s);
                     }
@@ -1743,6 +1829,9 @@ impl<'p, 'a> Checker<'p, 'a> {
 
     fn status_dest(&mut self, c: &Name) {
         let Name::Ident(id) = c else { return };
+        if self.lookup_local(&id.name).is_some() || self.field_type_quiet(&id.name) {
+            self.write_name(&id.name, id.span);
+        }
         if let Some(s) = self.name_slot(&id.name) {
             self.flow.assign(s);
         }
@@ -2091,6 +2180,12 @@ impl<'p, 'a> Checker<'p, 'a> {
 
     /// Types an expression. `consumed` says its status is read, so dropping it draws no warning.
     fn expr_c(&mut self, e: &Expr, want: Option<&Ty>, consumed: bool) -> Ty {
+        let t = self.expr_kind(e, want, consumed);
+        self.types.insert((e.span.start, e.span.end), t.clone());
+        t
+    }
+
+    fn expr_kind(&mut self, e: &Expr, want: Option<&Ty>, consumed: bool) -> Ty {
         match &e.kind {
             E::Int { value, suffix } => match suffix {
                 Some(p) => {
@@ -2362,6 +2457,9 @@ impl<'p, 'a> Checker<'p, 'a> {
     fn ident(&mut self, name: &str, span: Span) -> Ty {
         let writing = std::mem::take(&mut self.writing);
         if let Some(id) = self.lookup_local(name) {
+            if self.locals[id].depth < self.fns.len() && !writing {
+                self.note_capture(id, span);
+            }
             if let Some(slot) = self.locals[id].slot
                 && !writing
             {
@@ -2654,7 +2752,7 @@ impl<'p, 'a> Checker<'p, 'a> {
         let outer_yields = std::mem::take(&mut self.yield_flows);
         self.begin(FnKind::Lambda, "lambda", Ty::Unknown, is_static, tps);
         for (p, t) in params.iter().zip(&ptys) {
-            self.declare_name(&p.name, t.clone());
+            self.declare_param(&p.name, t.clone());
         }
         let ret = match body {
             LambdaBody::Expr(x) => {
@@ -2718,6 +2816,11 @@ impl<'p, 'a> Checker<'p, 'a> {
         self.writing = slot.is_some();
         let tt = self.expr(target, None);
         self.writing = false;
+        if let E::Ident(n) = &target.kind
+            && self.lookup_local(n).is_some()
+        {
+            self.note_local_write(n, target.span);
+        }
         if !self.is_place(target) && !matches!(tt, Ty::Ref(_) | Ty::Unknown) {
             self.err(
                 target.span,
@@ -2751,7 +2854,9 @@ impl<'p, 'a> Checker<'p, 'a> {
                     return Ty::Void;
                 }
                 let vt = self.expr_c(value, Some(&tt), consumed);
-                self.expect(&vt, &tt, value);
+                if self.expect(&vt, &tt, value) {
+                    self.check_rebind(target, value);
+                }
                 if let E::Ident(n) = &target.kind
                     && let Some(id) = self.lookup_local(n)
                 {
@@ -2778,10 +2883,13 @@ impl<'p, 'a> Checker<'p, 'a> {
                         );
                     }
                     let vt = self.expr_c(value, Some(&tt), consumed);
-                    self.expect(&vt, &tt, value);
+                    if self.expect(&vt, &tt, value) {
+                        self.check_rebind(target, value);
+                    }
                     self.flow.assign(s);
                     return tt;
                 }
+                self.need_writable(target, "can't assign to this");
                 let to = match &tt {
                     Ty::Ref(x) => (**x).clone(),
                     Ty::View(e) => Ty::Slice(e.clone()),
@@ -2800,6 +2908,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                 to
             }
             _ => {
+                self.need_writable(target, "can't assign to this");
                 let to = tt.unref().clone();
                 let vt = self.expr_c(value, Some(&to), consumed);
                 let bop = compound_op(op);
@@ -2906,6 +3015,12 @@ impl<'p, 'a> Checker<'p, 'a> {
     /// `x++`, `x--`, `++x`, `--x`.
     fn step(&mut self, x: &Expr) -> Ty {
         let t = self.expr(x, None);
+        self.need_writable(x, "can't change this");
+        if let E::Ident(n) = &x.kind
+            && self.lookup_local(n).is_some()
+        {
+            self.note_local_write(n, x.span);
+        }
         if !self.is_place(x) && !matches!(t, Ty::Ref(_) | Ty::Unknown) {
             self.err(
                 x.span,
@@ -2945,6 +3060,12 @@ impl<'p, 'a> Checker<'p, 'a> {
             PostfixOp::RemoveAfter => ("^-", "removeAfter"),
         };
         let t = self.expr(x, None);
+        if matches!(t.unref(), Ty::Array(..)) {
+            self.need_writable(
+                x,
+                &format!("can't use `{}` here, since it removes from the array", sym),
+            );
+        }
         match t.unref() {
             Ty::Array(e, k) => {
                 if let Err(need) = builtins::seq_method(e, SeqKind::Array(*k), method) {
@@ -3105,6 +3226,12 @@ impl<'p, 'a> Checker<'p, 'a> {
                     _ => ("+^", "insert"),
                 };
                 let lt = self.expr_c(l, None, consumed);
+                if matches!(lt.unref(), Ty::Array(..)) && !matches!(l.kind, E::Binary { .. }) {
+                    self.need_writable(
+                        l,
+                        &format!("can't use `{}` here, since it inserts into the array", sym),
+                    );
+                }
                 match lt.unref() {
                     Ty::Array(e, k) => {
                         if let Err(need) = builtins::seq_method(e, SeqKind::Array(*k), method) {
@@ -3722,7 +3849,20 @@ impl<'p, 'a> Checker<'p, 'a> {
                         self.this_use(name_span, &format!("`{}` can't be called", name));
                     }
                     let sigs = self.method_sigs(cls, &self.self_type(cls).class_args(), &usable);
-                    return self.resolve_call(name, sigs, None, args, span, consumed);
+                    let t = self.resolve_call(name, sigs, None, args, span, consumed);
+                    if self.last_call_mut
+                        && let Some(ro) = self.this_read_only()
+                    {
+                        self.err_help(
+                            name_span,
+                            format!(
+                                "can't call `{}` here, since it changes its object: {}",
+                                name, ro.msg
+                            ),
+                            ro.help,
+                        );
+                    }
+                    return t;
                 }
                 if let Some(f) = c.fields.iter().find(|f| f.name == name) {
                     let t = f.ty.clone();
@@ -3794,6 +3934,29 @@ impl<'p, 'a> Checker<'p, 'a> {
     }
 
     fn method_call(
+        &mut self,
+        bt: &Ty,
+        base: &Expr,
+        name: &ast::Ident,
+        args: &[ast::Arg],
+        span: Span,
+        consumed: bool,
+    ) -> Ty {
+        self.last_call_mut = false;
+        let t = self.method_call_inner(bt, base, name, args, span, consumed);
+        let on_value = !matches!(bt, Ty::TypeName(_) | Ty::Namespace(_));
+        if self.last_call_mut && on_value {
+            let action = format!(
+                "can't call `{}` here, since it changes what it's called on",
+                name.name
+            );
+            self.need_writable(base, &action);
+        }
+        t
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn method_call_inner(
         &mut self,
         bt: &Ty,
         base: &Expr,
@@ -4032,14 +4195,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             sigs.extend(self.method_sigs(cls, &[], &ms));
         }
         if !sigs.is_empty() {
-            return self.resolve_call(
-                n,
-                sigs,
-                Some((recv.clone(), base.span)),
-                args,
-                span,
-                consumed,
-            );
+            return self.resolve_call(n, sigs, Some((recv.clone(), base)), args, span, consumed);
         }
         self.type_args(args);
         self.err(
@@ -4350,11 +4506,12 @@ impl<'p, 'a> Checker<'p, 'a> {
         &mut self,
         what: &str,
         cands: Vec<Sig>,
-        recv: Option<(Ty, Span)>,
+        recv: Option<(Ty, &Expr)>,
         args: &[ast::Arg],
         span: Span,
         consumed: bool,
     ) -> Ty {
+        self.last_call_mut = false;
         for a in args {
             if a.marked {
                 self.warn_help(a.expr.span, "`&` isn't needed at the call", "the parameter's declaration says whether the argument may change (DESIGN §5.1)");
@@ -4364,10 +4521,10 @@ impl<'p, 'a> Checker<'p, 'a> {
         let mut tys: Vec<Option<Ty>> = Vec::new();
         let mut exprs: Vec<Option<&Expr>> = Vec::new();
         let mut spans: Vec<Span> = Vec::new();
-        if let Some((t, s)) = recv {
+        if let Some((t, e)) = recv {
             tys.push(Some(t));
-            exprs.push(None);
-            spans.push(s);
+            exprs.push(Some(e));
+            spans.push(e.span);
         }
         for a in args {
             tys.push(if context_typed(&a.expr) {
@@ -4476,6 +4633,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                         self.expr(e, Some(&Ty::Unknown));
                     }
                 }
+                self.last_call_mut = false;
                 return Ty::Unknown;
             }
             1 => fits.pop().expect("one").0,
@@ -4496,6 +4654,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                             list.join(" and ")
                         ),
                     );
+                    self.last_call_mut = false;
                     return Ty::Unknown;
                 }
             },
@@ -4512,8 +4671,306 @@ impl<'p, 'a> Checker<'p, 'a> {
         for need in &chosen.needs {
             self.check_need(need, span, &chosen.name);
         }
+        // An argument for a `T&` or `T[:]&` parameter may be changed by the callee (DESIGN §5.1).
+        for (i, p) in chosen.params.iter().enumerate() {
+            if (is_ref_ty(p) || matches!(p, Ty::View(_)))
+                && let Some(e) = exprs[i]
+            {
+                let action = format!("can't pass this to `{}`, which may change it", what);
+                self.need_writable(e, &action);
+            }
+        }
         self.note_status(Some(chosen.can_fail), consumed, span, &chosen.name);
+        self.last_call_mut = chosen.is_mut;
         chosen.ret
+    }
+
+    // ------------------------------------------------------------ read-only checks (DESIGN §5.1, §6.1, §4.10, §9.3)
+
+    /// Why `this` can't be changed here: the innermost method isn't `mut`.
+    fn this_read_only(&self) -> Option<Ro> {
+        let f = self.fns.iter().rev().find(|f| f.kind != FnKind::Lambda)?;
+        match f.kind {
+            FnKind::Method | FnKind::Main if !f.is_mut => Some(Ro {
+                msg: format!("`{}` isn't `mut`, so it can't change its object", f.name),
+                help: format!(
+                    "declare it `mut {} {}(...)` if it should change it (DESIGN §6.1)",
+                    self.show(&f.ret),
+                    f.name
+                ),
+            }),
+            _ => None,
+        }
+    }
+
+    /// A bare name that is an instance field of the current class.
+    fn field_type_quiet(&self, name: &str) -> bool {
+        self.class.is_some_and(|c| {
+            self.prog.classes[c]
+                .fields
+                .iter()
+                .any(|f| f.name == name && !f.is_static)
+        })
+    }
+
+    /// Why a write to the variable or field `n` isn't allowed. With `through`, a write to
+    /// what a reference refers to; without, to the variable itself, as `.=` does.
+    fn read_only_name(&self, n: &str, through: bool) -> Option<Ro> {
+        if let Some(id) = self.lookup_local(n) {
+            let l = &self.locals[id];
+            if through && is_ref_ty(&l.ty) {
+                return l.ro_bind.as_ref().map(|why| Ro {
+                    msg: format!("`{}` refers to something that can't be changed here", n),
+                    help: format!("it was bound to it: {}", why),
+                });
+            }
+            if through && matches!(l.ty, Ty::View(_)) {
+                return None;
+            }
+            if l.depth < self.fns.len() {
+                return Some(Ro {
+                    msg: format!(
+                        "`{}` is captured by this lambda, and captures are read-only",
+                        n
+                    ),
+                    help: "have the lambda return a value instead (DESIGN §9.3)".into(),
+                });
+            }
+            if l.param && through {
+                let as_ref = match &l.ty {
+                    Ty::Slice(e) => self.show(&Ty::View(e.clone())),
+                    t => format!("{}&", self.show(t)),
+                };
+                return Some(Ro {
+                    msg: format!("`{}` is a plain parameter, which is a read-only copy", n),
+                    help: format!(
+                        "declare it `{} {}` to let the function change the caller's value (DESIGN §5.1)",
+                        as_ref, n
+                    ),
+                });
+            }
+            return None;
+        }
+        if self.field_type_quiet(n) {
+            return self.this_read_only().map(|ro| Ro {
+                msg: format!("`{}` is a field, and {}", n, ro.msg),
+                help: ro.help,
+            });
+        }
+        None
+    }
+
+    /// Why the storage `e` names can't be changed here, or `None` when it can.
+    fn read_only(&self, e: &Expr) -> Option<Ro> {
+        match &e.kind {
+            E::Paren(x) => self.read_only(x),
+            E::Ident(n) => self.read_only_name(n, true),
+            E::This => self.this_read_only(),
+            E::Member { expr, .. } => self.read_only(expr),
+            E::Index { expr, .. } | E::Slice { expr, .. } => {
+                if let Some(Ty::Slice(el)) = self
+                    .types
+                    .get(&(expr.span.start, expr.span.end))
+                    .map(|t| t.unref())
+                {
+                    return Some(Ro {
+                        msg: format!(
+                            "a `{}` is a read-only view",
+                            self.show(&Ty::Slice(el.clone()))
+                        ),
+                        help: "take a writable view (`T[:]&`) of the array itself (DESIGN §4.10)"
+                            .into(),
+                    });
+                }
+                self.read_only(expr)
+            }
+            E::Str(_) => Some(Ro {
+                msg: "a string literal is read-only data".into(),
+                help: "copy it into a `u8[..>]` buffer first (DESIGN §4.11)".into(),
+            }),
+            E::Cond { then, els, .. } => self.read_only(then).or_else(|| self.read_only(els)),
+            // A reference a method returns is as changeable as what it was called on.
+            E::Call { callee, .. } => match &callee.kind {
+                E::Member { expr, .. } => self.read_only(expr),
+                E::Ident(n)
+                    if self.class.is_some_and(|c| {
+                        self.prog.classes[c]
+                            .methods
+                            .iter()
+                            .any(|m| &m.name == n && !m.is_static)
+                    }) =>
+                {
+                    self.this_read_only()
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Like `read_only`, for a reference a function returns: one into its own object
+    /// is fine, since the caller's access to the object decides.
+    fn read_only_returned(&self, e: &Expr) -> Option<Ro> {
+        match &e.kind {
+            E::Paren(x) => self.read_only_returned(x),
+            E::This => None,
+            E::Ident(n) if self.lookup_local(n).is_none() => None,
+            E::Member { expr, .. } => self.read_only_returned(expr),
+            E::Index { expr, .. } | E::Slice { expr, .. } => {
+                if let Some(Ty::Slice(_)) = self
+                    .types
+                    .get(&(expr.span.start, expr.span.end))
+                    .map(|t| t.unref())
+                {
+                    return self.read_only(e);
+                }
+                self.read_only_returned(expr)
+            }
+            E::Cond { then, els, .. } => self
+                .read_only_returned(then)
+                .or_else(|| self.read_only_returned(els)),
+            E::Call { .. } => None,
+            _ => self.read_only(e),
+        }
+    }
+
+    /// The reference local a write to `e` goes through, if any.
+    fn ref_root(&self, e: &Expr) -> Option<usize> {
+        match &e.kind {
+            E::Paren(x)
+            | E::Member { expr: x, .. }
+            | E::Index { expr: x, .. }
+            | E::Slice { expr: x, .. } => self.ref_root(x),
+            E::Ident(n) => self
+                .lookup_local(n)
+                .filter(|&id| is_ref_ty(&self.locals[id].ty)),
+            _ => None,
+        }
+    }
+
+    /// Reports `action` when `e` can't be changed here.
+    fn need_writable(&mut self, e: &Expr, action: &str) {
+        match self.read_only(e) {
+            Some(ro) => self.err_help(e.span, format!("{}: {}", action, ro.msg), ro.help),
+            None => {
+                if let Some(id) = self.ref_root(e)
+                    && self.locals[id].write_use.is_none()
+                {
+                    self.locals[id].write_use = Some(e.span);
+                }
+            }
+        }
+    }
+
+    /// A reference local is bound to `source`. Bound to something the code can't change,
+    /// it can't be written through.
+    fn bind_ref(&mut self, id: usize, source: &Expr) {
+        let Some(ro) = self.read_only(source) else {
+            return;
+        };
+        let name = self.locals[id].name.clone();
+        if self.locals[id].write_use.is_some() {
+            self.err_help(
+                source.span,
+                format!("this binds `{}` to something that can't be changed here, and `{}` is written through elsewhere", name, name),
+                format!("{}; {}", ro.msg, ro.help),
+            );
+        }
+        if self.locals[id].ro_bind.is_none() {
+            self.locals[id].ro_bind = Some(ro.msg);
+        }
+    }
+
+    /// `target .= value`, or the first `=` that binds a reference.
+    fn check_rebind(&mut self, target: &Expr, value: &Expr) {
+        match &target.kind {
+            E::Ident(n) if self.lookup_local(n).is_some() => {
+                let id = self.lookup_local(n).expect("a local");
+                if let Some(ro) = self.read_only_name(n, false) {
+                    self.err_help(
+                        target.span,
+                        format!("can't rebind `{}`: {}", n, ro.msg),
+                        ro.help,
+                    );
+                } else if matches!(self.locals[id].ty, Ty::View(_)) {
+                    self.need_writable(value, "can't make this a writable view");
+                } else {
+                    self.bind_ref(id, value);
+                }
+            }
+            _ => {
+                // A field or an element: the place itself must be changeable, and what it
+                // will refer to too, since the reference outlives this statement.
+                let place = match &target.kind {
+                    E::Ident(n) => self.read_only_name(n, false),
+                    _ => self.read_only(target),
+                };
+                match place {
+                    Some(ro) => self.err_help(
+                        target.span,
+                        format!("can't rebind this: {}", ro.msg),
+                        ro.help,
+                    ),
+                    None => self.need_writable(value, "can't store a reference to this"),
+                }
+            }
+        }
+    }
+
+    /// A write to a local or field by its bare name: `@err = ...`, a destructuring target.
+    fn write_name(&mut self, n: &str, span: Span) {
+        if let Some(ro) = self.read_only_name(n, true) {
+            self.err_help(
+                span,
+                format!("can't assign to `{}`: {}", n, ro.msg),
+                ro.help,
+            );
+        }
+        if self.lookup_local(n).is_some() {
+            self.note_local_write(n, span);
+        }
+    }
+
+    /// A lambda reads local `id`, which it captures.
+    fn note_capture(&mut self, id: usize, span: Span) {
+        let l = &mut self.locals[id];
+        l.captured = true;
+        if l.reassigned && !l.final_reported {
+            l.final_reported = true;
+            let name = l.name.clone();
+            self.err_help(
+                span,
+                format!("this lambda captures `{}`, which is assigned again after it is initialized", name),
+                "a captured variable never changes after it's initialized; copy it into a new variable for the lambda (DESIGN §9.3)",
+            );
+        }
+    }
+
+    /// An assignment to local `n` in the function that declared it.
+    fn note_local_write(&mut self, n: &str, span: Span) {
+        let Some(id) = self.lookup_local(n) else {
+            return;
+        };
+        if self.locals[id].depth != self.fns.len() {
+            return; // inside a lambda: rejected as a write to a capture
+        }
+        let again = match self.locals[id].slot {
+            None => true,
+            Some(s) => self.flow.is_maybe(s) || self.flow_loops.len() > self.locals[id].loop_depth,
+        };
+        if !again {
+            return;
+        }
+        let l = &mut self.locals[id];
+        l.reassigned = true;
+        if l.captured && !l.final_reported {
+            l.final_reported = true;
+            self.err_help(
+                span,
+                format!("`{}` is assigned again after a lambda captured it", n),
+                "a captured variable never changes after it's initialized; copy it into a new variable for the lambda (DESIGN §9.3)",
+            );
+        }
     }
 
     fn check_need(&mut self, need: &Need, span: Span, name: &str) {

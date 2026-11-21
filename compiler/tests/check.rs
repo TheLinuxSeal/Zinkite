@@ -1353,3 +1353,253 @@ fn functions_have_no_zero_value() {
         "`op` has no zero value",
     );
 }
+
+// ---------------------------------------------------------------- mut and read-only (DESIGN §5.1, §6.1, §4.10, §9.3)
+
+#[test]
+fn plain_parameters_are_read_only_copies() {
+    rejects(
+        "void f(i64 n) { n = 1; }\n",
+        "`n` is a plain parameter, which is a read-only copy",
+    );
+    rejects("void f(i64 n) { n = 1; }\n", "declare it `i64& n`");
+    rejects("void f(i64 n) { n++; }\n", "can't change this");
+    rejects("void f(string s) { s = \"x\"; }\n", "declare it `u8[:]& s`");
+    rejects(
+        "void f(i64[..>] xs) { xs.push(1); }\n",
+        "can't call `push` here, since it changes what it's called on: `xs` is a plain parameter",
+    );
+    rejects("void f(i64[..>] xs) { xs +> 1; }\n", "can't use `+>` here");
+    rejects(
+        "void f(i64[..~] xs) { @_ = xs ->; }\n",
+        "can't use `->` here",
+    );
+    rejects(
+        "class P { i64 x; }\nvoid f(P p) { p.x = 1; }\n",
+        "`p` is a plain parameter",
+    );
+    rejects(
+        "u8 main(string[.] args) { args[1:].sort(); return 0; }\n",
+        "`args` is a plain parameter",
+    );
+    rejects(
+        "void f(u8 err) { @err = i64.parse(\"1\"); }\n",
+        "can't assign to `err`",
+    );
+    rejects(
+        &body("func(i64 => i64) g = (i64 a) => { a = 2; return a; };"),
+        "`a` is a plain parameter",
+    );
+    ok(
+        "void f(i64& n) { n = 1; n++; }\nvoid g(i64[..>]& xs) { xs.push(1); xs +> 2; }\nvoid h(i64 n) { i64 m = n; m++; }\n",
+    );
+}
+
+#[test]
+fn only_mut_methods_change_their_object() {
+    rejects(
+        "class C { i64 n; void bump() { n++; } }\n",
+        "`n` is a field, and `bump` isn't `mut`, so it can't change its object",
+    );
+    rejects(
+        "class C { i64 n; void set() { this.n = 1; } }\n",
+        "`set` isn't `mut`",
+    );
+    rejects(
+        "class C { i64[..>] xs; void add() { xs.push(1); } }\n",
+        "can't call `push` here",
+    );
+    rejects(
+        "class C { i64 n; mut void inc() { n++; } void f() { inc(); } }\n",
+        "can't call `inc` here, since it changes its object: `f` isn't `mut`",
+    );
+    rejects(
+        "class C { i64 n; mut void inc() { n++; } void f() { this.inc(); } }\n",
+        "can't call `inc` here",
+    );
+    rejects(
+        "void touch(i64& x) { }\nclass C { i64 n; void f() { touch(n); } }\n",
+        "can't pass this to `touch`, which may change it",
+    );
+    rejects(
+        "class C { i64 n; void f() { g(this); } static void g(C& c) { } }\n",
+        "can't pass this to `g`",
+    );
+    rejects(
+        &format!(
+            "{}{}",
+            "class C { hashmap<string, i64> m; void f() { m.put(\"a\", 1); } }\n", ""
+        ),
+        "can't call `put` here",
+    );
+    ok(
+        "class C { i64 n; mut void inc() { n++; this.n += 1; } mut void g() { inc(); this.inc(); } i64 get() { i64 m = n; m++; return m + n; } }\n",
+    );
+    ok(
+        "class C { static i64 count = 0; void f() { count++; } }\ni64 total = 0;\nvoid main() { total = 1; }\n",
+    );
+    rejects(
+        "class C { static mut void f() { } }\n",
+        "`f` is static, so it has no object for `mut` to change",
+    );
+    rejects("mut void f() { }\n", "no object for `mut` to change");
+}
+
+#[test]
+fn read_only_is_deep() {
+    let node = "class Node {\n  i64 v;\n  Node&? next;\n";
+    rejects(
+        &format!(
+            "{}  void f() {{ Node&? n = next; if (n != null) {{ n.v = 1; }} }}\n}}\n",
+            node
+        ),
+        "`n` refers to something that can't be changed here",
+    );
+    rejects(
+        &format!(
+            "{}  void f() {{ Node&? n = next; if (n != null) {{ n.v = 1; }} }}\n}}\n",
+            node
+        ),
+        "`next` is a field, and `f` isn't `mut`",
+    );
+    ok(&format!(
+        "{}  mut void f() {{ Node&? n = next; if (n != null) {{ n.v = 1; }} }}\n}}\n",
+        node
+    ));
+    // Walking a list in a method that only reads it.
+    ok(&format!(
+        "{}  i64 sum() {{ i64 t = v; Node&? cur = next; while (cur != null) {{ t += cur.v; cur .= cur.next; }} return t; }}\n}}\n",
+        node
+    ));
+    // A reference written through can't later be bound to read-only data, whatever the order.
+    rejects(
+        &format!(
+            "{}  void f(Node& a) {{ Node&? r = a; if (r != null) {{ r.v = 1; }} r .= next; }}\n}}\n",
+            node
+        ),
+        "this binds `r` to something that can't be changed here, and `r` is written through elsewhere",
+    );
+    let item = "class Item { i64 n; }\n";
+    rejects(
+        &format!(
+            "{}void f(Item[..>] items) {{ Item& r = items[0]; r.n = 2; }}\n",
+            item
+        ),
+        "`r` refers to something that can't be changed here",
+    );
+    rejects(
+        &format!(
+            "{}void f(Item[..>] items) {{ for (Item& it : items) {{ it.n++; }} }}\n",
+            item
+        ),
+        "`it` refers to something",
+    );
+    ok(&format!(
+        "{}void f(Item[..>]& items) {{ for (Item& it : items) {{ it.n++; }} Item& r = items[0]; r.n = 2; }}\n",
+        item
+    ));
+    rejects(
+        &format!(
+            "{}void bump(Item& i) {{ i.n++; }}\nvoid f(Item[..>] items) {{ Item& r = items[0]; bump(r); }}\n",
+            item
+        ),
+        "can't pass this to `bump`",
+    );
+}
+
+#[test]
+fn writable_views_need_changeable_arrays() {
+    let up = "void up(u8[:]& s) { }\n";
+    rejects(
+        "void f(u8[..>] buf) { u8[:]& w = buf[0:2]; }\n",
+        "can't take a writable view of this: `buf` is a plain parameter",
+    );
+    ok(&format!(
+        "{}void main() {{ u8[..>] b = []; up(b); up(b[1:]); u8[:]& w = b[0:1]; w[0] = 1; }}\n",
+        up
+    ));
+    rejects(
+        &format!("{}void g(u8[..>] b) {{ up(b); }}\n", up),
+        "can't pass this to `up`",
+    );
+    rejects(
+        &body("string s = \"x\"; s[0] = 1;"),
+        "a `string` is a read-only view",
+    );
+    rejects(
+        "class C { u8[..>] buf; void f() { buf[0:2].fill(0); } }\n",
+        "can't call `fill` here",
+    );
+    rejects(
+        "void f(u8[..>] a) { u8[..>] b = []; u8[:]& w = b[0:1]; w .= a[0:1]; }\n",
+        "can't make this a writable view",
+    );
+}
+
+#[test]
+fn captures_are_read_only() {
+    rejects(
+        &body("i64 x = 1; i64[..~] xs = []; xs.retain((i64 v) => { x = 2; return true; });"),
+        "`x` is captured by this lambda, and captures are read-only",
+    );
+    rejects(
+        &body(
+            "i64[..>] seen = []; i64[..~] xs = []; xs.retain((i64 v) => { seen.push(v); return true; });",
+        ),
+        "can't call `push` here",
+    );
+    // A captured variable never changes after it's initialized (DESIGN §9.3).
+    rejects(
+        &body("i64 lim = 1; i64[..~] xs = []; xs.retain((i64 v) => v < lim); lim = 2;"),
+        "`lim` is assigned again after a lambda captured it",
+    );
+    rejects(
+        &body("i64 lim = 1; lim = 2; i64[..~] xs = []; xs.retain((i64 v) => v < lim);"),
+        "this lambda captures `lim`, which is assigned again",
+    );
+    rejects(
+        &body(
+            "i64 lim; for (;;) { lim = 1; break; } i64[..~] xs = []; xs.retain((i64 v) => v < lim);",
+        ),
+        "assigned again",
+    );
+    ok(&body(
+        "bool c = true; i64 lim; if (c) { lim = 1; } else { lim = 2; } i64[..~] xs = []; xs.retain((i64 v) => v < lim);",
+    ));
+    // Writing through a captured reference changes what it refers to, not the capture.
+    ok(
+        "class Item { i64 n; }\nvoid main() { Item[..>] items = []; items +> new Item(1); Item& r = items[0]; i64 k = items.count((Item i) => { r.n++; return true; }); }\n",
+    );
+}
+
+#[test]
+fn returned_references() {
+    let item = "class Item { i64 n; }\n";
+    rejects(
+        &format!(
+            "{}Item& first(Item[..>] items) {{ return items[0]; }}\n",
+            item
+        ),
+        "can't return a reference to this: `items` is a plain parameter",
+    );
+    // A reference into a method's own object is as changeable as the object it's called on.
+    let holder = "class Holder { Item[..>] items; Item& first() { return items[0]; } }\n";
+    ok(&format!(
+        "{}{}void main() {{ Holder h = new Holder(); h.first().n = 1; }}\n",
+        item, holder
+    ));
+    rejects(
+        &format!(
+            "{}{}void f(Holder h) {{ h.first().n = 1; }}\n",
+            item, holder
+        ),
+        "can't assign to this: `h` is a plain parameter",
+    );
+    rejects(
+        &format!(
+            "{}root R {{ pool<Item> p; void f(Handle<Item> h) {{ Item& i @_ = p.get(h); i.n = 1; }} }}\n",
+            item
+        ),
+        "`i` refers to something that can't be changed here",
+    );
+}
