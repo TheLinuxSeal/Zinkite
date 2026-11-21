@@ -96,19 +96,30 @@ and to remove from nothing.
 and caches the executable by a hash of the C; `-O` builds at `-O2`. TinyCC, which
 DESIGN plans for `zink run`, isn't built in yet.
 
-The first milestone covers script files, classes, enums, constructors and methods,
-statuses, references, strings and interpolation, frozen, growable and capped arrays,
-slices, every statement form, casts and the integer rules, and for-each over arrays
-and text iterators. Bugs stop the program with the file and line, and exit status 1.
+It covers script files, classes, enums, constructors and methods, statuses,
+references, strings and interpolation, every array kind except chunked (`$`) ones
+and capped ones with a start or cursor slot, slices, every statement form, casts and
+the integer rules, and for-each over arrays and text iterators. Bugs stop the
+program with the file and line, and exit status 1. `examples/linebuf.zn` runs.
 
-Not yet: hash maps, generics, interfaces, cursor arrays and arrays that change at
-the start, lambdas and sorting with them, iterators in variables, comparing class
-values, and the library packages that aren't written yet (`zink.io`, `zink.cli` and
-the others), so `stdin` and files too. Using one is a clear error, not wrong code.
+Not yet: hash maps, generics, interfaces, lambdas and sorting with them, iterators
+in variables, comparing class values, and the library packages that aren't written
+yet (`zink.io`, `zink.cli` and the others). Of `stdin`, only `readAll` and
+`nextLine` work so far. Using any of the rest is a clear error, not wrong code.
 
-An array on a data stack is a header `{p, n}` pointing at its elements, rather than
-the inline `[metadata][elements]` of DESIGN §11; each declaration of a growable
-local gets a data stack of its own.
+Arrays on data stacks, by layout:
+- changing only at the end (`T[..>]`, `T[..~]`, frozen ones): a header `{p, n}`
+  pointing at the elements, rather than the inline `[metadata][elements]` of
+  DESIGN §11;
+- changing at the start too (`T[~.~]`, `T[>..]`, `T[<.<]`): contiguous elements
+  starting in the middle of their reservation, so either end can grow;
+- with a cursor (`T[.~.]`, `T[~]`): the layout of DESIGN §4.3 and §4.5, as
+  prototyped in `bench/gap_buffer.c`. Elements live in a data array and never
+  move; removals leave holes that the next insert reuses; the order is an index
+  of 32-bit slots, kept as two deques, before and after the cursor. Two data
+  stacks: the data, and the index.
+
+Each declaration of a growable local gets data stacks of its own.
 
 ## Layout
 

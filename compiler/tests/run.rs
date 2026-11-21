@@ -293,3 +293,153 @@ fn floats_print_their_shortest_text() {
         "10.0 0.1 1.5e300 1e-7 33.333333333333336 -2.5 Infinity 123456789.0\n",
     );
 }
+
+/// Cursor arrays, deques and windows (DESIGN §4.1–§4.9): the line editor of
+/// examples/linebuf.zn, driven by fixed commands, and the other operations.
+#[test]
+fn cursor_arrays_and_deques() {
+    prints(
+        r#"root LineBuffer {
+    u32[.~.] text;
+
+    mut void type(string s) { for (u32 c : s.codePoints()) { text +^ c; } }
+    mut i64 back(i64 n) { for (i64 i = 0; i < n; i++) { if (@(text -^)) { return i; } } return n; }
+    mut i64 del(i64 n) { for (i64 i = 0; i < n; i++) { if (@(text ^-)) { return i; } } return n; }
+    mut void left(i64 n) { text.move(-n); }
+    mut void right(i64 n) { text.move(n); }
+    mut void home() { text.seekStart(); }
+    mut void end() { text.seekFromEnd(0); }
+    void show() {
+        u8[..>] out = [];
+        for (i64 i = 0; i <= text.len; i++) {
+            if (i == text.cursor) { out +> '|'; }
+            if (i < text.len) { @_ = out.append("${text[i].utf8()}"); }
+        }
+        println(out);
+    }
+}
+
+void main() {
+    LineBuffer buf = new LineBuffer();
+    buf.type("hello world");
+    buf.show();
+    buf.left(5);
+    buf.type("big ");
+    buf.show();
+    i64 gone = buf.back(2);
+    buf.show();
+    buf.home();
+    buf.type(">> ");
+    buf.end();
+    buf.type("!");
+    buf.show();
+    buf.left(3);
+    i64 deleted = buf.del(10);
+    buf.show();
+    println("back ${gone}, deleted ${deleted}");
+    buf.type("héllo ✓");
+    buf.show();
+
+    // A cursor array of i64: seek, insertAt, removeAt, indexing, for-each.
+    i64[~] xs = [];
+    for (i64 i = 0; i < 5; i++) { xs +> i * 10; }
+    @_ = xs.seek(2);
+    xs +^ 15;
+    xs +< -10;
+    i64& first = xs[0];
+    @_ = xs.insertAt(3, 99);
+    println("first ${first}, after inserts and seeks");
+    i64 removed @_ = xs.removeAt(1);
+    println("${xs} len ${xs.len} cursor ${xs.cursor} removed ${removed}");
+    i64 last @_ = xs.pop();
+    i64 front @_ = xs.popFront();
+    println("${xs} last ${last} front ${front}");
+    xs.reverse();
+    println("reversed ${xs}");
+    xs.sort();
+    println("sorted ${xs}, cursor still ${xs.cursor}");
+    i64 total = 0;
+    for (i64& x : xs) { x += 1; total += x; }
+    println("${xs} total ${total} has 100: ${xs.contains(100)}");
+    u8 bad = @xs.seek(100);
+    println("seek 100: ${bad}");
+
+    // Deques: both ends, and a window that only narrows.
+    i64[~.~] q = [];
+    q +> 1 +> 2;
+    q +< 0;
+    q.pushFront(-1);
+    i64 a @_ = q.popFront();
+    i64 b @_ = q.pop();
+    println("deque ${q} took ${a} and ${b}, as a slice ${q[1:]}");
+    for (i64 i = 0; i < 100000; i++) { q +> i; @_ = q.popFront(); }
+    println("after a long queue: ${q.len}");
+    i64[<.<] w = [1, 2, 3, 4, 5];
+    @_ = w -<;
+    @_ = w ->;
+    println("window ${w}");
+
+    // Holes are reused: removing and inserting doesn't grow the data array.
+    i64[.~.] h = [];
+    for (i64 r = 0; r < 1000; r++) { h +^ r; @_ = h -^; }
+    println("holes reused, len ${h.len}");
+}
+"#,
+        r#"hello world|
+hello big |world
+hello bi|world
+>> hello biworld!|
+>> hello biwor|
+back 2, deleted 3
+>> hello biworhéllo ✓|
+first -10, after inserts and seeks
+[-10, 10, 99, 15, 20, 30, 40] len 7 cursor 1 removed 0
+[10, 99, 15, 20, 30] last 40 front -10
+reversed [30, 20, 15, 99, 10]
+sorted [10, 15, 20, 30, 99], cursor still 0
+[11, 16, 21, 31, 100] total 179 has 100: true
+seek 100: 196
+deque [0, 1] took -1 and 2, as a slice [1]
+after a long queue: 2
+window [2, 3, 4]
+holes reused, len 0
+"#,
+    );
+}
+
+/// examples/linebuf.zn, unchanged, fed commands on stdin.
+#[test]
+fn linebuf_example_runs() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples/linebuf.zn");
+    let file = SourceFile::new(path, std::fs::read_to_string(path).unwrap());
+    let (diags, c) = zink::compile_c(std::slice::from_ref(&file));
+    let Some(c) = c else {
+        panic!(
+            "didn't compile: {:?}",
+            diags[0]
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+        )
+    };
+    let exe = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("linebuf");
+    zink::driver::compile(&c, &exe, false).unwrap();
+    use std::io::Write;
+    let mut child = Command::new(&exe)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all("type hello world\nshow\nleft 5\ntype big \nshow\nback 2\nhome\nshow\nend\ndel 1\nfrobnicate\ntype  ✓\nshow\n".as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "hello world|\nhello big |world\n|hello biworld\nhello biworld ✓|\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "unknown command: frobnicate\n"
+    );
+    assert!(out.status.success());
+}

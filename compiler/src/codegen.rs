@@ -87,6 +87,8 @@ struct Gen<'p, 'a> {
     switches: Vec<SwitchCtx>,
     pending_label: Option<String>,
     used_scratch: bool,
+    /// The type of the value the last `with_status` evaluated.
+    last_status_ret: Ty,
 }
 
 fn c_string(s: &[u8]) -> String {
@@ -207,6 +209,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             switches: Vec::new(),
             pending_label: None,
             used_scratch: false,
+            last_status_ret: Ty::Void,
         }
     }
 
@@ -275,11 +278,14 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
             Ty::Array(e, k) => {
                 if k.cap != CapKind::Capped {
-                    if k.has_cursor() || k.cap == CapKind::Chunked {
-                        return self.unsupported(span, "cursor arrays");
+                    if k.cap == CapKind::Chunked {
+                        return self.unsupported(span, "cursor arrays with a chunked index (`$`)");
+                    }
+                    if k.has_cursor() {
+                        return "zr_cur".into();
                     }
                     if k.push_front() || k.pop_front() {
-                        return self.unsupported(span, "arrays that insert or remove at the start");
+                        return "zr_deq".into();
                     }
                     return "zr_vec".into();
                 }
@@ -433,12 +439,8 @@ impl<'p, 'a> Gen<'p, 'a> {
                 let name = format!("zs{}_{}", id, i);
                 let _ = writeln!(self.protos, "static {} {};", ct, name);
                 if on_stack(&f.ty) {
-                    let site = self.site();
-                    let _ = writeln!(
-                        self.statics_init,
-                        "    {}.p = zr_stack({}); {}.n = 0;",
-                        name, site, name
-                    );
+                    let init = self.stack_init(&f.ty);
+                    let _ = writeln!(self.statics_init, "    {} = {};", name, init);
                 }
                 if let Some(init) = f.init {
                     self.begin_fn(id, Ty::Void, false, false, true);
@@ -942,8 +944,8 @@ impl<'p, 'a> Gen<'p, 'a> {
             let (name, ty) = self.new_local(&v.name);
             let ct = self.cty(&ty, v.name.span);
             if on_stack(&ty) {
-                let site = self.site();
-                self.line(&format!("{} {} = {{zr_stack({}), 0}};", ct, name, site));
+                let init = self.stack_init(&ty);
+                self.line(&format!("{} {} = {};", ct, name, init));
                 if let Some(init) = &v.init {
                     let code = self.store_into(&name, &ty, init);
                     self.line(&format!("{};", code));
@@ -1010,6 +1012,24 @@ impl<'p, 'a> Gen<'p, 'a> {
             .count()
     }
 
+    /// An empty array on data stacks of its own: one, or two for a cursor array.
+    fn stack_init(&mut self, ty: &Ty) -> String {
+        match layout(ty) {
+            Some(Layout::Cur) => {
+                let (a, b) = (self.site(), self.site());
+                format!("zr_cur_new(zr_stack({}), zr_stack({}))", a, b)
+            }
+            Some(Layout::Deq) => {
+                let a = self.site();
+                format!("zr_deq_new(zr_stack({}))", a)
+            }
+            _ => {
+                let a = self.site();
+                format!("((zr_vec){{zr_stack({}), 0}})", a)
+            }
+        }
+    }
+
     /// Gives an object's growable fields their data stacks.
     fn init_growable(&mut self, place: &str, id: ClassId) {
         let fields: Vec<(String, Ty, Span)> = self.prog.classes[id]
@@ -1020,11 +1040,8 @@ impl<'p, 'a> Gen<'p, 'a> {
             .collect();
         for (f, ty, span) in fields {
             if on_stack(&ty) {
-                let site = self.site();
-                self.line(&format!(
-                    "{}.f_{}.p = zr_stack({}); {}.f_{}.n = 0;",
-                    place, f, site, place, f
-                ));
+                let init = self.stack_init(&ty);
+                self.line(&format!("{}.f_{} = {};", place, f, init));
             } else {
                 self.unsupported(span, "this kind of growable field");
             }
@@ -1056,6 +1073,51 @@ impl<'p, 'a> Gen<'p, 'a> {
     /// The code that stores `init` into `place`, of type `ty`: arrays on data stacks are
     /// filled in place, text is built in place (DESIGN §3.3, §4.11).
     fn store_into(&mut self, place: &str, ty: &Ty, init: &Expr) -> String {
+        if let Ty::Array(el, _) = ty
+            && matches!(layout(ty), Some(Layout::Deq | Layout::Cur))
+        {
+            // Cleared, then filled by pushing each element at the end.
+            let el = (**el).clone();
+            let ec = self.cty(&el, init.span);
+            let arr = Arr {
+                a: "_a".into(),
+                lay: layout(ty).unwrap_or(Layout::Vec),
+                ec: ec.clone(),
+                cap: 0,
+            };
+            let fill = match &init.kind {
+                E::ArrayLit(items) => {
+                    let mut out = String::new();
+                    for x in items {
+                        let v = self.expr(x, &el);
+                        out.push_str(&format!(
+                            "{{ {} _x = {}; {} }} ",
+                            ec,
+                            v,
+                            arr.put(Where::End)
+                        ));
+                    }
+                    out
+                }
+                _ => {
+                    let src = self.expr(init, &Ty::Slice(Box::new(el.clone())));
+                    format!(
+                        "zr_slice _src = {}; for (int64_t _i = 0; _i < _src.n; _i++) {{ {} _x = (({}*)_src.p)[_i]; {} }}",
+                        src,
+                        ec,
+                        ec,
+                        arr.put(Where::End)
+                    )
+                }
+            };
+            return format!(
+                "({{ __typeof__({p}) *_a = &({p}); {} {} *_e; uint8_t _st = 0; {} (void)_e; (void)_st; }})",
+                arr.clear(),
+                ec,
+                fill,
+                p = place
+            );
+        }
         if let Ty::Array(el, _) = ty
             && on_stack(ty)
         {
@@ -1282,29 +1344,32 @@ impl<'p, 'a> Gen<'p, 'a> {
         };
         let ec = self.cty(&elem, iter.span);
         let arr = self.tmp("a");
-        let capped = matches!(it.unref(), Ty::Array(_, k) if k.cap == CapKind::Capped);
         // What is looped over is found once; its length is read on every step (DESIGN §9.4).
-        let (data, len) = if matches!(it.unref(), Ty::Slice(_) | Ty::View(_)) {
+        let lay = layout(&it).unwrap_or(Layout::Vec);
+        let ap = self.tmp("ap");
+        if matches!(it.unref(), Ty::Slice(_) | Ty::View(_)) {
             let v = self.expr(iter, &it.unref().clone());
-            self.line(&format!("zr_slice {} = {};", arr, v));
-            (format!("(({}*){}.p)", ec, arr), format!("{}.n", arr))
+            self.line(&format!(
+                "zr_slice {} = {}; zr_slice *{} = &{};",
+                arr, v, ap, arr
+            ));
         } else if self.is_place(iter) || is_ref(&it) {
             let (p, _) = self.place(iter);
-            self.line(&format!("__typeof__({}) *{} = &({});", p, arr, p));
-            if capped {
-                (format!("{}->e", arr), format!("{}->n", arr))
-            } else {
-                (format!("(({}*){}->p)", ec, arr), format!("{}->n", arr))
-            }
+            self.line(&format!("__typeof__({}) *{} = &({});", p, ap, p));
         } else {
             let v = self.expr(iter, &it);
-            self.line(&format!("__typeof__({}) {} = {};", v, arr, v));
-            if capped {
-                (format!("{}.e", arr), format!("{}.n", arr))
-            } else {
-                (format!("(({}*){}.p)", ec, arr), format!("{}.n", arr))
-            }
+            self.line(&format!(
+                "__typeof__({}) {} = {}; __typeof__({}) *{} = &{};",
+                v, arr, v, arr, ap, arr
+            ));
+        }
+        let looped = Arr {
+            a: ap,
+            lay,
+            ec: ec.clone(),
+            cap: 0,
         };
+        let len = looped.len();
         let i = self.tmp("i");
         let (vname, vty) = match name {
             Name::Ident(n) => self.new_local(n),
@@ -1318,10 +1383,11 @@ impl<'p, 'a> Gen<'p, 'a> {
             ),
         };
         let vc = self.cty(&vty, iter.span);
+        let at = looped.at(&i);
         let bind = if by_ref {
-            format!("{} {} = &{}[{}];", vc, vname, data, i)
+            format!("{} {} = &{};", vc, vname, at)
         } else {
-            format!("{} {} = {}[{}];", vc, vname, data, i)
+            format!("{} {} = {};", vc, vname, at)
         };
         let bind_line = bind.clone();
         self.loop_(
@@ -1357,6 +1423,11 @@ impl<'p, 'a> Gen<'p, 'a> {
         self.line("for (;;) {");
         self.indent += 1;
         let (val, status) = self.with_status(source, &st);
+        let st = if st.is_unknown() {
+            self.last_status_ret.clone()
+        } else {
+            st
+        };
         self.line(&status.0);
         let r = self.tmp("r");
         if st != Ty::Void {
@@ -1648,6 +1719,16 @@ impl<'p, 'a> Gen<'p, 'a> {
                         "({{ __typeof__({}) *_c = &({}); (zr_slice){{_c->e, _c->n}}; }})",
                         code, code
                     )
+                } else if k.has_cursor() {
+                    self.unsupported(
+                        span,
+                        "slices of cursor arrays, which are undecided (DESIGN §17)",
+                    )
+                } else if k.push_front() || k.pop_front() {
+                    format!(
+                        "({{ __typeof__({}) _vv = {}; (zr_slice){{_vv.p, _vv.n}}; }})",
+                        code, code
+                    )
                 } else {
                     format!("zr_view({})", code)
                 }
@@ -1723,8 +1804,14 @@ impl<'p, 'a> Gen<'p, 'a> {
     fn with_status(&mut self, e: &Expr, want: &Ty) -> (String, (String, String)) {
         let e = strip_paren(e);
         let c = self.status_call(e);
+        self.last_status_ret = c.ret.clone();
         let r = self.tmp("rs");
-        let pre = format!("__typeof__({}) {} = {};", c.code, r, c.code);
+        // A call that returns nothing and can't fail has status 0.
+        let pre = if !c.fails && c.ret == Ty::Void {
+            format!("(void)({});", c.code)
+        } else {
+            format!("__typeof__({}) {} = {};", c.code, r, c.code)
+        };
         let (val, st) = match (c.fails, c.ret == Ty::Void) {
             (true, true) => ("0".to_string(), r.clone()),
             (true, false) => (format!("{}.v", r), format!("{}.s", r)),
@@ -2006,6 +2093,22 @@ impl<'p, 'a> Gen<'p, 'a> {
                     None => (self.unsupported(span, "this field"), t),
                 }
             }
+            Ty::Array(_, k) if k.has_cursor() && name.name == "len" => {
+                let h = if is_ref(&bty) {
+                    b.clone()
+                } else {
+                    format!("&({})", b)
+                };
+                let h = if self.is_place(base) || is_ref(&bty) {
+                    h
+                } else {
+                    format!("({{ __typeof__({}) _h = {}; &_h; }})", b, b)
+                };
+                (format!("zr_cur_len({})", h), Ty::i64())
+            }
+            Ty::Array(_, k) if k.has_cursor() && name.name == "cursor" => {
+                (format!("{}bn", acc), Ty::i64())
+            }
             Ty::Array(..) | Ty::Slice(_) | Ty::View(_) if name.name == "len" => {
                 (format!("{}n", acc), Ty::i64())
             }
@@ -2048,6 +2151,19 @@ impl<'p, 'a> Gen<'p, 'a> {
             );
         }
         let v = self.expr(base, &arr);
+        if layout(&arr) == Some(Layout::Cur) {
+            // Two loads: the slot from the index, then the element (DESIGN §4.4).
+            let fix = idx
+                .replace("LEN", &format!("zr_cur_len(&{})", b))
+                .replace("LOC", &loc);
+            return (
+                format!(
+                    "(*({{ __typeof__({}) {} = {}; int64_t _ci = {}; &(({}*){}.data)[zr_cur_at(&{}, _ci)]; }}))",
+                    v, b, v, fix, ec, b, b
+                ),
+                el,
+            );
+        }
         (
             format!(
                 "(*({{ __typeof__({}) {} = {}; &(({}*){}.p)[{}]; }}))",
@@ -2717,14 +2833,6 @@ impl<'p, 'a> Gen<'p, 'a> {
             Ty::Slice(_) | Ty::View(_) if t.elem() == Some(&Ty::u8()) => {
                 let _ = write!(writes, "zr_w_str({}, {}); ", k, v);
             }
-            Ty::Array(e, kd) if **e == Ty::u8() => {
-                let s = if kd.cap == CapKind::Capped {
-                    format!("((zr_slice){{{}.e, {}.n}})", v, v)
-                } else {
-                    format!("zr_view({})", v)
-                };
-                let _ = write!(writes, "zr_w_str({}, {}); ", k, s);
-            }
             Ty::Prim(Prim::Bool) => {
                 let _ = write!(writes, "zr_w_bool({}, {}); ", k, v);
             }
@@ -2738,10 +2846,26 @@ impl<'p, 'a> Gen<'p, 'a> {
                 let _ = write!(writes, "zr_w_u64({}, (uint64_t){}); ", k, v);
             }
             Ty::Array(e, _) | Ty::Slice(e) | Ty::View(e) => {
-                // Any other array prints as a list: [104, 105].
                 let el = (**e).clone();
                 let ec = self.cty(&el, x.span);
-                let s = self.conv(&v, &t, &Ty::Slice(Box::new(el.clone())), x.span);
+                let lay = layout(&t).unwrap_or(Layout::Slice);
+                let looped = Arr {
+                    a: format!("(&{})", v),
+                    lay,
+                    ec: ec.clone(),
+                    cap: 0,
+                };
+                let (len, at) = (looped.len(), looped.at("_j"));
+                if el == Ty::u8() {
+                    // A u8 array prints as its text (DESIGN §4.13).
+                    let _ = write!(
+                        writes,
+                        "for (int64_t _j = 0; _j < {}; _j++) zr_w_byte({}, {}); ",
+                        len, k, at
+                    );
+                    return;
+                }
+                // Any other array prints as a list: [104, 105].
                 let one = match &el {
                     Ty::Prim(p) if p.is_float() => format!("zr_w_f64({}, (double)_e)", k),
                     Ty::Prim(Prim::Bool) => format!("zr_w_bool({}, _e)", k),
@@ -2752,8 +2876,12 @@ impl<'p, 'a> Gen<'p, 'a> {
                 };
                 let _ = write!(
                     writes,
-                    "{{ zr_slice _l = {}; zr_w_byte({}, '['); for (int64_t _j = 0; _j < _l.n; _j++) {{ {} _e = (({}*)_l.p)[_j]; if (_j) zr_w_str({}, zr_lit(\", \", 2)); {}; }} zr_w_byte({}, ']'); }} ",
-                    s, k, ec, ec, k, one, k
+                    "{{ zr_w_byte({k}, '['); for (int64_t _j = 0; _j < {len}; _j++) {{ {ec} _e = {at}; if (_j) zr_w_str({k}, zr_lit(\", \", 2)); {one}; }} zr_w_byte({k}, ']'); }} ",
+                    k = k,
+                    len = len,
+                    ec = ec,
+                    at = at,
+                    one = one
                 );
             }
             _ => {
@@ -2825,6 +2953,33 @@ impl<'p, 'a> Gen<'p, 'a> {
 
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[ast::Arg]) -> CallOut {
         let ret = settle(&self.ty(e));
+        // `stdin.readAll(buf)` and `stdin.nextLine(buf)`: the first of the library (STDLIB §4.1),
+        // known by name until the checker models `File`.
+        if let E::Member { expr: base, name } = &callee.kind
+            && matches!(&base.kind, E::Ident(n) if n == "stdin")
+            && !self.facts.names.contains_key(&key(base.span))
+            && args.len() == 1
+            && matches!(name.name.as_str(), "readAll" | "nextLine")
+            && layout(&self.ty(&args[0].expr)) == Some(Layout::Vec)
+        {
+            let (p, _) = self.place(&args[0].expr);
+            if name.name == "readAll" {
+                return CallOut {
+                    code: format!("zr_read_all(0, &({}))", p),
+                    ret: Ty::Void,
+                    fails: true,
+                };
+            }
+            let rt = self.result_ty(&Ty::string(), e.span);
+            return CallOut {
+                code: format!(
+                    "({{ zr_slice _l; uint8_t _s = zr_next_line(0, &({}), &_l); ({}){{_l, _s}}; }})",
+                    p, rt
+                ),
+                ret: Ty::string(),
+                fails: true,
+            };
+        }
         let Some(fact) = self.facts.calls.get(&key(e.span)) else {
             let u = self.unsupported(e.span, "calls into library packages that aren't written");
             return CallOut {
@@ -3231,9 +3386,14 @@ impl<'p, 'a> Gen<'p, 'a> {
                 };
             }
         }
-        // Array methods (DESIGN §4.7, STDLIB §7.1).
+        // Array methods (DESIGN §4.7, §4.9, STDLIB §7.1).
+        let Some(lay) = layout(&recv_t) else {
+            return ok(
+                self.unsupported(span, &format!("`{}` on {}", m, self.prog.show(&recv_t))),
+                ret,
+            );
+        };
         let ec = self.cty(&el, span);
-        let capped = matches!(recv_t, Ty::Array(_, k) if k.cap == CapKind::Capped);
         let cap = match &recv_t {
             Ty::Array(_, k) => k.size,
             _ => 0,
@@ -3249,68 +3409,191 @@ impl<'p, 'a> Gen<'p, 'a> {
                 v, a, v, a, a, a
             )
         };
-        let data = if capped {
-            format!("{}->e", a)
-        } else {
-            format!("(({}*){}->p)", ec, a)
+        let arr = Arr {
+            a: a.clone(),
+            lay,
+            ec: ec.clone(),
+            cap,
         };
+        let len = arr.len();
         let res = |me: &mut Self| me.result_ty(&el, span);
+        let put = |me: &mut Self, at: Where, x: String| -> CallOut {
+            let body = arr.put(at);
+            if lay == Layout::Capped {
+                let rt = me.result_ty(&Ty::Ref(Box::new(el.clone())), span);
+                return CallOut {
+                    code: format!(
+                        "({{ {} uint8_t _st = 0; {} _x = {}; {} *_e; {} ({}){{_e, _st}}; }})",
+                        ptr, ec, x, ec, body, rt
+                    ),
+                    ret: Ty::Ref(Box::new(el.clone())),
+                    fails: true,
+                };
+            }
+            CallOut {
+                code: format!(
+                    "({{ {} uint8_t _st = 0; {} _x = {}; {} *_e; {} (void)_st; _e; }})",
+                    ptr, ec, x, ec, body
+                ),
+                ret: Ty::Ref(Box::new(el.clone())),
+                fails: false,
+            }
+        };
+        let take = |me: &mut Self, at: Where| -> CallOut {
+            let rt = me.result_ty(&el, span);
+            CallOut {
+                code: format!(
+                    "({{ {} {} _v = {{0}}; uint8_t _s = 192; {} ({}){{_v, _s}}; }})",
+                    ptr,
+                    ec,
+                    arr.take(at),
+                    rt
+                ),
+                ret: el.clone(),
+                fails: true,
+            }
+        };
         match m {
             "push" => {
                 let x = arg(self, 0);
-                if capped {
-                    let rt = self.result_ty(&Ty::Ref(Box::new(el.clone())), span);
-                    return fail(
-                        format!(
-                            "({{ {} {} _x = {}; uint8_t _s = 0; if ({}->n < {}) {}[{}->n++] = _x; else _s = 193; ({}){{&{}[{}->n - 1], _s}}; }})",
-                            ptr, ec, x, a, cap, data, a, rt, data, a
-                        ),
-                        Ty::Ref(Box::new(el)),
-                    );
+                put(self, Where::End, x)
+            }
+            "pushFront" => {
+                let x = arg(self, 0);
+                put(self, Where::Front, x)
+            }
+            "insert" => {
+                let x = arg(self, 0);
+                put(self, Where::Cursor, x)
+            }
+            "pop" => take(self, Where::End),
+            "popFront" => take(self, Where::Front),
+            "removeBefore" => take(self, Where::Before),
+            "removeAfter" => take(self, Where::After),
+            "clear" => ok(format!("({{ {} {} }})", ptr, arr.clear()), Ty::Void),
+            "seek" => fail(
+                format!("({{ {} zr_cur_seek({}, {}); }})", ptr, a, arg(self, 0)),
+                Ty::Void,
+            ),
+            "seekFromEnd" => {
+                let k = arg(self, 0);
+                let fails = !matches!(args[0].expr.kind, E::Int { value: 0, .. });
+                CallOut {
+                    code: format!(
+                        "({{ {} zr_cur_seek({}, zr_cur_len({}) - (int64_t)({})); }})",
+                        ptr, a, a, k
+                    ),
+                    ret: Ty::Void,
+                    fails,
                 }
-                ok(
+            }
+            "seekStart" => ok(
+                format!("({{ {} (void)zr_cur_seek({}, 0); }})", ptr, a),
+                Ty::Void,
+            ),
+            "move" => ok(
+                format!("({{ {} zr_cur_move({}, {}); }})", ptr, a, arg(self, 0)),
+                Ty::Void,
+            ),
+            "insertAt" => {
+                let i = arg(self, 0);
+                let x = arg(self, 1);
+                let rt = self.result_ty(&Ty::Ref(Box::new(el.clone())), span);
+                fail(
                     format!(
-                        "({{ {} {} _x = {}; {}[{}->n] = _x; &{}[{}->n++]; }})",
-                        ptr, ec, x, data, a, data, a
+                        "({{ {} {} _x = {}; static {} _none; {} *_e = &_none; uint8_t _st = zr_cur_seek({}, {}); if (!_st) {{ {} }} ({}){{_e, _st}}; }})",
+                        ptr,
+                        ec,
+                        x,
+                        ec,
+                        ec,
+                        a,
+                        i,
+                        arr.put(Where::Cursor),
+                        rt
                     ),
                     Ty::Ref(Box::new(el)),
                 )
             }
-            "pop" => {
+            "removeAt" => {
+                let i = arg(self, 0);
                 let rt = res(self);
                 fail(
                     format!(
-                        "({{ {} {} _v = {{0}}; uint8_t _s = 192; if ({}->n > 0) {{ _v = {}[--{}->n]; _s = 0; }} ({}){{_v, _s}}; }})",
-                        ptr, ec, a, data, a, rt
+                        "({{ {} {} _v = {{0}}; uint8_t _s = zr_cur_seek({}, {}); if (!_s) {{ _s = 192; {} }} ({}){{_v, _s}}; }})",
+                        ptr,
+                        ec,
+                        a,
+                        i,
+                        arr.take(Where::After),
+                        rt
                     ),
                     el,
                 )
             }
-            "clear" => ok(format!("({{ {} {}->n = 0; }})", ptr, a), Ty::Void),
             "truncate" => {
                 let n = arg(self, 0);
+                let body = if lay == Layout::Cur {
+                    format!(
+                        "while (zr_cur_len({a}) > _n) zr_cur_release({a}, zr_cur_take_back({a}), sizeof({ec}));",
+                        a = a,
+                        ec = ec
+                    )
+                } else {
+                    format!("if (_n < {a}->n) {a}->n = _n;", a = a)
+                };
                 ok(
                     format!(
-                        "({{ {} int64_t _n = {}; if (_n < {}->n && _n >= 0) {}->n = _n; }})",
-                        ptr, n, a, a
+                        "({{ {} int64_t _n = {}; if (_n < 0) _n = 0; {} }})",
+                        ptr, n, body
                     ),
                     Ty::Void,
                 )
             }
-            "reverse" => ok(
-                format!(
-                    "({{ {} for (int64_t _i = 0, _j = {}->n - 1; _i < _j; _i++, _j--) {{ {} _t = {}[_i]; {}[_i] = {}[_j]; {}[_j] = _t; }} }})",
-                    ptr, a, ec, data, data, data, data
-                ),
-                Ty::Void,
-            ),
+            "reverse" => {
+                let code = if lay == Layout::Cur {
+                    // The index is reordered; the elements stay where they are (STDLIB §7.1).
+                    format!(
+                        "({{ {p} int64_t _at = zr_cur_gather({a}); for (int64_t _i = 0, _j = {a}->bn - 1; _i < _j; _i++, _j--) {{ uint32_t _t = {a}->bp[_i]; {a}->bp[_i] = {a}->bp[_j]; {a}->bp[_j] = _t; }} zr_cur_seek({a}, _at); }})",
+                        p = ptr,
+                        a = a
+                    )
+                } else {
+                    format!(
+                        "({{ {} for (int64_t _i = 0, _j = {} - 1; _i < _j; _i++, _j--) {{ {} _t = {}; {} = {}; {} = _t; }} }})",
+                        ptr,
+                        len,
+                        ec,
+                        arr.at("_i"),
+                        arr.at("_i"),
+                        arr.at("_j"),
+                        arr.at("_j")
+                    )
+                };
+                ok(code, Ty::Void)
+            }
             "swap" => {
                 let i = arg(self, 0);
                 let j = arg(self, 1);
+                let body = if lay == Layout::Cur {
+                    format!(
+                        "uint32_t *_pi = _i < {a}->bn ? &{a}->bp[_i] : &{a}->ap[_i - {a}->bn], *_pj = _j < {a}->bn ? &{a}->bp[_j] : &{a}->ap[_j - {a}->bn]; uint32_t _t = *_pi; *_pi = *_pj; *_pj = _t;",
+                        a = a
+                    )
+                } else {
+                    format!(
+                        "{} _t = {}; {} = {}; {} = _t;",
+                        ec,
+                        arr.at("_i"),
+                        arr.at("_i"),
+                        arr.at("_j"),
+                        arr.at("_j")
+                    )
+                };
                 ok(
                     format!(
-                        "({{ {} int64_t _i = zr_ix({}, {}->n, {}), _j = zr_ix({}, {}->n, {}); {} _t = {}[_i]; {}[_i] = {}[_j]; {}[_j] = _t; }})",
-                        ptr, i, a, loc, j, a, loc, ec, data, data, data, data
+                        "({{ {} int64_t _i = zr_ix({}, {}, {}), _j = zr_ix({}, {}, {}); {} }})",
+                        ptr, i, len, loc, j, len, loc, body
                     ),
                     Ty::Void,
                 )
@@ -3319,8 +3602,12 @@ impl<'p, 'a> Gen<'p, 'a> {
                 let x = arg(self, 0);
                 ok(
                     format!(
-                        "({{ {} {} _x = {}; for (int64_t _i = 0; _i < {}->n; _i++) {}[_i] = _x; }})",
-                        ptr, ec, x, a, data
+                        "({{ {} {} _x = {}; for (int64_t _i = 0; _i < {}; _i++) {} = _x; }})",
+                        ptr,
+                        ec,
+                        x,
+                        len,
+                        arr.at("_i")
                     ),
                     Ty::Void,
                 )
@@ -3330,8 +3617,12 @@ impl<'p, 'a> Gen<'p, 'a> {
                 let f = arg(self, 1);
                 ok(
                     format!(
-                        "({{ {} int64_t _i = {}; _i >= 0 && _i < {}->n ? {}[_i] : {}; }})",
-                        ptr, i, a, data, f
+                        "({{ {} int64_t _i = {}; _i >= 0 && _i < {} ? {} : {}; }})",
+                        ptr,
+                        i,
+                        len,
+                        arr.at("_i"),
+                        f
                     ),
                     el,
                 )
@@ -3341,27 +3632,35 @@ impl<'p, 'a> Gen<'p, 'a> {
                 if m == "contains" {
                     ok(
                         format!(
-                            "({{ {} {} _x = {}; bool _f = false; for (int64_t _i = 0; _i < {}->n; _i++) if ({}[_i] == _x) {{ _f = true; break; }} _f; }})",
-                            ptr, ec, x, a, data
+                            "({{ {} {} _x = {}; bool _f = false; for (int64_t _i = 0; _i < {}; _i++) if ({} == _x) {{ _f = true; break; }} _f; }})",
+                            ptr,
+                            ec,
+                            x,
+                            len,
+                            arr.at("_i")
                         ),
                         Ty::bool(),
                     )
                 } else {
                     fail(
                         format!(
-                            "({{ {} {} _x = {}; zr_res_i64 _r = {{0, 195}}; for (int64_t _i = 0; _i < {}->n; _i++) if ({}[_i] == _x) {{ _r.v = _i; _r.s = 0; break; }} _r; }})",
-                            ptr, ec, x, a, data
+                            "({{ {} {} _x = {}; zr_res_i64 _r = {{0, 195}}; for (int64_t _i = 0; _i < {}; _i++) if ({} == _x) {{ _r.v = _i; _r.s = 0; break; }} _r; }})",
+                            ptr,
+                            ec,
+                            x,
+                            len,
+                            arr.at("_i")
                         ),
                         Ty::i64(),
                     )
                 }
             }
             "sum" if matches!(el, Ty::Prim(_)) => {
-                let add = self.arith_code(BinOp::Add, "_t", &format!("{}[_i]", data), &el, span);
+                let add = self.arith_code(BinOp::Add, "_t", &arr.at("_i"), &el, span);
                 ok(
                     format!(
-                        "({{ {} {} _t = 0; for (int64_t _i = 0; _i < {}->n; _i++) _t = {}; _t; }})",
-                        ptr, ec, a, add
+                        "({{ {} {} _t = 0; for (int64_t _i = 0; _i < {}; _i++) _t = {}; _t; }})",
+                        ptr, ec, len, add
                     ),
                     el,
                 )
@@ -3371,8 +3670,15 @@ impl<'p, 'a> Gen<'p, 'a> {
                 let cmp = if m == "min" { "<" } else { ">" };
                 fail(
                     format!(
-                        "({{ {} {} _r = {{0, 192}}; if ({}->n) {{ _r.v = {}[0]; _r.s = 0; for (int64_t _i = 1; _i < {}->n; _i++) if ({}[_i] {} _r.v) _r.v = {}[_i]; }} _r; }})",
-                        ptr, rt, a, data, a, data, cmp, data
+                        "({{ {} {} _r = {{0, 192}}; if ({}) {{ _r.v = {}; _r.s = 0; for (int64_t _i = 1; _i < {}; _i++) if ({} {} _r.v) _r.v = {}; }} _r; }})",
+                        ptr,
+                        rt,
+                        len,
+                        arr.at("0"),
+                        len,
+                        arr.at("_i"),
+                        cmp,
+                        arr.at("_i")
                     ),
                     el,
                 )
@@ -3380,7 +3686,6 @@ impl<'p, 'a> Gen<'p, 'a> {
             "sort" | "stableSort" | "sortDescending"
                 if args.is_empty() && (matches!(el, Ty::Prim(_)) || el.is_string()) =>
             {
-                // Insertion-merge: a stable merge sort over a scratch copy.
                 let less = if el.is_string() {
                     "zr_cmp(_x, _y) < 0".to_string()
                 } else {
@@ -3394,28 +3699,71 @@ impl<'p, 'a> Gen<'p, 'a> {
                     less
                 };
                 self.used_scratch = true;
+                // A stable merge sort over a scratch copy: of the elements, or on a cursor
+                // array of its index, so the elements stay where they are.
+                let (setup, item, value, finish) = match lay {
+                    Layout::Cur => (
+                        format!(
+                            "int64_t _at = zr_cur_gather({a}); int64_t _n = {a}->bn; uint32_t *_d = {a}->bp;",
+                            a = a
+                        ),
+                        "uint32_t".to_string(),
+                        format!("(({}*){}->data)", ec, a),
+                        format!("zr_cur_seek({}, _at);", a),
+                    ),
+                    Layout::Capped => (
+                        format!("int64_t _n = {a}->n; {ec} *_d = {a}->e;", a = a, ec = ec),
+                        ec.clone(),
+                        String::new(),
+                        String::new(),
+                    ),
+                    _ => (
+                        format!(
+                            "int64_t _n = {a}->n; {ec} *_d = ({ec}*){a}->p;",
+                            a = a,
+                            ec = ec
+                        ),
+                        ec.clone(),
+                        String::new(),
+                        String::new(),
+                    ),
+                };
+                let get = |x: &str| {
+                    if value.is_empty() {
+                        x.to_string()
+                    } else {
+                        format!("{}[{}]", value, x)
+                    }
+                };
                 ok(
                     format!(
-                        "({{ {} int64_t _n = {}->n; {} *_d = {}; {} *_tmp = ({}*)zr_scratch_begin().p; for (int64_t _w = 1; _w < _n; _w *= 2) {{ for (int64_t _lo = 0; _lo < _n; _lo += 2 * _w) {{ int64_t _mid = _lo + _w < _n ? _lo + _w : _n, _hi = _lo + 2 * _w < _n ? _lo + 2 * _w : _n, _i = _lo, _j = _mid, _k = _lo; while (_i < _mid && _j < _hi) {{ {} _x = _d[_j], _y = _d[_i]; if ({}) _tmp[_k++] = _d[_j++]; else _tmp[_k++] = _d[_i++]; }} while (_i < _mid) _tmp[_k++] = _d[_i++]; while (_j < _hi) _tmp[_k++] = _d[_j++]; }} memcpy(_d, _tmp, (size_t)_n * sizeof *_d); }} }})",
-                        ptr, a, ec, data, ec, ec, ec, less
+                        "({{ {ptr} {setup} {item} *_tmp = ({item}*)zr_scratch_begin().p; for (int64_t _w = 1; _w < _n; _w *= 2) {{ for (int64_t _lo = 0; _lo < _n; _lo += 2 * _w) {{ int64_t _mid = _lo + _w < _n ? _lo + _w : _n, _hi = _lo + 2 * _w < _n ? _lo + 2 * _w : _n, _i = _lo, _j = _mid, _k = _lo; while (_i < _mid && _j < _hi) {{ {ec} _x = {gj}, _y = {gi}; if ({less}) _tmp[_k++] = _d[_j++]; else _tmp[_k++] = _d[_i++]; }} while (_i < _mid) _tmp[_k++] = _d[_i++]; while (_j < _hi) _tmp[_k++] = _d[_j++]; }} memcpy(_d, _tmp, (size_t)_n * sizeof *_d); }} {finish} }})",
+                        ptr = ptr,
+                        setup = setup,
+                        item = item,
+                        ec = ec,
+                        gj = get("_d[_j]"),
+                        gi = get("_d[_i]"),
+                        less = less,
+                        finish = finish
                     ),
                     Ty::Void,
                 )
             }
             "append" if is_u8 => {
-                let k = format!("zr_into({})", a);
+                if matches!(lay, Layout::Capped | Layout::Cur) {
+                    return ok(
+                        self.unsupported(span, "`append` to a capped or cursor array"),
+                        Ty::Void,
+                    );
+                }
+                let k = format!("zr_into((zr_vec*){})", a);
                 let (pre, writes) = if self.is_text(&args[0].expr) {
                     self.text(&args[0].expr, &k)
                 } else {
                     let s = arg(self, 0);
                     (String::new(), format!("zr_w_str({}, {}); ", k, s))
                 };
-                if capped {
-                    return ok(
-                        self.unsupported(span, "`append` to a capped array"),
-                        Ty::Void,
-                    );
-                }
                 ok(format!("({{ {} {} {} }})", ptr, pre, writes), Ty::Void)
             }
             _ => {
@@ -3439,13 +3787,13 @@ impl<'p, 'a> Gen<'p, 'a> {
         let E::Binary { op, lhs, rhs } = &e.kind else {
             return;
         };
-        if *op != BinOp::InsertEnd {
-            let u = self.unsupported(e.span, "inserting at the start or at a cursor");
-            stmts.push_str(&format!("(void){}; ", u));
-            return;
-        }
+        let at = match op {
+            BinOp::InsertEnd => Where::End,
+            BinOp::InsertFront => Where::Front,
+            _ => Where::Cursor,
+        };
         if let E::Binary {
-            op: BinOp::InsertEnd,
+            op: BinOp::InsertEnd | BinOp::InsertFront | BinOp::InsertCursor,
             ..
         } = &lhs.kind
         {
@@ -3454,30 +3802,40 @@ impl<'p, 'a> Gen<'p, 'a> {
             let (p, _) = self.place(lhs);
             stmts.push_str(&format!("__typeof__({}) *_arr = &({}); ", p, p));
         }
-        let arr = self.ty(lhs).unref().clone();
-        let Some(el) = arr.elem().cloned() else {
+        let arr_t = self.ty(lhs).unref().clone();
+        let (Some(el), Some(lay)) = (arr_t.elem().cloned(), layout(&arr_t)) else {
             let u = self.unsupported(e.span, "this insertion");
             stmts.push_str(&format!("(void){}; ", u));
             return;
         };
         let ec = self.cty(&el, e.span);
-        let x = self.expr(rhs, &el);
-        match &arr {
-            Ty::Array(_, k) if k.cap == CapKind::Capped => {
-                *fails = true;
-                stmts.push_str(&format!("{{ {} _x = {}; if (_arr->n < {}) _arr->e[_arr->n++] = _x; else if (!_st) _st = 193; }} ", ec, x, k.size));
-            }
-            _ => stmts.push_str(&format!(
-                "{{ {} _x = {}; (({}*)_arr->p)[_arr->n++] = _x; }} ",
-                ec, x, ec
-            )),
+        let cap = match &arr_t {
+            Ty::Array(_, k) => k.size,
+            _ => 0,
+        };
+        if lay == Layout::Capped {
+            *fails = true;
         }
+        let x = self.expr(rhs, &el);
+        let arr = Arr {
+            a: "_arr".into(),
+            lay,
+            ec: ec.clone(),
+            cap,
+        };
+        stmts.push_str(&format!(
+            "{{ {} _x = {}; {} *_e; {} (void)_e; }} ",
+            ec,
+            x,
+            ec,
+            arr.put(at)
+        ));
     }
 
     fn remove_op(&mut self, op: PostfixOp, x: &Expr, span: Span) -> CallOut {
         let t = self.ty(x);
-        let arr = t.unref().clone();
-        let Some(el) = arr.elem().cloned() else {
+        let arr_t = t.unref().clone();
+        let (Some(el), Some(lay)) = (arr_t.elem().cloned(), layout(&arr_t)) else {
             let u = self.unsupported(span, "this removal");
             return CallOut {
                 code: u,
@@ -3485,31 +3843,181 @@ impl<'p, 'a> Gen<'p, 'a> {
                 fails: false,
             };
         };
-        if op != PostfixOp::RemoveEnd {
-            let u = self.unsupported(span, "removing at the start or at a cursor");
-            return CallOut {
-                code: u,
-                ret: el,
-                fails: false,
-            };
-        }
+        let at = match op {
+            PostfixOp::RemoveEnd => Where::End,
+            PostfixOp::RemoveFront => Where::Front,
+            PostfixOp::RemoveBefore => Where::Before,
+            _ => Where::After,
+        };
         let ec = self.cty(&el, span);
         let rt = self.result_ty(&el, span);
-        let capped = matches!(arr, Ty::Array(_, k) if k.cap == CapKind::Capped);
         let (p, _) = self.place(x);
-        let data = if capped {
-            "_a->e".to_string()
-        } else {
-            format!("(({}*)_a->p)", ec)
+        let arr = Arr {
+            a: "_a".into(),
+            lay,
+            ec: ec.clone(),
+            cap: 0,
         };
         let code = format!(
-            "({{ __typeof__({}) *_a = &({}); {} _v = {{0}}; uint8_t _s = 192; if (_a->n > 0) {{ _v = {}[--_a->n]; _s = 0; }} ({}){{_v, _s}}; }})",
-            p, p, ec, data, rt
+            "({{ __typeof__({}) *_a = &({}); {} _v = {{0}}; uint8_t _s = 192; {} ({}){{_v, _s}}; }})",
+            p,
+            p,
+            ec,
+            arr.take(at),
+            rt
         );
         CallOut {
             code,
             ret: el,
             fails: true,
+        }
+    }
+}
+
+/// How an array's storage is laid out.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Layout {
+    /// `zr_vec`: on a data stack, changing only at its end.
+    Vec,
+    /// `zr_deq`: on a data stack, changing at its start too.
+    Deq,
+    /// `zr_cur`: a cursor array: data and index on two data stacks.
+    Cur,
+    /// Inline in its parent: `{n, e[k]}`.
+    Capped,
+    /// A slice or a view: `zr_slice`.
+    Slice,
+}
+
+fn layout(t: &Ty) -> Option<Layout> {
+    match t.unref() {
+        Ty::Array(_, k) if k.cap == CapKind::Capped => Some(Layout::Capped),
+        Ty::Array(_, k) if k.has_cursor() => Some(Layout::Cur),
+        Ty::Array(_, k) if k.push_front() || k.pop_front() => Some(Layout::Deq),
+        Ty::Array(..) => Some(Layout::Vec),
+        Ty::Slice(_) | Ty::View(_) => Some(Layout::Slice),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Where {
+    End,
+    Front,
+    Cursor,
+    Before,
+    After,
+}
+
+/// An array reached through the pointer `a`, for generating its operations.
+struct Arr {
+    a: String,
+    lay: Layout,
+    ec: String,
+    cap: u64,
+}
+
+impl Arr {
+    fn len(&self) -> String {
+        match self.lay {
+            Layout::Cur => format!("zr_cur_len({})", self.a),
+            _ => format!("{}->n", self.a),
+        }
+    }
+
+    /// The element at logical position `i`, as an lvalue.
+    fn at(&self, i: &str) -> String {
+        match self.lay {
+            Layout::Capped => format!("{}->e[{}]", self.a, i),
+            Layout::Cur => format!(
+                "(({}*){}->data)[zr_cur_at({}, {})]",
+                self.ec, self.a, self.a, i
+            ),
+            _ => format!("(({}*){}->p)[{}]", self.ec, self.a, i),
+        }
+    }
+
+    /// Statements that store `_x` as a new element and point `_e` at it. A full capped
+    /// array stores nothing, sets `_st` to FULL, and points `_e` at its last element (DESIGN §4.7).
+    fn put(&self, at: Where) -> String {
+        let (a, ec) = (&self.a, &self.ec);
+        match (self.lay, at) {
+            (Layout::Capped, _) => format!(
+                "if ({a}->n < {cap}) {{ _e = &{a}->e[{a}->n++]; *_e = _x; }} else {{ _e = &{a}->e[{a}->n - 1]; if (!_st) _st = 193; }}",
+                a = a,
+                cap = self.cap
+            ),
+            (Layout::Vec | Layout::Deq, Where::End) => {
+                format!("_e = &(({ec}*){a}->p)[{a}->n++]; *_e = _x;", a = a, ec = ec)
+            }
+            (Layout::Deq, Where::Front) => format!(
+                "{a}->p = ({ec}*){a}->p - 1; {a}->n++; _e = ({ec}*){a}->p; *_e = _x;",
+                a = a,
+                ec = ec
+            ),
+            (Layout::Cur, w) => {
+                let f = match w {
+                    Where::Front => "zr_cur_push_front",
+                    Where::Cursor => "zr_cur_insert",
+                    _ => "zr_cur_push",
+                };
+                format!(
+                    "{{ uint32_t _sl = {f}({a}, sizeof({ec})); _e = &(({ec}*){a}->data)[_sl]; *_e = _x; }}",
+                    f = f,
+                    a = a,
+                    ec = ec
+                )
+            }
+            _ => "_e = NULL;".into(),
+        }
+    }
+
+    /// Statements that take out an element into `_v`, setting `_s` to 0 when there was one.
+    fn take(&self, at: Where) -> String {
+        let (a, ec) = (&self.a, &self.ec);
+        match (self.lay, at) {
+            (Layout::Capped, _) => format!(
+                "if ({a}->n > 0) {{ _v = {a}->e[--{a}->n]; _s = 0; }}",
+                a = a
+            ),
+            (Layout::Vec, _) => format!(
+                "if ({a}->n > 0) {{ _v = (({ec}*){a}->p)[--{a}->n]; _s = 0; }}",
+                a = a,
+                ec = ec
+            ),
+            (Layout::Deq, Where::Front) => format!(
+                "if ({a}->n > 0) {{ _v = (({ec}*){a}->p)[0]; {a}->p = ({ec}*){a}->p + 1; {a}->n--; _s = 0; zr_deq_settle({a}); }}",
+                a = a,
+                ec = ec
+            ),
+            (Layout::Deq, _) => format!(
+                "if ({a}->n > 0) {{ _v = (({ec}*){a}->p)[--{a}->n]; _s = 0; zr_deq_settle({a}); }}",
+                a = a,
+                ec = ec
+            ),
+            (Layout::Cur, w) => {
+                let f = match w {
+                    Where::Front => "zr_cur_take_front",
+                    Where::Before => "zr_cur_take_before",
+                    Where::After => "zr_cur_take_after",
+                    _ => "zr_cur_take_back",
+                };
+                format!(
+                    "{{ uint32_t _sl = {f}({a}); if (_sl != UINT32_MAX) {{ _v = (({ec}*){a}->data)[_sl]; zr_cur_release({a}, _sl, sizeof({ec})); _s = 0; }} }}",
+                    f = f,
+                    a = a,
+                    ec = ec
+                )
+            }
+            (Layout::Slice, _) => String::new(),
+        }
+    }
+
+    fn clear(&self) -> String {
+        match self.lay {
+            Layout::Cur => format!("zr_cur_clear({});", self.a),
+            Layout::Deq => format!("{a}->n = 0; {a}->p = {a}->mid;", a = self.a),
+            _ => format!("{}->n = 0;", self.a),
         }
     }
 }

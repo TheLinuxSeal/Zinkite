@@ -64,6 +64,139 @@ static ZR_UNUSED int64_t zr_sm(void) {
 
 static ZR_UNUSED void zr_sr(int64_t m) { zr_scratch_top = zr_scratch_base + m; }
 
+/* An array that also changes at its start (DESIGN §4.3): its elements are contiguous,
+ * starting in the middle of the stack's reservation, so either end can grow. */
+typedef struct { void *p; int64_t n; void *mid; } zr_deq;
+
+static ZR_UNUSED zr_deq zr_deq_new(void *base) {
+    zr_deq d;
+    d.mid = (char *)base + ZR_STACK_BYTES / 2;
+    d.p = d.mid;
+    d.n = 0;
+    return d;
+}
+
+/* Back to the middle when empty, so a queue doesn't drift through the reservation. */
+static ZR_UNUSED void zr_deq_settle(zr_deq *d) { if (d->n == 0) d->p = d->mid; }
+
+/* A cursor array (DESIGN §4.3, §4.5): elements live in a data array and never move, so
+ * references stay valid; the order is an index of 32-bit slot numbers, kept as two
+ * deques, the entries before the cursor and those after it. Removals leave holes that
+ * the next insert reuses, through a free list inside the holes for elements of at least
+ * 4 bytes, and a side list for smaller ones. Two data stacks: the data, and the index. */
+typedef struct {
+    char *data;
+    int64_t used;    /* slots ever used */
+    int64_t freeh;   /* first free hole, plus one; 0 when there is none */
+    uint32_t *side;  /* free holes, for elements under 4 bytes */
+    int64_t nside;
+    uint32_t *bp, *ap, *bmid, *amid;
+    int64_t bn, an;  /* entries before and after the cursor */
+} zr_cur;
+
+static ZR_UNUSED zr_cur zr_cur_new(void *data, void *index) {
+    zr_cur c;
+    memset(&c, 0, sizeof c);
+    c.data = (char *)data;
+    c.side = (uint32_t *)((char *)data + ZR_STACK_BYTES / 2);
+    c.bmid = c.bp = (uint32_t *)((char *)index + ZR_STACK_BYTES / 4);
+    c.amid = c.ap = (uint32_t *)((char *)index + ZR_STACK_BYTES / 4 * 3);
+    return c;
+}
+
+static ZR_UNUSED int64_t zr_cur_len(const zr_cur *c) { return c->bn + c->an; }
+
+/* The slot of the element at logical position i. */
+static ZR_UNUSED uint32_t zr_cur_at(const zr_cur *c, int64_t i) { return i < c->bn ? c->bp[i] : c->ap[i - c->bn]; }
+
+static ZR_UNUSED uint32_t zr_cur_slot(zr_cur *c, size_t esz) {
+    if (esz >= 4 && c->freeh) {
+        uint32_t s = (uint32_t)(c->freeh - 1);
+        uint32_t next;
+        memcpy(&next, c->data + (size_t)s * esz, 4);
+        c->freeh = next;
+        return s;
+    }
+    if (esz < 4 && c->nside) return c->side[--c->nside];
+    return (uint32_t)c->used++;
+}
+
+static ZR_UNUSED void zr_cur_release(zr_cur *c, uint32_t s, size_t esz) {
+    if (esz >= 4) {
+        uint32_t next = (uint32_t)c->freeh;
+        memcpy(c->data + (size_t)s * esz, &next, 4);
+        c->freeh = (int64_t)s + 1;
+    } else {
+        c->side[c->nside++] = s;
+    }
+}
+
+static void zr_cur_settle(zr_cur *c) {
+    if (c->bn == 0) c->bp = c->bmid;
+    if (c->an == 0) c->ap = c->amid;
+}
+
+/* Where an insert puts its element: at the cursor, the start or the end. */
+static ZR_UNUSED uint32_t zr_cur_insert(zr_cur *c, size_t esz) { uint32_t s = zr_cur_slot(c, esz); c->bp[c->bn++] = s; return s; }
+static ZR_UNUSED uint32_t zr_cur_push_front(zr_cur *c, size_t esz) { uint32_t s = zr_cur_slot(c, esz); *--c->bp = s; c->bn++; return s; }
+static ZR_UNUSED uint32_t zr_cur_push(zr_cur *c, size_t esz) { uint32_t s = zr_cur_slot(c, esz); c->ap[c->an++] = s; return s; }
+
+/* The slot an removal takes out of the order, or UINT32_MAX when there is none. */
+static ZR_UNUSED uint32_t zr_cur_take_before(zr_cur *c) { if (!c->bn) return UINT32_MAX; uint32_t s = c->bp[--c->bn]; zr_cur_settle(c); return s; }
+static ZR_UNUSED uint32_t zr_cur_take_after(zr_cur *c) { if (!c->an) return UINT32_MAX; uint32_t s = *c->ap++; c->an--; zr_cur_settle(c); return s; }
+static ZR_UNUSED uint32_t zr_cur_take_front(zr_cur *c) {
+    uint32_t s;
+    if (c->bn) { s = *c->bp++; c->bn--; }
+    else if (c->an) { s = *c->ap++; c->an--; }
+    else return UINT32_MAX;
+    zr_cur_settle(c);
+    return s;
+}
+static ZR_UNUSED uint32_t zr_cur_take_back(zr_cur *c) {
+    uint32_t s;
+    if (c->an) s = c->ap[--c->an];
+    else if (c->bn) s = c->bp[--c->bn];
+    else return UINT32_MAX;
+    zr_cur_settle(c);
+    return s;
+}
+
+/* Moves the cursor to position i, from 0 to the length: POSITION otherwise (DESIGN §4.9). */
+static ZR_UNUSED uint8_t zr_cur_seek(zr_cur *c, int64_t i) {
+    if (i < 0 || i > c->bn + c->an) return 196;
+    if (i < c->bn) {
+        int64_t k = c->bn - i;
+        c->ap -= k;
+        memcpy(c->ap, c->bp + i, (size_t)k * 4);
+        c->an += k;
+        c->bn = i;
+    } else if (i > c->bn) {
+        int64_t k = i - c->bn;
+        memcpy(c->bp + c->bn, c->ap, (size_t)k * 4);
+        c->bn += k;
+        c->ap += k;
+        c->an -= k;
+    }
+    zr_cur_settle(c);
+    return 0;
+}
+
+/* A relative move, clamped at the edges. */
+static ZR_UNUSED void zr_cur_move(zr_cur *c, int64_t n) {
+    int64_t to = c->bn + n, len = c->bn + c->an;
+    zr_cur_seek(c, to < 0 ? 0 : to > len ? len : to);
+}
+
+static ZR_UNUSED void zr_cur_clear(zr_cur *c) {
+    c->used = c->freeh = c->nside = c->bn = c->an = 0;
+    c->bp = c->bmid;
+    c->ap = c->amid;
+}
+
+/* All of the order in the entries before the cursor, contiguous, for reordering; gives the
+ * cursor's position, to put back afterwards. */
+static ZR_UNUSED int64_t zr_cur_gather(zr_cur *c) { int64_t at = c->bn; zr_cur_seek(c, c->bn + c->an); return at; }
+
 /* ------------------------------------------------------------ output (DESIGN §4.13) */
 
 static char zr_obuf[1 << 16];
@@ -486,6 +619,61 @@ static ZR_UNUSED zr_res_f64 zr_parse_f64(zr_slice s) {
     r.v = v;
     r.s = 0;
     return r;
+}
+
+/* ------------------------------------------------------------ input (STDLIB §4.1) */
+
+static uint8_t zr_ibuf[1 << 16];
+static size_t zr_ipos, zr_ilen;
+
+/* 0 and a byte, END at the end of input, or the error's number. */
+static uint8_t zr_getc(int fd, uint8_t *out) {
+    (void)fd;
+    if (zr_ipos == zr_ilen) {
+        ssize_t r;
+        do { r = read(0, zr_ibuf, sizeof zr_ibuf); } while (r < 0 && errno == EINTR);
+        if (r < 0) return (uint8_t)(errno < 192 ? errno : 5);
+        if (r == 0) return 194;
+        zr_ipos = 0;
+        zr_ilen = (size_t)r;
+    }
+    *out = zr_ibuf[zr_ipos++];
+    return 0;
+}
+
+/* Appends everything left on the input to `v`. */
+static ZR_UNUSED uint8_t zr_read_all(int fd, zr_vec *v) {
+    for (;;) {
+        if (zr_ipos < zr_ilen) {
+            memcpy((char *)v->p + v->n, zr_ibuf + zr_ipos, zr_ilen - zr_ipos);
+            v->n += (int64_t)(zr_ilen - zr_ipos);
+            zr_ipos = zr_ilen;
+        }
+        ssize_t r;
+        do { r = read(fd, (char *)v->p + v->n, 1 << 20); } while (r < 0 && errno == EINTR);
+        if (r < 0) return (uint8_t)(errno < 192 ? errno : 5);
+        if (r == 0) return 0;
+        v->n += r;
+    }
+}
+
+/* Clears `v`, reads one line into it, and views it without its line break: END when
+ * nothing is left (STDLIB §4.1). */
+static ZR_UNUSED uint8_t zr_next_line(int fd, zr_vec *v, zr_slice *out) {
+    v->n = 0;
+    uint8_t b;
+    uint8_t s = zr_getc(fd, &b);
+    if (s) { out->p = v->p; out->n = 0; return s; }
+    while (b != '\n') {
+        ((uint8_t *)v->p)[v->n++] = b;
+        s = zr_getc(fd, &b);
+        if (s == 194) break;
+        if (s) return s;
+    }
+    if (v->n > 0 && ((uint8_t *)v->p)[v->n - 1] == '\r') v->n--;
+    out->p = v->p;
+    out->n = v->n;
+    return 0;
 }
 
 /* ------------------------------------------------------------ the program's start */
