@@ -106,6 +106,7 @@ fn small_text() -> Ty {
             cursor: '.',
             end: '~',
             cap: CapKind::Capped,
+            size: 16,
         },
     )
 }

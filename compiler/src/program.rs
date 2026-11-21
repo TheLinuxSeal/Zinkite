@@ -715,11 +715,16 @@ impl<'a> Program<'a> {
                     Some(ast::Cap::Varint) => CapKind::Varint,
                     Some(ast::Cap::Chunked) => CapKind::Chunked,
                 };
+                let size = match &slots.cap {
+                    Some(ast::Cap::Int(n)) => *n,
+                    _ => 0,
+                };
                 let kind = ArrayKind {
                     start,
                     cursor,
                     end,
                     cap,
+                    size,
                 };
                 if cap == CapKind::Varint && !kind.is_frozen() {
                     diags.push(Diagnostic::error(t.span, "`*` is allowed only on frozen arrays, whose slots are all `.` (DESIGN §4.6)"));

@@ -30,6 +30,35 @@ pub enum Rank {
     Other,
 }
 
+/// Type-checks a program and, when it has no errors, generates its C.
+pub fn check_and_generate(
+    files: &[ast::File],
+    sources: &[SourceFile],
+) -> (Vec<(usize, Diagnostic)>, Option<String>) {
+    let mut prog = Program::collect(files);
+    let (diags, facts) = {
+        let mut c = Checker::new(&prog);
+        c.check_all();
+        (c.diags, c.facts)
+    };
+    let mut all = std::mem::take(&mut prog.diags);
+    all.extend(diags);
+    if all.iter().any(|d| d.1.severity == Severity::Error) {
+        return (all, None);
+    }
+    all.extend(crate::lifetimes::check(&prog, &facts, sources));
+    if all.iter().any(|d| d.1.severity == Severity::Error) {
+        return (all, None);
+    }
+    match crate::codegen::generate(&prog, &facts, sources) {
+        Ok(c) => (all, Some(c)),
+        Err(e) => {
+            all.extend(e);
+            (all, None)
+        }
+    }
+}
+
 /// Type-checks a whole program, then checks roots and lifetimes if it has no type
 /// errors. Returns each diagnostic with the index of its file.
 pub fn check(files: &[ast::File], sources: &[SourceFile]) -> Vec<(usize, Diagnostic)> {

@@ -1,6 +1,6 @@
-//! `zink`, the command-line tool (DESIGN §14.4). Only the front end exists so
-//! far, so the commands that work are `zink check`, `zink parse` and `zink lex`.
+//! `zink`, the command-line tool (DESIGN §14.4).
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use zink::diag::{self, Severity};
@@ -10,13 +10,16 @@ use zink::{lexer, sexpr};
 const USAGE: &str = "\
 usage: zink <command> [arguments]
 
-commands that work so far:
+commands:
+  zink run [-O] FILE [args...]  compile into the cache if needed, then run it
+  zink FILE [args...]           the same as `zink run`, for #!/usr/bin/env zink
+  zink build FILE -o OUT        compile to an executable, with the system C compiler at -O2
   zink check FILE...            parse and type-check each file as its own program
+  zink c FILE                   print the C generated for a program
+  zink cache clean              empty the cache
   zink parse [--tree] FILE...   parse each file and report errors; --tree prints the syntax tree
   zink lex FILE                 print the tokens of a file
-
-planned (DESIGN §14.4):
-  zink build FILE -o OUT, zink run FILE [args...], zink FILE [args...]";
+";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -24,24 +27,26 @@ fn main() -> ExitCode {
         Some("check") => check(&args[1..]),
         Some("parse") => parse(&args[1..]),
         Some("lex") => lex(&args[1..]),
-        Some("build" | "run") => {
-            eprintln!(
-                "zink: `{}` isn't implemented yet; only `zink check`, `zink parse` and `zink lex` work so far",
-                args[0]
-            );
-            ExitCode::from(2)
+        Some("run") => run(&args[1..]),
+        Some("build") => build(&args[1..]),
+        Some("c") => emit_c(&args[1..]),
+        Some("cache") if args.get(1).is_some_and(|a| a == "clean") => {
+            match zink::driver::clean_cache() {
+                Ok(n) => {
+                    eprintln!("removed {}", plural(n, "cached program"));
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("zink: {}", e);
+                    ExitCode::FAILURE
+                }
+            }
         }
         Some("-h" | "--help") | None => {
             println!("{}", USAGE);
             ExitCode::SUCCESS
         }
-        Some(other) if other.ends_with(".zn") => {
-            eprintln!(
-                "zink: running programs isn't implemented yet; try `zink check {}`",
-                other
-            );
-            ExitCode::from(2)
-        }
+        Some(other) if other.ends_with(".zn") || Path::new(other).is_file() => run(&args),
         Some(other) => {
             eprintln!("zink: unknown command `{}`\n\n{}", other, USAGE);
             ExitCode::from(2)
@@ -56,6 +61,89 @@ fn read(path: &str) -> Option<SourceFile> {
             eprintln!("zink: can't read {}: {}", path, e);
             None
         }
+    }
+}
+
+/// Compiles one program to C, printing its diagnostics.
+fn to_c(path: &str) -> Option<String> {
+    let file = read(path)?;
+    let (diags, c) = zink::compile_c(std::slice::from_ref(&file));
+    let mut errors = 0;
+    for d in &diags[0] {
+        eprint!("{}", diag::render(&file, d));
+        if d.severity == Severity::Error {
+            errors += 1;
+        }
+    }
+    if errors > 0 {
+        eprintln!("{} in {}", plural(errors, "error"), path);
+    }
+    c
+}
+
+fn run(args: &[String]) -> ExitCode {
+    let optimize = args.first().is_some_and(|a| a == "-O");
+    let rest = if optimize { &args[1..] } else { args };
+    let Some(path) = rest.first() else {
+        eprintln!("usage: zink run [-O] FILE [args...]");
+        return ExitCode::from(2);
+    };
+    let Some(c) = to_c(path) else {
+        return ExitCode::FAILURE;
+    };
+    match zink::driver::cached(&c, optimize) {
+        Ok(exe) => {
+            let e = zink::driver::exec(&exe, &rest[1..]);
+            eprintln!("zink: {}", e);
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("zink: {}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn build(args: &[String]) -> ExitCode {
+    let mut out = None;
+    let mut file = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "-o" {
+            out = args.get(i + 1).cloned();
+            i += 2;
+            continue;
+        }
+        file = Some(args[i].clone());
+        i += 1;
+    }
+    let (Some(file), Some(out)) = (file, out) else {
+        eprintln!("usage: zink build FILE -o OUT");
+        return ExitCode::from(2);
+    };
+    let Some(c) = to_c(&file) else {
+        return ExitCode::FAILURE;
+    };
+    match zink::driver::compile(&c, Path::new(&out), true) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("zink: {}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn emit_c(args: &[String]) -> ExitCode {
+    let [path] = args else {
+        eprintln!("usage: zink c FILE");
+        return ExitCode::from(2);
+    };
+    match to_c(path) {
+        Some(c) => {
+            print!("{}", c);
+            ExitCode::SUCCESS
+        }
+        None => ExitCode::FAILURE,
     }
 }
 

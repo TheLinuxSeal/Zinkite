@@ -3,7 +3,9 @@
 pub mod ast;
 pub mod builtins;
 pub mod check;
+pub mod codegen;
 pub mod diag;
+pub mod driver;
 pub mod flow;
 pub mod lexer;
 pub mod lifetimes;
@@ -47,4 +49,30 @@ pub fn check(files: &[SourceFile]) -> Vec<Vec<Diagnostic>> {
         v.sort_by_key(|d| d.span.start);
     }
     per_file
+}
+
+/// Checks a program and generates its C. Returns each file's diagnostics, and the C
+/// when there were no errors.
+pub fn compile_c(files: &[SourceFile]) -> (Vec<Vec<Diagnostic>>, Option<String>) {
+    let mut per_file = Vec::new();
+    let mut asts = Vec::new();
+    let mut parsed = true;
+    for f in files {
+        let (tree, diags) = parse(f);
+        parsed &= !diags.iter().any(|d| d.severity == Severity::Error);
+        per_file.push(diags);
+        asts.push(tree);
+    }
+    let mut c = None;
+    if parsed {
+        let (diags, code) = check::check_and_generate(&asts, files);
+        for (fi, d) in diags {
+            per_file[fi].push(d);
+        }
+        c = code;
+    }
+    for v in &mut per_file {
+        v.sort_by_key(|d| d.span.start);
+    }
+    (per_file, c)
 }

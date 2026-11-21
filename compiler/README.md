@@ -1,8 +1,8 @@
 # The Zinkite compiler
 
-The `zink` command, written in Rust (DESIGN §14.1). So far it has the front end:
-a lexer and a parser for `GRAMMAR.md` v2, and the first part of the type
-checker. Root inference and the C backend come next (DESIGN §14.3).
+The `zink` command, written in Rust (DESIGN §14.1): a lexer and a parser for
+`GRAMMAR.md` v2, the type checker, the lifetime checks of `REFERENCES.md`, and a
+C backend whose first milestone runs programs that use the core language.
 
 ## Building and testing
 
@@ -25,6 +25,11 @@ to make sure the checker never crashes.
 ## Using it
 
 ```
+zink run [-O] FILE [args]   compile into the cache if needed, then run the program
+zink FILE [args]            the same, for `#!/usr/bin/env zink`
+zink build FILE -o OUT      compile to an executable with the system C compiler at -O2
+zink c FILE                 print the generated C
+zink cache clean            empty the cache (`~/.cache/zink`)
 zink check FILE...          parse and type-check each file as its own program
 zink parse FILE...          report syntax errors, with the line and a caret
 zink parse --tree FILE      print the syntax tree, one statement per line
@@ -83,6 +88,28 @@ imports one gets a warning saying so. For the lifetime rules, a call into one of
 those packages is taken to return something rooted at everything it was given,
 and to remove from nothing.
 
+## The C backend
+
+`zink run` and `zink build` generate one C file for the program, with the runtime
+(`runtime/zink_rt.h`) at its top, and compile it with the system C compiler:
+`$CC`, `cc`, `gcc` or `clang` (DESIGN §12.5, §14.2). `zink run` builds at `-O0`
+and caches the executable by a hash of the C; `-O` builds at `-O2`. TinyCC, which
+DESIGN plans for `zink run`, isn't built in yet.
+
+The first milestone covers script files, classes, enums, constructors and methods,
+statuses, references, strings and interpolation, frozen, growable and capped arrays,
+slices, every statement form, casts and the integer rules, and for-each over arrays
+and text iterators. Bugs stop the program with the file and line, and exit status 1.
+
+Not yet: hash maps, generics, interfaces, cursor arrays and arrays that change at
+the start, lambdas and sorting with them, iterators in variables, comparing class
+values, and the library packages that aren't written yet (`zink.io`, `zink.cli` and
+the others), so `stdin` and files too. Using one is a clear error, not wrong code.
+
+An array on a data stack is a header `{p, n}` pointing at its elements, rather than
+the inline `[metadata][elements]` of DESIGN §11; each declaration of a growable
+local gets a data stack of its own.
+
 ## Layout
 
 | File | Contents |
@@ -100,7 +127,11 @@ and to remove from nothing.
 | `src/check.rs` | the type checker |
 | `src/flow.rs` | the state definite assignment tracks: what is assigned on every path, and on some |
 | `src/lifetimes.rs` | roots and lifetimes: rules S and R, function summaries, recursion |
+| `src/codegen.rs` | the C backend |
+| `src/driver.rs` | compiling the C, the cache, and running the result |
+| `runtime/zink_rt.h` | the runtime: data stacks, output, failures, checked arithmetic, text |
 | `src/main.rs` | the `zink` command |
 | `tests/parse.rs` | parser tests |
 | `tests/check.rs` | type checker tests |
 | `tests/lifetimes.rs` | lifetime tests, from `REFERENCES.md` §10 |
+| `tests/run.rs` | programs compiled to C, built and run |

@@ -57,6 +57,8 @@ pub struct ArrayKind {
     pub cursor: char,
     pub end: char,
     pub cap: CapKind,
+    /// A capped array's capacity, when it is a number; 0 otherwise.
+    pub size: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +80,7 @@ impl ArrayKind {
             cursor: '.',
             end: '.',
             cap: CapKind::None,
+            size: 0,
         }
     }
 
@@ -87,6 +90,7 @@ impl ArrayKind {
             cursor: '.',
             end: '>',
             cap: CapKind::None,
+            size: 0,
         }
     }
 
