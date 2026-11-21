@@ -70,7 +70,9 @@ Done:
   reference outlives what it points into), with a summary inferred for every
   function; rule R (no removal from an array while a reference into it is still
   used, including removals by called functions, for-each loops and `defer`);
-  references into removable arrays kept only in locals and parameters; no
+  references into removable arrays kept only in locals and parameters, also
+  when the array is a field of the same object (each such field is storage of
+  its own, like a root's part); no
   recursive call while a growable local is in scope; and no stored lambda that
   captures. A root can't be copied, passed or returned by value, or be a
   temporary (DESIGN §6.6).

@@ -401,7 +401,7 @@ fn ring_and_gap_buffers_end_references_when_they_change() {
     );
     rejects(
         "class Recent { i64[~.~4] q = []; i64&? last = null; mut void see(i64 x) { @_ = q +> x; last .= q[0]; } }\nvoid main() {}\n",
-        "`+>` can move the elements of `this`, and a field of `this` may hold a reference into it",
+        "a reference into `this.q`, whose elements can move, can be kept only in a local variable or a parameter",
     );
     ok(
         "class Log { i64[..>8] xs = []; i64&? first = null; mut void add(i64 x) { @_ = xs +> x; first .= xs[0]; } }\nvoid main() {}\n",
@@ -526,5 +526,61 @@ fn no_growable_local_during_a_recursive_call() {
     rejects(
         "i64 count(i64[..>] xs, i64 n) { if (n == 0) { return xs.len; } return count(xs, n - 1); }\n",
         "a growable value can't be passed by value into a recursive cycle",
+    );
+}
+
+#[test]
+fn a_removable_field_is_storage_of_its_own() {
+    // §10 test 34: a reference into an object's own removable or moving array can't be
+    // kept in another of its fields, even when the store and the change are in
+    // different methods.
+    rejects(
+        "root R {\n  i64[..~] xs = [];\n  i64&? last = null;\n  new() {}\n  mut void keep() { last .= xs[0]; }\n  mut void drop() { @_ = xs ->; }\n}\nvoid main() {}\n",
+        "a reference into `this.xs`, which can remove elements, can be kept only in a local variable or a parameter",
+    );
+    rejects(
+        "class Recent {\n  i64[~.~4] q = [];\n  i64&? last = null;\n  mut void keep() { last .= q[0]; }\n  mut void add(i64 x) { @_ = q +> x; }\n}\nvoid main() {}\n",
+        "a reference into `this.q`, whose elements can move",
+    );
+    let defs = "class Recent { i64[~.~4] q = []; }\nclass Holder { i64&? r = null; }";
+    // Reached through a nested value, a parameter, a local, or a called function.
+    rejects(
+        &format!(
+            "{}\nclass Outer {{ Recent rec = new Recent(); i64&? r = null; mut void f() {{ r .= rec.q[0]; }} }}\nvoid main() {{}}\n",
+            defs
+        ),
+        "a reference into the `q` of a `Recent` in `this`",
+    );
+    rejects(
+        &format!(
+            "{}\nvoid keep(Recent& rc, Holder& h) {{ h.r .= rc.q[0]; }}\nvoid main() {{}}\n",
+            defs
+        ),
+        "a reference into `rc.q`",
+    );
+    rejects(
+        &main_with(
+            defs,
+            "Recent rc = new Recent();\nHolder h = new Holder();\nh.r .= rc.q[0];",
+        ),
+        "a reference into `rc.q`",
+    );
+    rejects(
+        &main_with(
+            &format!("{}\nvoid put(Holder& h, i64& x) {{ h.r .= x; }}", defs),
+            "Recent rc = new Recent();\nHolder h = new Holder();\nput(h, rc.q[0]);",
+        ),
+        "a reference into `rc.q`",
+    );
+    // Each such field is checked on its own: a pop from one doesn't end references
+    // into another.
+    let two = "class Two {\n  i64[..~4] a = [];\n  i64[..~4] b = [];\n  mut void f() { i64& x = a[0]; @_ = b ->; println(\"${x}\"); }\n}";
+    ok(&main_with(two, ""));
+    rejects(
+        &main_with(
+            "class Two {\n  i64[..~4] a = [];\n  mut void g() { i64& x = a[0]; @_ = a ->; println(\"${x}\"); }\n}",
+            "",
+        ),
+        "`->` removes from `this.a` while `x` may still refer into it",
     );
 }

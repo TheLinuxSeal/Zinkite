@@ -744,7 +744,7 @@ parse(p, input);                    // void parse(Parser& state, string input)
 - **In a class, a second growable field is a compile error that suggests `root`, and so is a cursor-array field**, since a cursor array needs two regions: its data and its index.
 - **Speed**: each part is the top of its own data stack, as a local array is, and the compiler keeps each part's start and length in registers inside loops. Goose measured its root structs against passing the same arrays separately, over 32 million pushes: 85–88 ms either way.
 - **`root` is a keyword only at the start of a type declaration**, so variables and fields named `root` stay legal: `Node& root = tree.push(...)`.
-- **References into a part are rooted at that part** (Decided): a reference into `p.tokens` has the root `p.tokens`, which lives as long as `p`. A root's parts are separate storage, so rule R checks a removal from one part only against references into that part, and the pool exemption (`REFERENCES.md` §5.4) applies to references into a pool part (`REFERENCES.md` §8.2).
+- **References into a part are rooted at that part** (Decided): a reference into `p.tokens` has the root `p.tokens`, which lives as long as `p`. A root's parts are separate storage, so rule R checks a removal from one part only against references into that part, and the pool exemption (`REFERENCES.md` §5.4) applies to references into a pool part (`REFERENCES.md` §8.2). A field of any class holding an array that can remove or move elements is separate storage in the same way (`REFERENCES.md` §5.3).
 - **The name**: a root owns its parts' storage, so its variable bounds the life of every reference into them (§5.2).
 
 ---

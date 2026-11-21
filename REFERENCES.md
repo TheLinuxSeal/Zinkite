@@ -192,6 +192,7 @@ println("${top}");
 
 ### 5.3 Where references into removable arrays can be held
 - **Removable arrays**: references into one can be held only in local variables and parameters, never in fields, array elements or statics. The compiler can then see every reference that might still be used (Goose §5.2). A reference to a whole array, rather than into its elements, is different: it may be a field (§7.1).
+- **A field holding such an array is storage of its own**, like a root's part (§8.2). A reference into it is rooted at that field, however the object is reached: through `this`, a parameter, a local, a value nested in another, or a called function. So a method can't keep a reference into one of its object's removable arrays in another of its fields, and a removal from one field is checked only against references into that field.
 - **Grow-only and frozen arrays**: references into them can be stored anywhere rule S allows. For these arrays, `clear` and whole assignment are the only removals. The compiler records which fields and arrays hold references into each array, so rule R sees those holders too (Goose §5.1).
 
 ### 5.4 Capped arrays and pools
@@ -400,6 +401,7 @@ Goose marks the entry to a recursive cycle with `recursive fn`. Zinkite finds cy
 31. An insert into a ring that changes at both ends, or into a gap buffer, while a reference or slice into it is used afterwards is an error, directly or through a called function's summary.
 32. A slice, sort, comparison or text method of one while a reference to an element is used afterwards is an error; two slices of one held at once, and a slice taken inside a for-each over it by value, compile.
 33. Storing a reference into one in a field is an error.
+34. A method that keeps a reference into its object's removable array, or ring or gap buffer, in another of its fields is an error, and so is one reached through a parameter, a local, a nested value or a called function. A pop from one such field while a reference into another is used afterwards compiles.
 
 ---
 

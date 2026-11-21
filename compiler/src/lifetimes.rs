@@ -76,11 +76,22 @@ impl Var {
     }
 }
 
+/// A field of a class that is storage of its own for rule R: a root's growable field,
+/// on its own data stack (DESIGN §6.6), or any class's field holding an array that can
+/// remove or move elements (REFERENCES §5.3, §5.4). Named by its class, so it means the
+/// same field wherever it ends up: reached through a nested value, or mapped from a
+/// callee's parameter to the caller's argument.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+struct Part {
+    class: ClassId,
+    field: u32,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 struct Root {
     var: Var,
-    /// A part of a root (DESIGN §6.6), by field index: its own data stack.
-    part: Option<u32>,
+    /// A part of what the variable holds, when the reference is known to point into it.
+    part: Option<Part>,
     /// A reference to a whole array or map, rather than into its elements: it survives
     /// removals (REFERENCES §5.3, §7.1).
     whole: bool,
@@ -113,8 +124,8 @@ enum R {
     Root(Root),
     /// The roots of the references stored in the storage these roots name.
     Stored(Box<R>),
-    /// The part `f` of the storage these roots name.
-    Part(Box<R>, u32),
+    /// A part of the storage these roots name.
+    Part(Box<R>, Part),
     /// Result `k` of a call.
     Call(Rc<CallR>, usize),
     Union(Vec<R>),
@@ -870,29 +881,22 @@ impl<'p, 'a> Analysis<'p, 'a> {
             Var::Literal => "a string literal".to_string(),
             Var::Temp(..) => "a temporary".to_string(),
         };
-        match (r.part, r.var) {
-            (Some(p), Var::Local(_) | Var::Param(_) | Var::This) => {
-                let cls = self.root_class(f, r.var);
-                let field = cls.map_or(String::new(), |c| {
-                    self.prog.classes[c].fields[p as usize].name.clone()
-                });
-                format!("`{}.{}`", base.trim_matches('`'), field)
-            }
-            _ => base,
-        }
-    }
-
-    /// The class of the value a root variable holds, for naming its parts.
-    fn root_class(&self, f: &Func, v: Var) -> Option<ClassId> {
-        let t = match v {
-            Var::Local(i) => f.locals[i as usize].ty.clone(),
-            Var::Param(i) | Var::Formal(i) => f.params[i as usize].1.clone(),
-            Var::This => return Some(f.class),
-            _ => return None,
+        let Some(p) = r.part else { return base };
+        let holder = match r.var {
+            Var::Local(_) | Var::Param(_) | Var::This | Var::Static(_) => base.clone(),
+            Var::Formal(i) => format!("`{}`", f.params[i as usize].0),
+            _ => return base,
         };
-        match t.unref() {
-            Ty::Class(c, _) => Some(*c),
-            _ => None,
+        let field = &self.prog.classes[p.class].fields[p.field as usize].name;
+        let whole = Root { part: None, ..*r };
+        if matches!(self.root_ty(f, &whole), Some(Ty::Class(c, _)) if c == p.class) {
+            format!("`{}.{}`", holder.trim_matches('`'), field)
+        } else {
+            // Reached through a value nested in it.
+            format!(
+                "the `{}` of a `{}` in {}",
+                field, self.prog.classes[p.class].name, holder
+            )
         }
     }
 
@@ -910,13 +914,10 @@ impl<'p, 'a> Analysis<'p, 'a> {
         };
         match r.part {
             None => Some(whole),
-            Some(p) => match whole {
-                Ty::Class(c, _) => self.prog.classes[c]
-                    .fields
-                    .get(p as usize)
-                    .map(|f| f.ty.clone()),
-                _ => None,
-            },
+            Some(p) => self.prog.classes[p.class]
+                .fields
+                .get(p.field as usize)
+                .map(|f| f.ty.clone()),
         }
     }
 
@@ -1087,7 +1088,9 @@ impl<'p, 'a> Analysis<'p, 'a> {
         errs: &mut Vec<(Span, String, String)>,
     ) {
         for s in src {
-            if s.whole || (!s.var.is_cell() && !matches!(s.var, Var::Static(_))) {
+            // A reference into a local, a static, or a removable field of anything.
+            if s.whole || (!s.var.is_cell() && !matches!(s.var, Var::Static(_)) && s.part.is_none())
+            {
                 continue;
             }
             if let Some(t) = self.root_ty(f, s)
@@ -1796,8 +1799,13 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
 
     fn field_cell(&self, base: R, cls: ClassId, idx: usize) -> R {
         let c = &self.an.prog.classes[cls];
-        if c.kind == ClassKind::Root && starts_empty(&c.fields[idx].ty) {
-            R::Part(Box::new(base), idx as u32)
+        let ty = &c.fields[idx].ty;
+        if c.kind == ClassKind::Root && starts_empty(ty) || Analysis::removable_ty(ty) {
+            let part = Part {
+                class: cls,
+                field: idx as u32,
+            };
+            R::Part(Box::new(base), part)
         } else {
             base
         }
