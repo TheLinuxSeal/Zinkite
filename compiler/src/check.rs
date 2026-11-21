@@ -910,7 +910,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                 .map(|_| Rank::Widen),
             (Prim(a), Prim(b)) => Self::prim_rank(*a, *b),
             (Array(e, k), Slice(t) | View(t)) => {
-                (k.contiguous() && self.same(e, t)).then_some(Rank::Other)
+                (k.sliceable() && self.same(e, t)).then_some(Rank::Other)
             }
             (View(e), Slice(t)) => self.same(e, t).then_some(Rank::Exact),
             (Slice(e) | View(e), Array(t, _)) => self.same(e, t).then_some(Rank::Other),
@@ -1080,10 +1080,10 @@ impl<'p, 'a> Checker<'p, 'a> {
             }
             (Null, _) => self.err(span, format!("`null` is only for nullable references (`T&?`), and this is {}", shown_to)),
             (Slice(_), View(_)) => self.err_help(span, "a read-only slice can't become a writable view", "pass the array itself, or a `T[:]&` (DESIGN §4.10)"),
-            (Array(_, k), Slice(_) | View(_)) if !k.contiguous() => self.err_help(
+            (Array(_, k), Slice(_) | View(_)) if !k.sliceable() => self.err_help(
                 span,
                 format!("`{}` doesn't keep its elements in order in one block, so it can't be viewed as a slice", shown_from),
-                "slices of cursor, chunked, reversed and ring-buffer arrays are undecided (DESIGN §17)",
+                "slices of cursor, chunked and reversed arrays on data stacks are undecided (DESIGN §17); capped arrays, ring and gap buffers included, can be sliced",
             ),
             (Void, _) => self.err(span, "this returns nothing, so it has no value"),
             (TypeName(_) | Namespace(_), _) => self.err(span, format!("`{}` is a type, not a value", shown_from)),
@@ -2509,8 +2509,8 @@ impl<'p, 'a> Checker<'p, 'a> {
                 }
                 match bt.unref() {
                     Ty::Array(el, k) => {
-                        if !k.contiguous() {
-                            self.err_help(expr.span, format!("`{}` doesn't keep its elements in order in one block, so it can't be sliced", self.show(&bt)), "slices of cursor, chunked, reversed and ring-buffer arrays are undecided (DESIGN §17)");
+                        if !k.sliceable() {
+                            self.err_help(expr.span, format!("`{}` doesn't keep its elements in order in one block, so it can't be sliced", self.show(&bt)), "slices of cursor, chunked and reversed arrays on data stacks are undecided (DESIGN §17); capped arrays, ring and gap buffers included, can be sliced");
                         }
                         Ty::View(el.clone())
                     }
@@ -3705,7 +3705,7 @@ impl<'p, 'a> Checker<'p, 'a> {
         let (a, b) = (a.unref(), b.unref());
         let seq_elem = |t: &Ty| match t {
             Slice(e) | View(e) => Some((**e).clone()),
-            Array(e, k) if k.contiguous() => Some((**e).clone()),
+            Array(e, k) if k.sliceable() => Some((**e).clone()),
             _ => None,
         };
         let num = |t: &Ty| {

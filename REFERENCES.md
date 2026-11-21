@@ -13,7 +13,7 @@
 
 The memory model gives part of this for free:
 - **Storage never changes type while it is allocated.** An array of `T` only ever holds `T`s, and a field only ever holds its own type.
-- **Nothing moves.** Growth never moves elements (DESIGN §3.1), and cursor arrays on a data stack keep each element in the slot it was inserted into (DESIGN §4.3). A capped cursor array's small gap buffer does move elements, which L3 accounts for (§7.4). That includes cursor arrays with a chunked index (`$`, DESIGN §4.1): only their index moves, so every rule here applies to them unchanged.
+- **Nothing moves.** Growth never moves elements (DESIGN §3.1), and cursor arrays on a data stack keep each element in the slot it was inserted into (DESIGN §4.3). A capped cursor array's small gap buffer does move elements, and so can a capped ring that changes at both ends; §5.4 and L3 account for them (§7.4). That includes cursor arrays with a chunked index (`$`, DESIGN §4.1): only their index moves, so every rule here applies to them unchanged.
 
 Five rules cover the rest:
 
@@ -170,7 +170,7 @@ Each function is compiled once per array layout and generic instance (DESIGN §4
 - calling a function whose summary says it does any of these to an argument (§4.1).
 
 ### 5.2 The rule
-**Rule R**: a removal from an array on a data stack is a compile error at any point where a reference into that array, or a slice of it, may still be used afterwards. The array may be removable, or grow-only with `clear` or whole assignment.
+**Rule R**: a removal from an array is a compile error at any point where a reference into that array, or a slice of it, may still be used afterwards. The array may be removable, or grow-only with `clear` or whole assignment. Inserts that move nothing end nothing, at either end: a reference follows its element, so after a front insert it is the next index along and reads the same value.
 
 - **"May still be used" means liveness**: the check follows the program's order, through branches and loops. A loop body is checked in the state its earlier iterations leave it in (Goose §9.2).
 - **The error names the reference and the line where it was bound.**
@@ -195,8 +195,10 @@ println("${top}");
 - **Grow-only and frozen arrays**: references into them can be stored anywhere rule S allows. For these arrays, `clear` and whole assignment are the only removals. The compiler records which fields and arrays hold references into each array, so rule R sees those holders too (Goose §5.1).
 
 ### 5.4 Capped arrays and pools
-- **Capped arrays** (a number or constant after the slots, such as `u8[..~16]`) are exempt from rule R. Their storage is inline in their parent and never holds another type, so a reference into one survives removals. It reads whatever value of the same type is in the slot: a logic bug, never memory corruption (Goose §5.3).
-- **Pools** (`pool<T>`, DESIGN §3.5) work the same way. Freeing a slot only marks it reusable, so a stale reference may see the value that replaced it.
+- **Capped arrays** (a number or constant after the slots, such as `u8[..~16]`) follow rule R: a removal ends references into one.
+  - `T[..>k]`, `T[..~k]` and capped arrays that change only at the start (`T[>..k]`, `T[~..k]`), which sit at the top of their buffer, never move an element, so inserts end nothing.
+  - **Ring and gap buffers move elements**: a gap buffer (a cursor slot) on every edit, and a ring that changes at both ends when it wraps and a slice rotates it (DESIGN §4.10). An insert into one counts as a removal. A slice, sort or comparison of one, which may first make it one block, ends references to its elements; slices of it taken since its last change stay right, since nothing moves until the next one. References into one can't be kept in fields (§5.3).
+- **Pools** (`pool<T>`, DESIGN §3.5) are exempt from rule R. Their storage never holds another type, and freeing a slot only marks it reusable, so a stale reference may see the value that replaced it: a logic bug, never memory corruption (Goose §5.3).
 
 ### 5.5 What rule R buys
 After a removal, no reference into the freed slots can be used. So the slots are reused right away:
@@ -284,7 +286,7 @@ A structure built from self-relative links:
   - a pool link only from a reference into its array;
   - when the compiler can't tell which array a reference points into, for example because two arrays were passed as parameters, it is a compile error.
 - **L2, no copying out**: a value with self-relative links can't be copied out of its array. `Node n = tree[0];` is an error; use `Node& n = tree[0];`. The links are measured from where the value sits, so a copy elsewhere would point at the wrong memory. Copying a whole array is fine, and so is copying values whose links are all pool links.
-- **L3, arrays that keep their elements in place**: links, and references in fields (§7.1), can only point into arrays whose elements never move and whose memory never holds another type. That means grow-only and frozen arrays, and capped arrays whose cursor slot is `.`: a removal from a capped array leaves its slots holding values of the same type (§5.4). A capped cursor array's small gap buffer moves elements, so it is excluded (DESIGN §4.3). References in fields may also point into pools (§5.4); links can't.
+- **L3, arrays that keep their elements in place**: links, and references in fields (§7.1), can only point into arrays whose elements never move and whose memory never holds another type. That means grow-only and frozen arrays, capped ones included, except a capped ring that grows at both ends (`T[>.>k]`), which can wrap (§5.4). Capped arrays that can remove elements, and gap buffers, which move them, are excluded like any removable array (§5.3). References in fields may also point into pools (§5.4); links can't.
 - **L4, width**:
   - storing a link whose offset doesn't fit its width stops the program, like an overflow (DESIGN §7.6), for example more than 127 bytes for `<i8>`;
   - no check is needed when the array's reservation is no larger than the width can reach, for example 2 GB for 32-bit links (Goose §3.9).
@@ -366,7 +368,7 @@ Goose marks the entry to a recursive cycle with `recursive fn`. Zinkite finds cy
 9. `trim(nums)` (§4.1) while a reference into `nums` is used afterwards is an error.
 10. Storing a reference into a `T[..~]` in a field, array element or static is an error; storing one into a `T[..>]` compiles.
 11. `clear()` on a `T[..>]` while a field elsewhere holds a reference into it that is used later is an error.
-12. A reference into a capped array survives a pop and reads whatever value is in the slot.
+12. A pop from a capped array while a reference into it is used afterwards is an error; a push into a `T[..~k]` or a front insert into a `T[>..k]` isn't, and the reference reads the same value.
 13. After a pop, the next push reuses the slot; after a cursor-array removal, the next insert reuses the hole, and the data array never holds more slots than the most elements live at once.
 
 **Variable-size values**
@@ -377,7 +379,7 @@ Goose marks the entry to a recursive cycle with `recursive fn`. Zinkite finds cy
 **Links**
 17. A `Node&<i32>` link between two elements of `tree` compiles; storing a reference into another array is an error (L1).
 18. `Node n = tree[0];` is an error when `Node` has self-relative links; `Node& n = tree[0];` and copying the whole `tree` compile (L2).
-19. A link into a removable array, or into a capped array with a cursor, is an error (L3).
+19. A link into a removable array, or into a capped ring or gap buffer whose elements can move, is an error (L3).
 20. A `Node&<i8>` link whose offset is more than 127 bytes stops the program with a message (L4).
 21. A copied array of `Node`s with self-relative links works on its own after the original's scope ends.
 22. A value whose links are all `T&<u32 in arr>` can be copied to a local and its links followed; an `arr` that isn't a static grow-only array is an error.
@@ -393,6 +395,11 @@ Goose marks the entry to a recursive cycle with `recursive fn`. Zinkite finds cy
 28. Removing from an array inside a for-each over it by reference is an error.
 29. A lambda passed to `filter` can capture a reference to a local; storing a capturing lambda in a `func` field is an error.
 30. A reference used inside a `defer` is live until its block ends, so a later pop from the array it points into is an error.
+
+**Capped ring and gap buffers**
+31. An insert into a ring that changes at both ends, or into a gap buffer, while a reference or slice into it is used afterwards is an error, directly or through a called function's summary.
+32. A slice, sort, comparison or text method of one while a reference to an element is used afterwards is an error; two slices of one held at once, and a slice taken inside a for-each over it by value, compile.
+33. Storing a reference into one in a field is an error.
 
 ---
 

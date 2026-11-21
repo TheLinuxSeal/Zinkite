@@ -296,7 +296,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                 let c = counter(k.size);
                 let (prefix, fields) = match layout(t) {
                     Some(Layout::Ring) => ("zring", format!("{c} h; {c} n;", c = c)),
-                    Some(Layout::Gap) => ("zgap", format!("{c} gs; {c} an;", c = c)),
+                    Some(Layout::Gap) => ("zgap", format!("{c} gs; {c} an; {c} cur;", c = c)),
                     _ => ("zcap", format!("{} n;", c)),
                 };
                 let name = format!("{}_{}_{}", prefix, ec.replace('*', "p"), k.size);
@@ -1680,6 +1680,9 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
             return s;
         }
+        if matches!(want, Ty::Slice(_) | Ty::View(_)) && cap_of(&self.ty(e)) > 0 {
+            return self.capped_view(e, None, None, e.span);
+        }
         let (code, t) = self.rv(e);
         self.conv(&code, &t, want, e.span)
     }
@@ -1718,12 +1721,18 @@ impl<'p, 'a> Gen<'p, 'a> {
             return self.unsupported(span, "this array");
         };
         let ec = self.cty(&el, span);
-        let k = cap_of(t);
         let (dst, counters) = match layout(t) {
-            Some(Layout::Gap) => (
-                format!("&_c.e[{} - ({})]", k, n),
-                format!("_c.gs = 0; _c.an = {};", n),
-            ),
+            Some(Layout::Gap) => ("_c.e".to_string(), format!("_c.gs = {}; _c.an = 0;", n)),
+            // A ring that changes only at the start sits at the top of its buffer, so
+            // it never wraps and its elements never move (REFERENCES §5.4).
+            Some(Layout::Ring) if matches!(t.unref(), Ty::Array(_, k) if k.end == '.') => {
+                let k = cap_of(t);
+                let h = format!("(({k} - (int64_t)({n})) % {k})", k = k, n = n);
+                (
+                    format!("&_c.e[{}]", h),
+                    format!("_c.h = {}; _c.n = {};", h, n),
+                )
+            }
             Some(Layout::Ring) => ("_c.e".to_string(), format!("_c.h = 0; _c.n = {};", n)),
             _ => ("_c.e".to_string(), format!("_c.n = {};", n)),
         };
@@ -1763,15 +1772,22 @@ impl<'p, 'a> Gen<'p, 'a> {
                 format!("(&{})", inner)
             }
             (Ty::Array(_, k), Ty::Slice(_) | Ty::View(_)) => {
-                if k.cap == CapKind::Capped && (k.has_cursor() || k.push_front() || k.pop_front()) {
-                    self.unsupported(
-                        span,
-                        "slices of capped arrays with a start or cursor slot, which are undecided (DESIGN §17)",
-                    )
-                } else if k.cap == CapKind::Capped {
+                if k.cap == CapKind::Capped {
+                    let (Some(el), Some(lay)) = (from.elem().cloned(), layout(from)) else {
+                        return self.unsupported(span, "this slice");
+                    };
+                    let ca = Arr {
+                        a: "_c".into(),
+                        lay,
+                        ec: self.cty(&el, span),
+                        cap: k.size,
+                    };
                     format!(
-                        "({{ __typeof__({}) *_c = &({}); (zr_slice){{_c->e, _c->n}}; }})",
-                        code, code
+                        "({{ __typeof__({}) *_c = &({}); int64_t _n = {}; (zr_slice){{{}, _n}}; }})",
+                        code,
+                        code,
+                        ca.len(),
+                        ca.span("0")
                     )
                 } else if k.has_cursor() {
                     self.unsupported(
@@ -2163,7 +2179,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             Ty::Array(_, k)
                 if k.cap == CapKind::Capped && k.has_cursor() && name.name == "cursor" =>
             {
-                (format!("((int64_t){}gs)", acc), Ty::i64())
+                (format!("((int64_t){}cur)", acc), Ty::i64())
             }
             Ty::Array(_, k) if k.cap == CapKind::Capped && k.has_cursor() && name.name == "len" => {
                 (format!("((int64_t){a}gs + {a}an)", a = acc), Ty::i64())
@@ -2285,6 +2301,70 @@ impl<'p, 'a> Gen<'p, 'a> {
         self.elem_ptr(base, &fix, span)
     }
 
+    /// A bound of a slice, given the name of the length it counts back from.
+    fn slice_bound(&mut self, b: Option<&ast::Bound>, dflt: &str, len: &str) -> String {
+        match b {
+            None => dflt.to_string(),
+            Some(b) => {
+                let t = settle(&self.ty(&b.expr));
+                let v = self.expr(&b.expr, &t);
+                if b.from_end {
+                    format!("({} - (int64_t)({}))", len, v)
+                } else {
+                    format!("(int64_t)({})", v)
+                }
+            }
+        }
+    }
+
+    /// A slice of positions `lo..hi` of a capped array, all of it by default (DESIGN
+    /// §4.10). A ring or gap buffer is rearranged first when those positions are split,
+    /// which leaves its order and cursor as they were. A temporary is copied to the
+    /// scratch stack, so the slice lasts to the end of the statement.
+    fn capped_view(
+        &mut self,
+        e: &Expr,
+        lo: Option<&ast::Bound>,
+        hi: Option<&ast::Bound>,
+        span: Span,
+    ) -> String {
+        let bt = self.ty(e);
+        let arr = bt.unref().clone();
+        let (Some(el), Some(lay)) = (arr.elem().cloned(), layout(&arr)) else {
+            return self.unsupported(span, "this slice");
+        };
+        let ec = self.cty(&el, span);
+        let ptr = if is_ref(&bt) || self.is_place(e) {
+            let (p, _) = self.place(e);
+            format!("__typeof__({}) *_c = &({});", p, p)
+        } else {
+            self.used_scratch = true;
+            let v = self.expr(e, &arr);
+            format!(
+                "__typeof__({}) _cv = {}; __typeof__(_cv) *_c = zr_scratch_copy(&_cv, sizeof _cv);",
+                v, v
+            )
+        };
+        let ca = Arr {
+            a: "_c".into(),
+            lay,
+            ec,
+            cap: cap_of(&arr),
+        };
+        let l = self.slice_bound(lo, "0", "_n");
+        let h = self.slice_bound(hi, "_n", "_n");
+        let loc = self.loc(span);
+        format!(
+            "({{ {} int64_t _n = {}; int64_t _lo = {}, _hi = {}; zr_range(_lo, _hi, _n, {}); (zr_slice){{{}, _hi - _lo}}; }})",
+            ptr,
+            ca.len(),
+            l,
+            h,
+            loc,
+            ca.span("_lo")
+        )
+    }
+
     fn slice(
         &mut self,
         base: &Expr,
@@ -2297,24 +2377,13 @@ impl<'p, 'a> Gen<'p, 'a> {
         let Some(el) = arr.elem().cloned() else {
             return (self.unsupported(span, "this slice"), Ty::Unknown);
         };
+        if cap_of(&arr) > 0 {
+            return (self.capped_view(base, lo, hi, span), Ty::View(Box::new(el)));
+        }
         let ec = self.cty(&el, span);
         let s = self.expr(base, &Ty::Slice(Box::new(el.clone())));
-        let bound = |me: &mut Self, b: Option<&ast::Bound>, dflt: &str| -> String {
-            match b {
-                None => dflt.to_string(),
-                Some(b) => {
-                    let t = settle(&me.ty(&b.expr));
-                    let v = me.expr(&b.expr, &t);
-                    if b.from_end {
-                        format!("(_s.n - (int64_t)({}))", v)
-                    } else {
-                        format!("(int64_t)({})", v)
-                    }
-                }
-            }
-        };
-        let l = bound(self, lo, "0");
-        let h = bound(self, hi, "_s.n");
+        let l = self.slice_bound(lo, "0", "_s.n");
+        let h = self.slice_bound(hi, "_s.n", "_s.n");
         let loc = self.loc(span);
         let res = if matches!(bt.unref(), Ty::Slice(_)) {
             Ty::Slice(Box::new(el))
@@ -3405,24 +3474,10 @@ impl<'p, 'a> Gen<'p, 'a> {
         let is_u8 = el == Ty::u8();
         // Text methods take their receiver as a string (STDLIB §3).
         if is_u8 {
-            let text_methods = [
-                "trim",
-                "trimStart",
-                "trimEnd",
-                "startsWith",
-                "endsWith",
-                "find",
-                "rfind",
-                "count",
-                "splitFirst",
-                "splitLast",
-                "compareTo",
-                "trimPrefix",
-                "trimSuffix",
-                "equalsIgnoreCase",
-            ];
-            let contains_str = m == "contains" && params.first().is_some_and(|p| p.is_string());
-            if text_methods.contains(&m) || contains_str {
+            let first_string = params.first().is_some_and(|p| p.is_string());
+            if crate::builtins::slice_receiver(m, first_string)
+                && !matches!(m, "lines" | "words" | "splitBy" | "codePoints")
+            {
                 let s = self.expr(base, &Ty::string());
                 let a0 = if args.is_empty() {
                     String::new()
@@ -3638,9 +3693,9 @@ impl<'p, 'a> Gen<'p, 'a> {
                         ec = ec
                     )
                 } else if lay == Layout::Gap {
-                    // The kept elements after the cursor move up to the end of the buffer.
+                    // The kept elements after the gap move up to the end of the buffer.
                     format!(
-                        "if (_n < (int64_t){a}->gs + {a}->an) {{ if (_n <= {a}->gs) {{ {a}->gs = _n; {a}->an = 0; }} else {{ int64_t _keep = _n - {a}->gs; memmove(&{a}->e[{k} - _keep], &{a}->e[{k} - {a}->an], (size_t)_keep * sizeof({ec})); {a}->an = _keep; }} }}",
+                        "if (_n < (int64_t){a}->gs + {a}->an) {{ if (_n <= {a}->gs) {{ {a}->gs = _n; {a}->an = 0; }} else {{ int64_t _keep = _n - {a}->gs; memmove(&{a}->e[{k} - _keep], &{a}->e[{k} - {a}->an], (size_t)_keep * sizeof({ec})); {a}->an = _keep; }} if ({a}->cur > _n) {a}->cur = _n; }}",
                         a = a,
                         k = cap,
                         ec = ec
@@ -3831,30 +3886,18 @@ impl<'p, 'a> Gen<'p, 'a> {
                         String::new(),
                         String::new(),
                     ),
-                    // A ring buffer is rotated so its first element is at e[0].
-                    Layout::Ring => (
+                    // Made one block first, as for a slice, so slices taken since the
+                    // last change still show the same positions (DESIGN §4.10).
+                    Layout::Ring | Layout::Gap => (
                         format!(
-                            "zr_ring_line((char *){a}->e, sizeof({ec}), {k}, {a}->h); {a}->h = 0; int64_t _n = {a}->n; {ec} *_d = {a}->e;",
-                            a = a,
+                            "int64_t _n = {len}; {ec} *_d = ({ec} *){span};",
+                            len = len,
                             ec = ec,
-                            k = cap
+                            span = arr.span("0")
                         ),
                         ec.clone(),
                         String::new(),
                         String::new(),
-                    ),
-                    // A gap buffer's cursor moves to the end, which closes the gap.
-                    Layout::Gap => (
-                        format!(
-                            "int64_t _at = {cur}; (void){end}; int64_t _n = {a}->gs; {ec} *_d = {a}->e;",
-                            cur = arr.cursor(),
-                            end = arr.seek(&len),
-                            a = a,
-                            ec = ec
-                        ),
-                        ec.clone(),
-                        String::new(),
-                        format!("(void){};", arr.seek("_at")),
                     ),
                     _ => (
                         format!(
@@ -4109,7 +4152,7 @@ impl Arr {
     fn cursor(&self) -> String {
         match self.lay {
             Layout::Chk => format!("{}->pos", self.a),
-            Layout::Gap => format!("((int64_t){}->gs)", self.a),
+            Layout::Gap => format!("((int64_t){}->cur)", self.a),
             _ => format!("{}->bn", self.a),
         }
     }
@@ -4141,15 +4184,58 @@ impl Arr {
 
     fn seek(&self, i: &str) -> String {
         if self.lay == Layout::Gap {
+            // Free: the gap follows only when the next edit at the cursor needs it.
             return format!(
-                "({{ int64_t _gs = {a}->gs, _an = {a}->an, _ix = (int64_t)({i}); uint8_t _sk = 196; if (_ix >= 0 && _ix <= _gs + _an) {{ zr_gap_move((char *){a}->e, sizeof({ec}), {k}, &_gs, &_an, _ix); {a}->gs = _gs; {a}->an = _an; _sk = 0; }} _sk; }})",
+                "({{ int64_t _ix = (int64_t)({i}); uint8_t _sk = 196; if (_ix >= 0 && _ix <= {len}) {{ {a}->cur = _ix; _sk = 0; }} _sk; }})",
                 a = self.a,
                 i = i,
-                ec = self.ec,
-                k = self.cap
+                len = self.len()
             );
         }
         format!("zr_{}_seek({}, {})", self.kind(), self.a, i)
+    }
+
+    /// A statement that moves a gap buffer's gap to position `i`.
+    fn gap_to(&self, i: &str) -> String {
+        format!(
+            "{{ int64_t _gs = {a}->gs, _an = {a}->an; zr_gap_move((char *){a}->e, sizeof({ec}), {k}, &_gs, &_an, {i}); {a}->gs = _gs; {a}->an = _an; }}",
+            a = self.a,
+            ec = self.ec,
+            k = self.cap,
+            i = i
+        )
+    }
+
+    /// Before an edit at a gap buffer's cursor: the gap moves there.
+    fn gap_to_cursor(&self) -> String {
+        format!(
+            "if ({a}->gs != {a}->cur) {}",
+            self.gap_to(&format!("{}->cur", self.a)),
+            a = self.a
+        )
+    }
+
+    /// A pointer to position `lo` of a capped array, for a slice: a ring or gap buffer
+    /// whose elements are split is made one block first (DESIGN §4.10).
+    fn span(&self, lo: &str) -> String {
+        let (a, ec, k) = (&self.a, &self.ec, self.cap);
+        match self.lay {
+            Layout::Ring => format!(
+                "({{ int64_t _h = {a}->h; char *_p = zr_ring_span((char *){a}->e, sizeof({ec}), {k}, &_h, {a}->n, {lo}); {a}->h = _h; _p; }})",
+                a = a,
+                ec = ec,
+                k = k,
+                lo = lo
+            ),
+            Layout::Gap => format!(
+                "({{ int64_t _gs = {a}->gs, _an = {a}->an; char *_p = zr_gap_span((char *){a}->e, sizeof({ec}), {k}, &_gs, &_an, {lo}); {a}->gs = _gs; {a}->an = _an; _p; }})",
+                a = a,
+                ec = ec,
+                k = k,
+                lo = lo
+            ),
+            _ => format!("(&{}->e[{}])", a, lo),
+        }
     }
 
     /// For reordering a cursor array: statements that lay its order out as `_n` entries
@@ -4227,7 +4313,7 @@ impl Arr {
                         k = k
                     ),
                     (_, Where::Front) => format!(
-                        "memmove(&{a}->e[1], &{a}->e[0], (size_t){a}->gs * sizeof({ec})); {a}->gs++; _e = &{a}->e[0];",
+                        "memmove(&{a}->e[1], &{a}->e[0], (size_t){a}->gs * sizeof({ec})); {a}->gs++; {a}->cur++; _e = &{a}->e[0];",
                         a = a,
                         ec = ec
                     ),
@@ -4237,7 +4323,11 @@ impl Arr {
                         k = k,
                         ec = ec
                     ),
-                    _ => format!("_e = &{a}->e[{a}->gs++];", a = a),
+                    _ => format!(
+                        "{} _e = &{a}->e[{a}->gs++]; {a}->cur++;",
+                        self.gap_to_cursor(),
+                        a = a
+                    ),
                 };
                 let last = self.at(&format!("({} - 1)", self.len()));
                 format!(
@@ -4306,6 +4396,7 @@ impl Arr {
             ),
             (Layout::Gap, w) => {
                 let k = self.cap;
+                let len = self.len();
                 let before = format!("_v = {a}->e[--{a}->gs]; _s = 0;", a = a);
                 let after = format!(
                     "_v = {a}->e[{k} - {a}->an]; {a}->an--; _s = 0;",
@@ -4323,18 +4414,33 @@ impl Arr {
                     k = k,
                     ec = ec
                 );
+                let g = self.gap_to_cursor();
                 match w {
-                    Where::Before => format!("if ({a}->gs) {{ {b} }}", a = a, b = before),
-                    Where::After => format!("if ({a}->an) {{ {b} }}", a = a, b = after),
-                    Where::Front => format!(
-                        "if ({a}->gs) {{ {f} }} else if ({a}->an) {{ {b} }}",
+                    Where::Before => format!(
+                        "if ({a}->cur) {{ {g} {b} {a}->cur--; }}",
                         a = a,
+                        g = g,
+                        b = before
+                    ),
+                    Where::After => format!(
+                        "if ({a}->cur < {len}) {{ {g} {b} }}",
+                        a = a,
+                        len = len,
+                        g = g,
+                        b = after
+                    ),
+                    // The cursor stays between the same elements.
+                    Where::Front => format!(
+                        "if ({len}) {{ if ({a}->cur) {a}->cur--; if ({a}->gs) {{ {f} }} else {{ {b} }} }}",
+                        a = a,
+                        len = len,
                         f = front,
                         b = after
                     ),
                     _ => format!(
-                        "if ({a}->an) {{ {k2} }} else if ({a}->gs) {{ {b} }}",
+                        "if ({len}) {{ if ({a}->cur == {len}) {a}->cur--; if ({a}->an) {{ {k2} }} else {{ {b} }} }}",
                         a = a,
+                        len = len,
                         k2 = back,
                         b = before
                     ),
@@ -4392,7 +4498,7 @@ impl Arr {
             Layout::Cur => format!("zr_cur_clear({});", self.a),
             Layout::Chk => format!("zr_chk_clear({});", self.a),
             Layout::Ring => format!("{a}->n = 0; {a}->h = 0;", a = self.a),
-            Layout::Gap => format!("{a}->gs = 0; {a}->an = 0;", a = self.a),
+            Layout::Gap => format!("{a}->gs = 0; {a}->an = 0; {a}->cur = 0;", a = self.a),
             Layout::Deq => format!("{a}->n = 0; {a}->p = {a}->mid;", a = self.a),
             _ => format!("{}->n = 0;", self.a),
         }

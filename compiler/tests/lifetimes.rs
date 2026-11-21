@@ -281,12 +281,131 @@ fn references_into_removable_arrays_stay_in_locals() {
 }
 
 #[test]
-fn capped_arrays_and_pools_are_exempt() {
-    // §10 test 12.
+fn capped_arrays_follow_rule_r() {
+    // §10 test 12: a pop ends references into a capped array, as on a data stack.
+    rejects(
+        &main_with(
+            "",
+            "i32[..~16] small = [];\n@_ = small +> 1;\ni32& r = small[0];\n@_ = small ->;\nprintln(\"${r}\");",
+        ),
+        "`->` removes from `small` while `r` may still refer into it",
+    );
+    // An append doesn't move anything.
     ok(&main_with(
         "",
-        "i32[..~16] small = [];\n@_ = small +> 1;\ni32& r = small[0];\n@_ = small ->;\nprintln(\"${r}\");",
+        "i32[..~16] small = [];\n@_ = small +> 1;\ni32& r = small[0];\n@_ = small +> 2;\nprintln(\"${r}\");",
     ));
+    // A capped array that changes only at the start sits at the top of its buffer, so a
+    // front insert moves nothing either; the reference follows its element.
+    ok(&main_with(
+        "",
+        "i32[>..4] f = [2, 3];\ni32& x = f[0];\n@_ = f +< 1;\nprintln(\"${x}\");",
+    ));
+    ok(&main_with(
+        "",
+        "i32[~..4] f = [2, 3];\ni32& x = f[^1];\n@_ = f +< 1;\nprintln(\"${x}\");",
+    ));
+    rejects(
+        &main_with(
+            "",
+            "i32[~..4] f = [2, 3];\ni32& x = f[^1];\n@_ = f -<;\nprintln(\"${x}\");",
+        ),
+        "`-<` removes from `f`",
+    );
+    // Pools keep their exemption.
+    ok(&main_with(
+        "",
+        "pool<i64> p = [];\ni64 a = 1;\nprintln(\"${a}\");",
+    ));
+}
+
+#[test]
+fn ring_and_gap_buffers_end_references_when_they_change() {
+    // §10 test 31: an insert into a ring or gap buffer can move its elements.
+    rejects(
+        &main_with(
+            "",
+            "i64[~.~4] q = [1, 2];\ni64& r = q[0];\n@_ = q +> 5;\nprintln(\"${r}\");",
+        ),
+        "`+>` can move the elements of `q` while `r` may still refer into it",
+    );
+    rejects(
+        &main_with(
+            "",
+            "u8[~8] g = \"ab\";\nstring s = g;\n@_ = g +^ 'x';\nprintln(s);",
+        ),
+        "`+^` can move the elements of `g` while `s` may still refer into it",
+    );
+    rejects(
+        &main_with(
+            "",
+            "u8[~8] g = \"ab\";\nu8& c = g.insert('x');\n@_ = g.insertAt(0, 'y');\nprintln(\"${c}\");",
+        ),
+        "`insertAt` can move the elements of `g`",
+    );
+    // §10 test 32: a slice, sort or comparison can rearrange one, which ends references
+    // to its elements but not other slices.
+    rejects(
+        &main_with(
+            "",
+            "i64[~.~4] q = [1, 2];\ni64& r = q[0];\ni64[:] s = q;\nprintln(\"${r} ${s}\");",
+        ),
+        "this slice can rearrange `q` while `r` may still refer into it",
+    );
+    rejects(
+        &main_with(
+            "",
+            "i64[~.~4] q = [1, 2];\ni64& r = q[0];\nq.sort();\nprintln(\"${r}\");",
+        ),
+        "`sort` can rearrange `q`",
+    );
+    rejects(
+        &main_with(
+            "",
+            "u8[~8] g = \"ab\";\nu8& c = g[0];\nbool same = g == \"ab\";\nprintln(\"${c} ${same}\");",
+        ),
+        "this comparison can rearrange `g`",
+    );
+    rejects(
+        &main_with(
+            "",
+            "u8[~8] g = \"ab\";\nu8& c = g[0];\nbool a = g.startsWith(\"a\");\nprintln(\"${c} ${a}\");",
+        ),
+        "`startsWith` can rearrange `g`",
+    );
+    ok(&main_with(
+        "",
+        "i64[~.~4] q = [1, 2];\ni64[:] a = q[0:1];\ni64[:] b = q[1:];\nq.sort();\nprintln(\"${a} ${b} ${q[0]}\");",
+    ));
+    ok(&main_with(
+        "",
+        "u8[~8] g = \"ab\";\nfor (u8 c : g) { string s = g; println(s); }\nu8& d = g[0];\nprintln(\"${d}\");",
+    ));
+    // Bound again after the change, it's fine.
+    ok(&main_with(
+        "",
+        "i64[~.~4] q = [1, 2];\ni64& r = q[0];\nprintln(\"${r}\");\n@_ = q +> 5;\ni64& t = q[0];\nprintln(\"${t}\");",
+    ));
+    // Through a function's summary.
+    rejects(
+        &main_with(
+            "void add(i64[~.~4]& q) { @_ = q +> 1; }",
+            "i64[~.~4] q = [1, 2];\ni64& r = q[0];\nadd(q);\nprintln(\"${r}\");",
+        ),
+        "`add(...)` can move the elements of `q`",
+    );
+    // §10 test 33: references into one can't be kept in fields.
+    rejects(
+        "class Holder { i64&? r = null; }\nvoid main() {\ni64[~.~4] q = [1];\nHolder h = new Holder();\nh.r .= q[0];\n}\n",
+        "a reference into `q`, whose elements can move, can be kept only in a local variable or a parameter",
+    );
+    rejects(
+        "class Recent { i64[~.~4] q = []; i64&? last = null; mut void see(i64 x) { @_ = q +> x; last .= q[0]; } }\nvoid main() {}\n",
+        "`+>` can move the elements of `this`, and a field of `this` may hold a reference into it",
+    );
+    ok(
+        "class Log { i64[..>8] xs = []; i64&? first = null; mut void add(i64 x) { @_ = xs +> x; first .= xs[0]; } }\nvoid main() {}\n",
+    );
 }
 
 #[test]

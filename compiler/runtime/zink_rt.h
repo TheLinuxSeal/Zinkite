@@ -64,6 +64,16 @@ static ZR_UNUSED int64_t zr_sm(void) {
 
 static ZR_UNUSED void zr_sr(int64_t m) { zr_scratch_top = zr_scratch_base + m; }
 
+/* A copy of a temporary on the scratch stack, so a slice of it lasts to the end of its
+ * statement. */
+static ZR_UNUSED void *zr_scratch_copy(const void *p, size_t sz) {
+    zr_sm();
+    void *d = zr_scratch_top;
+    memcpy(d, p, sz);
+    zr_scratch_top += (sz + 15) & ~(size_t)15;
+    return d;
+}
+
 /* An array that also changes at its start (DESIGN §4.3): its elements are contiguous,
  * starting in the middle of the stack's reservation, so either end can grow. */
 typedef struct { void *p; int64_t n; void *mid; } zr_deq;
@@ -361,9 +371,10 @@ static ZR_UNUSED void zr_chk_clear(zr_chk *c) {
     c->M = 15;
 }
 
-/* Capped arrays with a cursor (DESIGN §4.3) keep a small gap buffer inline: the gs
- * elements before the cursor at the start of e, the an after it at the end. Moving the
- * cursor to position i moves the elements in between across the gap. */
+/* Capped arrays with a cursor (DESIGN §4.3) keep a small gap buffer inline: gs elements
+ * before the gap at the start of e, an after it at the end. The cursor is kept apart, and
+ * the gap moves to it only for an edit there, so seeks are free. Moving the gap to
+ * position i moves the elements in between across it. */
 static ZR_UNUSED void zr_gap_move(char *e, size_t sz, int64_t k, int64_t *gs, int64_t *an, int64_t i) {
     if (i < *gs) {
         int64_t d = *gs - i;
@@ -376,6 +387,16 @@ static ZR_UNUSED void zr_gap_move(char *e, size_t sz, int64_t k, int64_t *gs, in
         *gs += d;
         *an -= d;
     }
+}
+
+/* A gap buffer as one block, for a slice (DESIGN §4.10). When the gap splits the
+ * elements, all of them, not just the slice's, it moves to whichever end moves fewer.
+ * It stays there until the next edit at the cursor, so later slices move nothing and
+ * every slice taken since the last edit stays right. The cursor doesn't move. Gives a
+ * pointer to position lo. */
+static ZR_UNUSED char *zr_gap_span(char *e, size_t sz, int64_t k, int64_t *gs, int64_t *an, int64_t lo) {
+    if (*gs && *an) zr_gap_move(e, sz, k, gs, an, *gs <= *an ? 0 : *gs + *an);
+    return e + (size_t)(*an ? lo + k - *an : lo) * sz;
 }
 
 /* Capped arrays with a start slot are ring buffers (DESIGN §4.3). For sorting, the
@@ -393,6 +414,17 @@ static ZR_UNUSED void zr_ring_line(char *e, size_t sz, int64_t k, int64_t h) {
     zr_ring_reverse(e, sz, 0, h);
     zr_ring_reverse(e, sz, h, k);
     zr_ring_reverse(e, sz, 0, k);
+}
+
+/* A ring buffer as one block, for a slice: when its elements wrap past the end of e, it
+ * is rotated so the first is at e[0], and later slices move nothing until it wraps
+ * again. Gives a pointer to position lo. */
+static ZR_UNUSED char *zr_ring_span(char *e, size_t sz, int64_t k, int64_t *h, int64_t n, int64_t lo) {
+    if (*h + n > k) {
+        zr_ring_line(e, sz, k, *h);
+        *h = 0;
+    }
+    return e + (size_t)(*h + lo) * sz;
 }
 
 /* ------------------------------------------------------------ output (DESIGN §4.13) */

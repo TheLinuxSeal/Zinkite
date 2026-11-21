@@ -880,3 +880,137 @@ void main() {
         "mismatches 0, FULL true, EMPTY true, lengths 9 5\n",
     );
 }
+
+/// Slices of capped ring and gap buffers (DESIGN §4.10): the first slice of a split buffer
+/// joins all of it, so slices held at once agree; the order and the cursor don't change;
+/// writable views, text methods and temporaries work.
+#[test]
+fn slices_of_ring_and_gap_buffers() {
+    prints(
+        r#"i64 total(i64[:] s) {
+    i64 t = 0;
+    for (i64 x : s) { t += x; }
+    return t;
+}
+
+void upcase(u8[:]& s) {
+    for (u8& b : s) { b = b.toUpper(); }
+}
+
+u8[~.~8] letters() {
+    u8[~.~8] r = "wxyz";
+    @_ = r -<;
+    @_ = r +> 'a';
+    return r;
+}
+
+void main() {
+    // A ring that wraps: 3 and 4 sit at the end of the buffer, 5 and 6 at the start.
+    i64[~.~4] q = [1, 2, 3, 4];
+    @_ = q -<;
+    @_ = q -<;
+    @_ = q +> 5;
+    @_ = q +> 6;
+    i64[:] head = q[0:2];
+    i64[:] tail = q[2:];
+    println("head ${head} tail ${tail}, total ${total(q)}");
+    i64[:] mid = q[1:^1];
+    println("across the wrap ${mid}, ring still ${q}, first ${q[0]}");
+    @_ = q -<;
+    @_ = q +> 7;
+    println("${q} as a slice ${q[:]} sum ${total(q[1:])}");
+
+    // A gap buffer: slices that the gap splits move it, never the cursor.
+    u8[~16] g = "hello world";
+    @_ = g.seek(5);
+    @_ = g +^ ',';
+    println("${g} cursor ${g.cursor}, before ${g[0:3]} after ${g[7:]}");
+    string all = g;
+    println("whole '${all}' cursor ${g.cursor}, split '${g[3:9]}' cursor ${g.cursor}");
+    @_ = g +^ '!';
+    @_ = g -^;
+    @_ = g +^ '?';
+    println("edits at the cursor still go there: ${g} cursor ${g.cursor}");
+    upcase(g[0:5]);
+    println("through a writable view ${g}");
+    @_ = g.seek(2);
+    println("text methods: starts ${g.startsWith("HE")} find ${g.find("wor")} trim '${g.trim()}' equal ${g == "HELLO,? world"}");
+    upcase(g);
+    println("${g} cursor ${g.cursor}");
+
+    // Slices held while others are taken: the first one joined the buffer.
+    u8[~8] h = "abcdef";
+    @_ = h.seek(3);
+    @_ = h +^ 'X';
+    string p1 = h[0:2];
+    string p2 = h[5:];
+    string p3 = h[2:6];
+    println("${p1} ${p2} ${p3} ${h} cursor ${h.cursor}");
+
+    // A temporary lasts to the end of its statement.
+    println("from a call: ${letters()} sliced ${letters()[1:]} len ${letters().len}");
+    u8[~.~8] l = letters();
+    string ls = l;
+    println("${ls} ${ls.len}");
+}
+"#,
+        r#"head [3, 4] tail [5, 6], total 18
+across the wrap [4, 5], ring still [3, 4, 5, 6], first 3
+[4, 5, 6, 7] as a slice [4, 5, 6, 7] sum 18
+hello, world cursor 6, before hel after world
+whole 'hello, world' cursor 6, split 'lo, wo' cursor 6
+edits at the cursor still go there: hello,? world cursor 7
+through a writable view HELLO,? world
+text methods: starts true find 8 trim 'HELLO,? world' equal true
+HELLO,? WORLD cursor 2
+ab ef cXde abcXdef cursor 4
+from a call: xyza sliced yza len 4
+xyza 4
+"#,
+    );
+}
+
+/// A reference follows its element: after a front insert it is the next index along and
+/// still reads the same value (REFERENCES §5.4). A capped array that changes only at the
+/// start sits at the top of its buffer, so it never wraps and nothing in it moves.
+#[test]
+fn references_follow_their_element() {
+    prints(
+        r#"i64 total(i32[:] s) {
+    i64 t = 0;
+    for (i32 v : s) { t += v; }
+    return t;
+}
+
+void main() {
+    // On a data stack: x is the element, which a front insert leaves in place.
+    i32[>..] myarr = [1, 2, 3];
+    i32& x = myarr[0];
+    myarr +< 0;
+    println("x ${x}, myarr[1] ${myarr[1]}, myarr[0] ${myarr[0]}, ${myarr}");
+
+    // Capped, changing only at the start: it sits at the top of its buffer, so front
+    // inserts never wrap it and a slice never has to move anything.
+    i32[>..4] f = [2, 3];
+    i32& y = f[0];
+    i32[:] before = f;
+    @_ = f +< 1;
+    @_ = f +< 0;
+    i32& last @full = f.pushFront(-1);
+    println("y ${y}, f[2] ${f[2]}, ${f} full ${full == status.FULL}, last ${last}, all ${f[:]} total ${total(f)}");
+    println("a slice from before the inserts still shows ${before}");
+
+    i32[~..4] w = [5, 6];
+    @_ = w +< 4;
+    i32 gone @_ = w -<;
+    i32& z2 = w[^1];
+    println("z ${z2}, front was ${gone}, ${w}");
+}
+"#,
+        r#"x 1, myarr[1] 1, myarr[0] 0, [0, 1, 2, 3]
+y 2, f[2] 2, [0, 1, 2, 3] full true, last 3, all [0, 1, 2, 3] total 6
+a slice from before the inserts still shows [2, 3]
+z 6, front was 4, [5, 6]
+"#,
+    );
+}

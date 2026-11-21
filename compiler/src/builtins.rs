@@ -329,7 +329,7 @@ pub fn seq_method(elem: &Ty, kind: SeqKind, name: &str) -> Result<Vec<Sig>, Stri
     const EDIT: &str = "an array that can insert or remove";
 
     // Text methods, on anything that converts to a `string`.
-    let is_text = *elem == Ty::u8() && arr.is_none_or(|k| k.contiguous());
+    let is_text = *elem == Ty::u8() && arr.is_none_or(|k| k.sliceable());
     if is_text {
         let v = text_method(name);
         if !v.is_empty() {
@@ -682,4 +682,31 @@ pub fn pool_method(e: &Ty, name: &str) -> Vec<Sig> {
         "clear" => vec![Sig::new(name, vec![], Ty::Void).muts()],
         _ => Vec::new(),
     }
+}
+
+/// Methods on a `u8` array that take it as a `string`, converting it to a slice: a capped
+/// ring or gap buffer is made one block for them (DESIGN §4.10). The code generator and
+/// the lifetimes pass both follow this list.
+pub fn slice_receiver(name: &str, first_param_is_string: bool) -> bool {
+    matches!(
+        name,
+        "trim"
+            | "trimStart"
+            | "trimEnd"
+            | "startsWith"
+            | "endsWith"
+            | "find"
+            | "rfind"
+            | "count"
+            | "splitFirst"
+            | "splitLast"
+            | "compareTo"
+            | "trimPrefix"
+            | "trimSuffix"
+            | "equalsIgnoreCase"
+            | "lines"
+            | "words"
+            | "splitBy"
+            | "codePoints"
+    ) || (name == "contains" && first_param_is_string)
 }

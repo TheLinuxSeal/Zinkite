@@ -138,6 +138,13 @@ fn literals_take_their_type_from_where_they_are_used() {
         "this literal has 5 bytes, and the array holds 4",
     );
     ok(&body("u8[~5] g = \"hello\"; i64[..~2] p = [1, 2];"));
+    ok(&body(
+        "i64[~.~4] q = [1, 2]; i64[:] a = q; i64[:] b = q[1:]; u8[~8] g = \"ab\"; string t = g; bool s = g.startsWith(\"a\");",
+    ));
+    rejects(
+        &body("i64[.~.] c = []; i64[:] d = c;"),
+        "doesn't keep its elements in order in one block",
+    );
     rejects(&body("u8 b = 200 + 100;"), "300 doesn't fit in u8");
     rejects(&body("u8 b = -1;"), "-1 doesn't fit in u8");
     rejects(&body("u8 e = 'é';"), "isn't ASCII");

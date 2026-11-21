@@ -214,6 +214,13 @@ enum Ev {
         span: Span,
         what: String,
     },
+    /// A change to a capped array whose elements can move (REFERENCES §5.4).
+    Change {
+        target: R,
+        span: Span,
+        what: String,
+        kind: Change,
+    },
     Call(CallEv),
     Ret {
         values: Vec<R>,
@@ -260,6 +267,19 @@ struct Func {
     body: Vec<Node>,
 }
 
+/// What an event does to references into an array, for rule R.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Change {
+    /// Removes elements: every reference and slice into it ends.
+    Remove,
+    /// An insert that can move elements: every reference and slice into it ends.
+    Move,
+    /// A slice, a sort or a comparison that makes a ring or gap buffer one block: the
+    /// references to its elements end; slices stay right, as nothing moves until the
+    /// next change.
+    Rearrange,
+}
+
 #[derive(Clone, Default, PartialEq, Debug)]
 struct Summary {
     /// Per result: the formal roots it may have.
@@ -268,6 +288,9 @@ struct Summary {
     stores: BTreeSet<(Root, Root)>,
     /// Formal storage it may remove from.
     removes: Roots,
+    /// Formal storage whose elements it may move by inserting, or rearrange.
+    moves: Roots,
+    rearranges: Roots,
 }
 
 // ---------------------------------------------------------------- entry
@@ -394,24 +417,21 @@ impl<'p, 'a> Analysis<'p, 'a> {
             || matches!(t, Ty::Nullable(x) if matches!(**x, Ty::Ref(_)))
     }
 
-    /// An array or map that can lose elements, so references into it can't be stored (§5.3).
+    /// An array or map that can lose elements, or whose elements can move, so references
+    /// into it can't be stored (REFERENCES §5.3, §5.4).
     fn removable_ty(t: &Ty) -> bool {
         match t.unref() {
             Ty::Array(_, k) => {
-                k.cap != CapKind::Capped && (k.pop_end() || k.pop_front() || k.cursor_remove())
+                k.pop_end() || k.pop_front() || k.cursor_remove() || k.moves_elements()
             }
             Ty::Map(..) | Ty::Set(_) => true,
             _ => false,
         }
     }
 
-    /// Exempt from rule R: capped arrays and pools (§5.4).
+    /// Exempt from rule R: pools (REFERENCES §5.4).
     fn exempt_ty(t: &Ty) -> bool {
-        match t.unref() {
-            Ty::Array(_, k) => k.cap == CapKind::Capped,
-            Ty::Pool(_) => true,
-            _ => false,
-        }
+        matches!(t.unref(), Ty::Pool(_))
     }
 
     /// Resizable or variable-size: needs a data stack of its own (§8.1, §8.4).
@@ -740,14 +760,31 @@ impl<'p, 'a> Analysis<'p, 'a> {
                             .filter(|r| r.var.is_formal() || matches!(r.var, Var::Static(_))),
                     );
                 }
+                Ev::Change { target, kind, .. } => {
+                    let set = if *kind == Change::Rearrange {
+                        &mut s.rearranges
+                    } else {
+                        &mut s.moves
+                    };
+                    set.extend(
+                        self.eval(rs, target)
+                            .into_iter()
+                            .filter(|r| r.var.is_formal() || matches!(r.var, Var::Static(_))),
+                    );
+                }
                 Ev::Call(c) => {
                     for &g in &c.call.callees {
-                        for r in &self.summaries[g].removes {
-                            s.removes.extend(
-                                self.map_formal(rs, &c.call, r).into_iter().filter(|r| {
-                                    r.var.is_formal() || matches!(r.var, Var::Static(_))
-                                }),
-                            );
+                        let sm = &self.summaries[g];
+                        for (from, to) in [
+                            (&sm.removes, &mut s.removes),
+                            (&sm.moves, &mut s.moves),
+                            (&sm.rearranges, &mut s.rearranges),
+                        ] {
+                            for r in from {
+                                to.extend(self.map_formal(rs, &c.call, r).into_iter().filter(
+                                    |r| r.var.is_formal() || matches!(r.var, Var::Static(_)),
+                                ));
+                            }
                         }
                         for (a, b) in &self.summaries[g].stores {
                             let src = self.map_formal(rs, &c.call, a);
@@ -1057,9 +1094,14 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 && Self::removable_ty(&t)
             {
                 let n = self.root_name(f, s);
+                let can = if moves(&t) {
+                    "whose elements can move"
+                } else {
+                    "which can remove elements"
+                };
                 errs.push((
                     span,
-                    format!("a reference into {}, which can remove elements, can be kept only in a local variable or a parameter", n),
+                    format!("a reference into {}, {}, can be kept only in a local variable or a parameter", n, can),
                     "a field, an element or a static could keep it past a removal; store an index instead, or make the array grow-only (`T[..>]`) or a `pool` (REFERENCES §5.3)".into(),
                 ));
             }
@@ -1182,7 +1224,19 @@ impl<'p, 'a> Analysis<'p, 'a> {
                     Ev::Remove { target, span, what } => {
                         if report {
                             let t = self.eval(rs, target);
-                            self.removal(f, rs, statics, &t, &live, ctx, *span, what, errs);
+                            let c = Change::Remove;
+                            self.removal(f, rs, statics, &t, &live, ctx, *span, what, c, errs);
+                        }
+                    }
+                    Ev::Change {
+                        target,
+                        span,
+                        what,
+                        kind,
+                    } => {
+                        if report {
+                            let t = self.eval(rs, target);
+                            self.removal(f, rs, statics, &t, &live, ctx, *span, what, *kind, errs);
                         }
                     }
                     Ev::Call(c) => {
@@ -1190,12 +1244,20 @@ impl<'p, 'a> Analysis<'p, 'a> {
                         with_args.extend(c.uses.iter().copied());
                         if report {
                             for &g in &c.call.callees {
-                                for r in &self.summaries[g].removes {
-                                    let t = self.map_formal(rs, &c.call, r);
-                                    let what = format!("`{}(...)`", c.name);
-                                    self.removal(
-                                        f, rs, statics, &t, &with_args, ctx, c.span, &what, errs,
-                                    );
+                                let sm = &self.summaries[g];
+                                for (set, kind) in [
+                                    (&sm.removes, Change::Remove),
+                                    (&sm.moves, Change::Move),
+                                    (&sm.rearranges, Change::Rearrange),
+                                ] {
+                                    for r in set {
+                                        let t = self.map_formal(rs, &c.call, r);
+                                        let what = format!("`{}(...)`", c.name);
+                                        self.removal(
+                                            f, rs, statics, &t, &with_args, ctx, c.span, &what,
+                                            kind, errs,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1312,8 +1374,14 @@ impl<'p, 'a> Analysis<'p, 'a> {
         ctx: &LiveCtx,
         span: Span,
         what: &str,
+        kind: Change,
         errs: &mut Vec<(Span, String, String)>,
     ) {
+        let verb = match kind {
+            Change::Remove => "removes from",
+            Change::Move => "can move the elements of",
+            Change::Rearrange => "can rearrange",
+        };
         let target: Vec<Root> = target
             .iter()
             .filter(|t| !self.root_ty(f, t).is_some_and(|ty| Self::exempt_ty(&ty)))
@@ -1328,13 +1396,13 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 .find(|t| set.iter().any(|r| r.overlaps(t)))
                 .copied()
         };
-        // A for-each over the array keeps a position in it.
-        for (h, s) in &ctx.holders {
+        // A for-each over the array keeps a position in it, which a rearrangement keeps.
+        for (h, s) in ctx.holders.iter().filter(|_| kind != Change::Rearrange) {
             if let Some(t) = hits(h) {
                 let _ = s;
                 errs.push((
                     span,
-                    format!("{} removes from {} inside a for-each over it", what, self.root_name(f, &t)),
+                    format!("{} {} {} inside a for-each over it", what, verb, self.root_name(f, &t)),
                     "the loop keeps its place in it; remove afterwards, or use `retain` or a repeat loop (REFERENCES §9)".into(),
                 ));
                 return;
@@ -1347,7 +1415,9 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 Var::Param(i) => f.params[*i as usize].1.clone(),
                 _ => Ty::Unknown,
             };
-            if Self::whole_ref(&ty) {
+            if Self::whole_ref(&ty)
+                || kind == Change::Rearrange && matches!(ty, Ty::Slice(_) | Ty::View(_))
+            {
                 continue;
             }
             if let Some(t) = hits(set) {
@@ -1362,10 +1432,30 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 let bound = decl.map_or(String::new(), |d| {
                     format!(", declared on line {},", self.line(f.file, d))
                 });
+                let help = match kind {
+                    Change::Remove => format!(
+                        "`{}`{} is used after this; use it before the removal, or bind it again after (REFERENCES §5.2)",
+                        name, bound
+                    ),
+                    Change::Move => format!(
+                        "`{}`{} is used after this, and an insert into a ring or gap buffer can move its elements; use it before, or bind it again after (REFERENCES §5.4)",
+                        name, bound
+                    ),
+                    Change::Rearrange => format!(
+                        "`{}`{} is used after this; a slice, sort or comparison makes a ring or gap buffer one block first, which can move its elements; use it before, or bind it again after (REFERENCES §5.4)",
+                        name, bound
+                    ),
+                };
                 errs.push((
                     span,
-                    format!("{} removes from {} while `{}` may still refer into it", what, self.root_name(f, &t), name),
-                    format!("`{}`{} is used after this; use it before the removal, or bind it again after (REFERENCES §5.2)", name, bound),
+                    format!(
+                        "{} {} {} while `{}` may still refer into it",
+                        what,
+                        verb,
+                        self.root_name(f, &t),
+                        name
+                    ),
+                    help,
                 ));
                 return;
             }
@@ -1379,13 +1469,18 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 errs.push((
                     span,
                     format!(
-                        "{} removes from {}, and a field of {} may hold a reference into it",
+                        "{} {} {}, and a field of {} may hold a reference into it",
                         what,
+                        verb,
                         self.root_name(f, &t),
                         holder
                     ),
-                    "a reference kept in a field can be used after the removal (REFERENCES §5.3)"
-                        .into(),
+                    if kind == Change::Remove {
+                        "a reference kept in a field can be used after the removal (REFERENCES §5.3)"
+                    } else {
+                        "a reference kept in a field can be used after this, which can move the element it refers to (REFERENCES §5.4)"
+                    }
+                    .into(),
                 ));
                 return;
             }
@@ -1396,13 +1491,18 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 errs.push((
                     span,
                     format!(
-                        "{} removes from {}, and the static `{}` may hold a reference into it",
+                        "{} {} {}, and the static `{}` may hold a reference into it",
                         what,
+                        verb,
                         self.root_name(f, &t),
                         self.prog.classes[c].fields[i].name
                     ),
-                    "a reference kept in a static can be used after the removal (REFERENCES §5.3)"
-                        .into(),
+                    if kind == Change::Remove {
+                        "a reference kept in a static can be used after the removal (REFERENCES §5.3)"
+                    } else {
+                        "a reference kept in a static can be used after this, which can move the element it refers to (REFERENCES §5.4)"
+                    }
+                    .into(),
                 ));
                 return;
             }
@@ -1531,6 +1631,9 @@ struct Builder<'x, 'p, 'a> {
     /// Collecting the values of `yield`s.
     yields: Vec<Vec<R>>,
     lambda_depth: usize,
+    /// Rearrangements from converting a ring or gap buffer to a slice, which `convert`
+    /// finds; emitted before the next event.
+    pending: std::cell::RefCell<Vec<(R, Span)>>,
 }
 
 impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
@@ -1550,6 +1653,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             ret: Ty::Void,
             yields: Vec::new(),
             lambda_depth: 0,
+            pending: Default::default(),
         }
     }
 
@@ -1574,6 +1678,18 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
     }
 
     fn emit(&mut self, n: Node) {
+        let pending = std::mem::take(&mut *self.pending.borrow_mut());
+        for (target, span) in pending {
+            self.out
+                .last_mut()
+                .expect("a node list")
+                .push(Node::Ev(Ev::Change {
+                    target,
+                    span,
+                    what: "this slice".into(),
+                    kind: Change::Rearrange,
+                }));
+        }
         if let Node::Ev(Ev::Use(v)) = &n {
             for c in &mut self.collect {
                 c.push(*v);
@@ -1638,6 +1754,10 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
     /// The roots a value gets when it goes where type `to` is expected: a value place
     /// converts to a reference or a slice of itself (REFERENCES §3.2).
     fn convert(&self, v: &Val, from: &Ty, to: &Ty, span: Span) -> R {
+        if matches!(to, Ty::Slice(_) | Ty::View(_)) && moves(from) {
+            let r = R::Elems(Box::new(v.cell.clone().unwrap_or_else(|| v.refs.clone())));
+            self.pending.borrow_mut().push((r, span));
+        }
         if !self.an.holds_refs(to) {
             return R::Empty;
         }
@@ -2217,6 +2337,19 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                     let rv = self.expr(rhs);
                     let rt = self.ty(rhs);
                     let dst = self.storage(&lt, &lv, lhs.span);
+                    if moves(&lt) {
+                        let sym = match op {
+                            ast::BinOp::InsertEnd => "+>",
+                            ast::BinOp::InsertFront => "+<",
+                            _ => "+^",
+                        };
+                        self.ev(Ev::Change {
+                            target: R::Elems(Box::new(dst.clone())),
+                            span: e.span,
+                            what: format!("`{}`", sym),
+                            kind: Change::Move,
+                        });
+                    }
                     let elem = lt.elem().cloned().unwrap_or(Ty::Unknown);
                     let src = self.convert(&rv, &rt, &elem, rhs.span);
                     self.ev(Ev::Store {
@@ -2236,8 +2369,31 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                     Val::none()
                 }
                 _ => {
-                    self.expr(lhs);
-                    self.expr(rhs);
+                    let lv = self.expr(lhs);
+                    let rv = self.expr(rhs);
+                    // Comparing arrays compares slices of them.
+                    if matches!(
+                        op,
+                        ast::BinOp::Eq
+                            | ast::BinOp::Ne
+                            | ast::BinOp::Lt
+                            | ast::BinOp::Gt
+                            | ast::BinOp::Le
+                            | ast::BinOp::Ge
+                    ) {
+                        for (x, v) in [(lhs, lv), (rhs, rv)] {
+                            let t = self.ty(x);
+                            if moves(&t) {
+                                let r = R::Elems(Box::new(self.storage(&t, &v, x.span)));
+                                self.ev(Ev::Change {
+                                    target: r,
+                                    span: e.span,
+                                    what: "this comparison".into(),
+                                    kind: Change::Rearrange,
+                                });
+                            }
+                        }
+                    }
                     Val::none()
                 }
             },
@@ -2295,7 +2451,16 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                     self.expr(&b.expr);
                 }
                 let t = self.ty(expr);
-                Val::refs(R::Elems(Box::new(self.storage(&t, &v, expr.span))))
+                let r = R::Elems(Box::new(self.storage(&t, &v, expr.span)));
+                if moves(&t) {
+                    self.ev(Ev::Change {
+                        target: r.clone(),
+                        span: e.span,
+                        what: "this slice".into(),
+                        kind: Change::Rearrange,
+                    });
+                }
+                Val::refs(r)
             }
             _ => Val::none(),
         }
@@ -2733,6 +2898,25 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             })
         };
         let rt = recv_ty.unref();
+        if moves(rt) {
+            let first_string = params.first().is_some_and(|p| p.is_string());
+            let kind = match name {
+                "push" | "pushFront" | "insert" | "insertAt" | "pushAll" => Some(Change::Move),
+                "sort" | "stableSort" | "sortDescending" | "sortBy" | "stableSortBy" => {
+                    Some(Change::Rearrange)
+                }
+                _ if crate::builtins::slice_receiver(name, first_string) => Some(Change::Rearrange),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                self.ev(Ev::Change {
+                    target: recv.clone(),
+                    span,
+                    what: format!("`{}`", name),
+                    kind,
+                });
+            }
+        }
         match rt {
             Ty::Array(..) | Ty::Slice(_) | Ty::View(_) => match name {
                 "push" | "pushFront" | "insert" => {
@@ -2828,4 +3012,9 @@ fn is_true(e: &Expr) -> bool {
         E::Paren(x) => is_true(x),
         _ => false,
     }
+}
+
+/// A capped ring or gap buffer whose elements can move (REFERENCES §5.4).
+fn moves(t: &Ty) -> bool {
+    matches!(t.unref(), Ty::Array(_, k) if k.moves_elements())
 }

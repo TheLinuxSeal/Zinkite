@@ -131,7 +131,25 @@ impl ArrayKind {
         !self.is_frozen() && self.cap != CapKind::Capped
     }
 
-    /// Stored in order in one block, so it converts to a slice (DESIGN §4.10).
+    /// Converts to a slice (DESIGN §4.10): stored in order in one block, or capped, since
+    /// a capped ring or gap buffer is small enough to be rearranged into one block first.
+    pub fn sliceable(&self) -> bool {
+        self.contiguous() || self.cap == CapKind::Capped
+    }
+
+    /// A capped array whose elements can move (REFERENCES §5.4): a gap buffer, whose
+    /// edits move them, or a ring that changes at both ends and so can wrap, after which
+    /// its next slice rotates it. References and slices into one end at its next insert,
+    /// and a slice of one ends references to its elements.
+    pub fn moves_elements(&self) -> bool {
+        self.cap == CapKind::Capped
+            && (self.has_cursor()
+                || (self.start != '.'
+                    && self.end != '.'
+                    && (Self::inserts(self.start) || Self::inserts(self.end))))
+    }
+
+    /// Stored in order in one block.
     pub fn contiguous(&self) -> bool {
         !self.has_cursor()
             && self.cap != CapKind::Chunked

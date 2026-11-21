@@ -97,8 +97,9 @@ and caches the executable by a hash of the C; `-O` builds at `-O2`. TinyCC, whic
 DESIGN plans for `zink run`, isn't built in yet.
 
 It covers script files, classes, enums, constructors and methods, statuses,
-references, strings and interpolation, every array kind, slices (except of arrays
-whose elements aren't in order, which are undecided), every statement form, casts and
+references, strings and interpolation, every array kind, slices (except of cursor,
+chunked and reversed arrays on data stacks, which are undecided), every statement
+form, casts and
 the integer rules, and for-each over arrays and text iterators. Bugs stop the
 program with the file and line, and exit status 1. `examples/linebuf.zn` runs.
 
@@ -129,11 +130,24 @@ Each declaration of a growable local gets data stacks of its own.
 Capped arrays (`T[..~16]`) sit inline in their parent, with counters as narrow as
 the cap allows (DESIGN §11):
 - `{n, e[k]}` when only the end changes;
-- with a start slot (`T[~.~8]`): a ring buffer `{h, n, e[k]}`;
-- with a cursor (`T[~8]`, `T[.~.8]`): a gap buffer `{gs, an, e[k]}`, the elements
-  before the cursor at the start of `e` and those after it at the end. Edits at
-  the cursor are O(1), and seeks move the elements in between, so a reference into
-  one reads whatever element is in its slot afterwards (DESIGN §4.5).
+- with a start slot (`T[~.~8]`): a ring buffer `{h, n, e[k]}`. One that changes
+  only at the start (`T[>..8]`, `T[~..8]`) sits at the top of the buffer, so it
+  never wraps;
+- with a cursor (`T[~8]`, `T[.~.8]`): a gap buffer `{gs, an, cur, e[k]}`, the
+  elements before the gap at the start of `e` and those after it at the end. The
+  cursor is kept apart: seeks are free, and the gap moves to the cursor only for an
+  edit there, as in Emacs.
+
+Rule R covers capped arrays too (REFERENCES §5.4): a removal ends references into
+one. Gap buffers and rings that change at both ends can move elements, so an insert
+into one ends references and slices into it, and a slice, sort or comparison of one
+ends references to its elements.
+
+A slice of a ring or gap buffer whose elements are split first joins all of them:
+the ring rotates so its first element is at `e[0]`, or the gap moves to whichever
+end moves fewer. Later slices then move nothing until the next edit, so slices taken
+since the last edit agree (DESIGN §4.10). A slice of a temporary is copied to the
+scratch stack, so it lasts to the end of its statement.
 
 A literal longer than the cap doesn't compile, and text or a slice that's longer
 stops the program, as a cast that doesn't fit does (DESIGN §9.1).

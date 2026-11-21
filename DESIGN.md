@@ -213,7 +213,7 @@ There is no `T[k]`: `T[.k]` is the only fixed-size spelling.
 | `>..` | reversed array; the compiler flips the index math | free, no extra memory |
 | `>.>` | double-ended: starts in the middle of its stack's reservation, the front pointer moves down, the back pointer up | `a[i]` is `front + i`; must own its stack, so it can't be stored inline in a class |
 | a cursor slot other than `.` | a data array whose elements never move, plus an index array with a **gap buffer** at the cursor | reads take two loads; the start and end slots decide whether the index array is double-ended |
-| capped (a number or constant after the slots, such as `..~16`) | everything inline in the parent; ring buffer or reversed layout for a start slot, a small gap buffer for a cursor | nests inside classes; counter width chosen from `k` |
+| capped (a number or constant after the slots, such as `..~16`) | everything inline in the parent; for a start slot, one block at the top of the buffer when only the start changes, else a ring buffer; a small gap buffer for a cursor, kept apart from the cursor so the gap moves only for an edit there | nests inside classes; counter width chosen from `k` |
 | `<.<` | front and back offsets over existing data | a window that only narrows |
 | a trailing `$` | the same data array, with the index split into chunks of about √n entries (a two-level tiered vector, Goodrich and Kloss 1999) | inserts and removals anywhere cost O(√n); reads take three loads; the cursor is just a position |
 
@@ -238,7 +238,7 @@ Nothing gives O(1) insert anywhere together with O(1) indexing: about log n / lo
 - Removing widens the gap, and the element's slot in the data array becomes a hole.
 - **Holes are reused.** A removal puts the slot on a free list, and the next insert takes a slot from there before appending. The data array therefore never holds more slots than the most elements that were live at once, instead of growing with every insert.
 - **The free list lives inside the holes** when an element is at least 4 bytes. Smaller elements keep it in a small side array (Decided).
-- **The reuse is never visible**: removing from a cursor array while a reference into it may still be used is a compile error (§5.3, `REFERENCES.md` §5). On a data stack, references survive inserts and seeks, which never move elements. A capped cursor array's small gap buffer does move them (§4.3).
+- **The reuse is never visible**: removing from a cursor array while a reference into it may still be used is a compile error (§5.3, `REFERENCES.md` §5). On a data stack, references survive inserts and seeks, which never move elements. A capped cursor array's small gap buffer does move them (§4.3), so an insert into one ends references into it (§5.3).
 - **A cursor slot needs fixed-size elements**, so a reused hole always fits.
 - No swap-remove: it would break the order.
 
@@ -317,7 +317,7 @@ The sign says insert (`+`) or remove (`-`); the symbol says where: `<` start, `^
 - **No negative indices**: `a[-1]` is out of range, so a computed index that goes negative never silently wraps. Use `a[^1]` or `a[%-1]`.
 - **An index can be any integer type** (Decided). The check rejects any value beyond the length, so `buckets[h % (u64) buckets.len]` needs no cast back to `i64` (§9.2).
 - The asymmetry is deliberate: `a[^1]` counts elements from 1, while `seekFromEnd(0)` counts gaps from 0.
-- **Slices** `T[:]` are views without copying: a pointer and a length, into an array whose elements sit in order in one block. Slices of cursor, chunked, reversed and ring-buffer arrays are Open (§17).
+- **Slices** `T[:]` are views without copying: a pointer and a length, into an array whose elements sit in order in one block. Capped ring and gap buffers are made one block first (below). Slices of cursor, chunked and reversed arrays on data stacks are Open (§17).
 - **`a[i:j]` takes a slice** (Decided): the elements from `i` up to, but not including, `j`. `a[i:]` runs to the end, `a[:j]` starts at the beginning, and `a[:]` is the whole array. `^` counts from the end in either bound: `a[1:^1]` leaves out the first and last elements. A bound out of range, or `i > j`, stops the program.
 - **An array converts to a slice of its elements wherever a slice is expected** (Decided): as an argument, as a method's receiver, in a declared `T[:]` or `string` variable or field, in a `return`, and as an operand of `==` or another comparison whose other side is a slice. So `[:]` is rarely written:
   ```
@@ -333,7 +333,8 @@ The sign says insert (`+`) or remove (`-`); the symbol says where: `<` start, `^
   - **The view is rooted at the array**, as `out[:]` would be. Rule R applies unchanged, and its errors name the line that took the view.
   - **An array the code may change converts to a writable view** (`T[:]&`) the same way: `upcase(buf)`.
   - **The array's own methods win** over a slice method with the same signature. In overload ranking the conversion counts below an exact match (§6.5), so an overload that takes the array itself is preferred.
-  - **Only arrays whose elements sit in order in one block convert.** Cursor arrays, chunked (`$`) arrays, reversed arrays (`>..`) and capped arrays with a start slot, which are ring buffers, don't (§4.3), and the error says so. Their slices are open (§17).
+  - **Only arrays whose elements sit in order in one block convert.** Cursor arrays, chunked (`$`) arrays and reversed arrays (`>..`) on data stacks don't (§4.3), and the error says so. Their slices are open (§17).
+  - **Capped ring and gap buffers convert by becoming one block** (Decided). When a slice is taken and the elements are split, all of them are joined, not just the slice's: a ring is rotated so its first element is at the start, and a gap moves to whichever end moves fewer elements. The order and the cursor don't change. Later slices find one block and move nothing, so every slice taken since the last edit stays right. An insert or removal ends every slice and reference into the buffer, and a slice, sort or comparison ends references to its elements, which joining can move (§5.3); both are compile errors to use afterwards. The cost is at most one pass over `k` elements, after an edit.
 - **`T[:]` is read-only; `T[:]&` is a writable view** (Decided). Through a writable view, elements can be written but the length can't change, as `&` elsewhere means "may change it" (§5.1).
   ```
   rows[1:].sort();                        // sort everything but the header row
@@ -514,10 +515,12 @@ string w = outer;
 - References into a growing array stay valid while the array lives (§3.1).
 
 ### 5.3 Removal and stale references (Decided)
-- **Removing elements from an array on a data stack is a compile error while a reference into it may still be used.** That covers `pop`, the cursor removals, `clear`, and assigning the whole array. The check follows the program's order, and the error names the reference and the line where it was bound. This is Goose's rule, and rule R in `REFERENCES.md` §5.
+- **Removing elements from an array is a compile error while a reference into it may still be used.** That covers `pop`, the cursor removals, `clear`, and assigning the whole array. The check follows the program's order, and the error names the reference and the line where it was bound. This is Goose's rule, and rule R in `REFERENCES.md` §5.
 - **So freed slots are reused right away**: popped slots by the next push, and cursor-array holes by the next insert (§4.5).
-- **References into an array that can remove elements stay in local variables and parameters.** They can't be stored in fields, array elements or statics, so the compiler sees every one. References into grow-only and frozen arrays can be stored anywhere the root rule allows.
-- **Capped arrays and pools are the exception.** Their storage never holds another type, so a reference survives a removal and reads whatever value of the same type is in the slot: a logic bug, never memory corruption.
+- **References into an array that can remove elements, or whose elements can move, stay in local variables and parameters.** They can't be stored in fields, array elements or statics, so the compiler sees every one. References into grow-only and frozen arrays can be stored anywhere the root rule allows.
+- **A reference follows its element** (Decided). An insert that moves nothing ends nothing, at either end: after `i32& x = a[0]; a +< 0;`, `x` is `a[1]` and still reads the same value.
+- **Capped arrays follow the same rule** (Decided). A removal ends references into one, as on a data stack. Those whose elements can move, gap buffers (a cursor slot) and rings that change at both ends, which can wrap, also end references and slices at every insert, and a slice, sort or comparison of one ends references to its elements, as it may first make the buffer one block (§4.10). A capped array that changes only at the start sits at the top of its buffer, so like `[..>k]` it never moves an element (`REFERENCES.md` §5.4).
+- **Pools are the exception.** A pool's storage never holds another type, so a reference survives a `free` and reads whatever value of the same type is in the slot: a logic bug, never memory corruption.
 - **Variable-size values are written once**: a variable-size field can't be assigned. A whole variable can be, which rebuilds the value and counts as a removal (`REFERENCES.md` §6).
 
 ### 5.4 Links inside data (Decided)
@@ -526,7 +529,7 @@ The notes said "no pointers inside records", but also that `push` returns a refe
 2. **Self-relative links**: `T&<i32>` (or `<i16>`, `<i8>`) stores a signed byte offset from the field to its target in the same array, as Goose's relative references do. They are compact, and mean the same thing wherever the whole array is copied. Saving them as bytes needs a check that is Open (`REFERENCES.md` §12). A value with these links can't be copied out of its array, only referenced in place.
 3. **Pool links**: `T&<u32 in arr>` stores an offset from the start of `arr`, a static grow-only array, so values holding them can be copied anywhere (Goose's pool-relative references). The built-in `pool<T>` (§3.5) isn't such an array.
 
-Links and references in fields can point only into arrays whose elements stay in their slots: grow-only and frozen arrays, and capped arrays whose cursor slot is `.`. References in fields may also point into pools (`REFERENCES.md` §7.4). A field may also refer to a whole array, as the library's writers do (`REFERENCES.md` §7.1).
+Links and references in fields can point only into arrays whose elements stay in their slots: grow-only and frozen arrays, capped ones included, except a capped ring that grows at both ends (`T[>.>k]`), which can wrap. References in fields may also point into pools (`REFERENCES.md` §7.4). A field may also refer to a whole array, as the library's writers do (`REFERENCES.md` §7.1).
 
 Plain indices (`i64`, or `u32` to save space) remain available as ordinary numbers.
 
@@ -1550,7 +1553,7 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 - **A second map type with Goose's direct layout**, for large maps that are mostly read. In maps too big for the CPU cache it finds keys 1.3–1.75× faster than `hashmap`, but iterates in no fixed order, and its references last only until the next insert (§15).
 - **Making a window** (`T[<.<]`): the type is in §4.2, but nothing creates one yet.
 - `*` on unbounded editable arrays (`T[..>*]`) (§4.6).
-- Slices of arrays whose elements aren't stored in order: cursor, chunked (`$`), reversed (`>..`) and ring-buffer capped arrays. Logical order is the natural choice for what a slice shows (§4.3, §4.10).
+- Slices of arrays on data stacks whose elements aren't stored in order: cursor, chunked (`$`) and reversed (`>..`) arrays. Logical order is the natural choice for what a slice shows (§4.3, §4.10). Capped ring and gap buffers are decided: they become one block first (§4.10).
 - Multi-dimensional arrays (the previous design had `array<int, 2>` with `m[i, j]`).
 - Compile-time constants as type arguments, for caps (§10).
 
