@@ -80,7 +80,7 @@ pub fn compile(c: &str, out: &Path, optimize: bool) -> Result<(), String> {
 
 /// `$XDG_CACHE_HOME/zink`, or `~/.cache/zink`: created with mode 0700, and refused
 /// if another user could write to it (DESIGN §14.4).
-fn cache_dir() -> Result<PathBuf, String> {
+pub(crate) fn cache_dir() -> Result<PathBuf, String> {
     let base = match std::env::var("XDG_CACHE_HOME") {
         Ok(d) if !d.is_empty() => PathBuf::from(d),
         _ => PathBuf::from(

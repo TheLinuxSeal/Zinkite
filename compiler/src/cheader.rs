@@ -5,6 +5,9 @@
 //! `extern` declaration.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::token::Prim;
@@ -29,29 +32,34 @@ pub struct CFunc {
     pub why_not: Option<String>,
 }
 
-/// The C compiler that reads headers: `clang`, which can dump declarations.
-fn clang() -> Result<String, String> {
-    let ok = |c: &str| {
-        Command::new(c).arg("--version").output().is_ok_and(|o| {
-            o.status.success() && String::from_utf8_lossy(&o.stdout).contains("clang")
-        })
+/// The C compiler that reads headers: `clang`, which can dump declarations; `$CC` when
+/// that's a clang. Found on the path without running it, so a cached read starts nothing.
+fn find_clang() -> Result<PathBuf, String> {
+    let on_path = |name: &str| -> Option<PathBuf> {
+        if name.contains('/') {
+            return std::fs::canonicalize(name).ok();
+        }
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .map(|d| d.join(name))
+            .find(|p| p.is_file())
+            .and_then(|p| std::fs::canonicalize(p).ok())
     };
     if let Ok(cc) = std::env::var("CC")
-        && !cc.is_empty()
-        && ok(&cc)
+        && cc.contains("clang")
+        && let Some(p) = on_path(&cc)
     {
-        return Ok(cc);
+        return Ok(p);
     }
-    if ok("clang") {
-        return Ok("clang".into());
-    }
-    Err(
+    on_path("clang").ok_or_else(|| {
         "reading C headers needs clang, which can list what a header declares; install clang"
-            .into(),
-    )
+            .to_string()
+    })
 }
 
-fn run(cc: &str, args: &[&str], input: &str) -> Result<String, String> {
+fn run(cc: &Path, args: &[&str], input: &str) -> Result<String, String> {
+    let cc = cc.display().to_string();
+    let cc = cc.as_str();
     use std::io::Write;
     let mut child = Command::new(cc)
         .args(args)
@@ -86,15 +94,191 @@ fn run(cc: &str, args: &[&str], input: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Reads the headers, as one translation unit would include them.
+/// Reads the headers, as one translation unit would include them. What clang found is
+/// cached by the headers' names and the clang binary, and kept while every file it read
+/// is unchanged, so a later run reads a few files' sizes and times and starts nothing.
 pub fn read(headers: &[String]) -> Result<CScope, String> {
-    let cc = clang()?;
+    let cc = find_clang()?;
+    let file = cache_file(headers, &cc);
+    if let Some(f) = &file
+        && let Some(s) = load(f, headers)
+    {
+        return Ok(s);
+    }
+    let deps_file = file
+        .as_ref()
+        .map(|f| f.with_extension(format!("d{}", std::process::id())));
+    let scope = read_with(&cc, headers, deps_file.as_deref())?;
+    if let (Some(f), Some(d)) = (&file, &deps_file) {
+        let deps = std::fs::read_to_string(d).unwrap_or_default();
+        let _ = std::fs::remove_file(d);
+        store(f, &scope, &dep_files(&deps));
+    }
+    Ok(scope)
+}
+
+/// The cache file for these headers and this clang: in the compiler's cache directory,
+/// which is the user's own (`driver::cache_dir`), since a planted one would give the
+/// compiler false C signatures. None when there's no cache directory.
+fn cache_file(headers: &[String], cc: &Path) -> Option<PathBuf> {
+    let dir = crate::driver::cache_dir().ok()?;
+    let meta = std::fs::metadata(cc).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    "zink-cheader 1".hash(&mut h);
+    env!("CARGO_PKG_VERSION").hash(&mut h);
+    headers.hash(&mut h);
+    cc.hash(&mut h);
+    (meta.len(), meta.mtime(), meta.mtime_nsec()).hash(&mut h);
+    Some(dir.join(format!("h-{:016x}", h.finish())))
+}
+
+/// The files a make-style dependency list names: `-.o: /usr/include/stdio.h \ ...`.
+fn dep_files(deps: &str) -> Vec<PathBuf> {
+    let body = deps.split_once(':').map_or("", |(_, b)| b);
+    body.split_whitespace()
+        .filter(|w| *w != "\\")
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// A file's size and modification time, which say whether it changed.
+fn stamp(p: &Path) -> Option<(u64, i64, i64)> {
+    let m = std::fs::metadata(p).ok()?;
+    Some((m.len(), m.mtime(), m.mtime_nsec()))
+}
+
+/// Writes the scope in a line format, through a temporary file and a rename, so a
+/// reader never sees half of it.
+fn store(f: &Path, scope: &CScope, deps: &[PathBuf]) {
+    use std::fmt::Write as _;
+    let mut out = String::from("zink-cheader 1\n");
+    for d in deps {
+        if let Some((len, s, ns)) = stamp(d) {
+            let _ = writeln!(out, "dep {} {} {} {}", len, s, ns, d.display());
+        }
+    }
+    let mut consts: Vec<_> = scope.consts.iter().collect();
+    consts.sort();
+    for (n, v) in consts {
+        let _ = writeln!(out, "const {} {}", n, v);
+    }
+    let mut handles: Vec<_> = scope.handles.iter().collect();
+    handles.sort();
+    for h in handles {
+        let _ = writeln!(out, "handle {}", h);
+    }
+    let mut funcs: Vec<_> = scope.funcs.iter().collect();
+    funcs.sort_by(|a, b| a.0.cmp(b.0));
+    for (n, f) in funcs {
+        let mut line = format!("func {} {} {}", n, ty_code(&f.ret), f.params.len());
+        for p in &f.params {
+            line.push(' ');
+            line.push_str(&ty_code(p));
+        }
+        if let Some(w) = &f.why_not {
+            line.push_str(" why ");
+            line.push_str(w);
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    let tmp = f.with_extension(format!("tmp{}", std::process::id()));
+    if std::fs::write(&tmp, out).is_ok() && std::fs::rename(&tmp, f).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// The cached scope, when every file clang read is as it was.
+fn load(f: &Path, headers: &[String]) -> Option<CScope> {
+    let text = std::fs::read_to_string(f).ok()?;
+    let mut lines = text.lines();
+    if lines.next()? != "zink-cheader 1" {
+        return None;
+    }
+    let mut scope = CScope {
+        headers: headers.to_vec(),
+        ..Default::default()
+    };
+    for line in lines {
+        let (kind, rest) = line.split_once(' ')?;
+        match kind {
+            "dep" => {
+                let mut w = rest.splitn(4, ' ');
+                let len: u64 = w.next()?.parse().ok()?;
+                let s: i64 = w.next()?.parse().ok()?;
+                let ns: i64 = w.next()?.parse().ok()?;
+                let path = Path::new(w.next()?);
+                if stamp(path) != Some((len, s, ns)) {
+                    return None;
+                }
+            }
+            "const" => {
+                let (n, v) = rest.split_once(' ')?;
+                scope.consts.insert(n.to_string(), v.parse().ok()?);
+            }
+            "handle" => {
+                scope.handles.insert(rest.to_string());
+            }
+            "func" => {
+                let (main, why) = match rest.split_once(" why ") {
+                    Some((m, w)) => (m, Some(w.to_string())),
+                    None => (rest, None),
+                };
+                let mut w = main.split(' ');
+                let name = w.next()?.to_string();
+                let ret = parse_ty(w.next()?)?;
+                let n: usize = w.next()?.parse().ok()?;
+                let params: Vec<Ty> = (0..n)
+                    .map(|_| w.next().and_then(parse_ty))
+                    .collect::<Option<_>>()?;
+                scope.funcs.insert(
+                    name,
+                    CFunc {
+                        params,
+                        ret,
+                        why_not: why,
+                    },
+                );
+            }
+            _ => return None,
+        }
+    }
+    Some(scope)
+}
+
+/// A Zinkite type as the cache writes it: the few kinds a C signature maps to.
+fn ty_code(t: &Ty) -> String {
+    match t {
+        Ty::Prim(p) => p.name().to_string(),
+        Ty::Void => "void".into(),
+        Ty::CHandle(n) => format!("h:{}", n),
+        t if t.is_string() => "string".into(),
+        _ => "?".into(),
+    }
+}
+
+fn parse_ty(s: &str) -> Option<Ty> {
+    Some(match s {
+        "void" => Ty::Void,
+        "bool" => Ty::Prim(Prim::Bool),
+        "string" => Ty::string(),
+        "?" => Ty::Unknown,
+        s => match s.strip_prefix("h:") {
+            Some(n) => Ty::CHandle(n.to_string()),
+            None => Ty::Prim(Prim::from_suffix(s)?),
+        },
+    })
+}
+
+/// Runs clang over the headers: once for the declarations, once for the macros, which
+/// also lists every file read into `deps` when given.
+fn read_with(cc: &Path, headers: &[String], deps: Option<&Path>) -> Result<CScope, String> {
     let src: String = headers
         .iter()
         .map(|h| format!("#include <{}>\n", h))
         .collect();
     let ast = run(
-        &cc,
+        cc,
         &[
             "-x",
             "c",
@@ -106,7 +290,13 @@ pub fn read(headers: &[String]) -> Result<CScope, String> {
         ],
         &src,
     )?;
-    let macros = run(&cc, &["-x", "c", "-dM", "-E", "-"], &src)?;
+    let deps_s = deps.map(|d| d.display().to_string());
+    let mut margs = vec!["-x", "c", "-dM", "-E"];
+    if let Some(d) = &deps_s {
+        margs.extend(["-MD", "-MF", d.as_str()]);
+    }
+    margs.push("-");
+    let macros = run(cc, &margs, &src)?;
     let mut scope = CScope {
         headers: headers.to_vec(),
         ..Default::default()
@@ -447,4 +637,66 @@ pub fn crosses_as_param(t: &Ty) -> bool {
 
 pub fn crosses_as_result(t: &Ty) -> bool {
     matches!(t, Ty::Prim(_) | Ty::CHandle(_) | Ty::Void)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dependency_lists() {
+        let d = "-.o: /usr/include/stdio.h \\\n  /usr/include/features.h /usr/include/math.h\n";
+        assert_eq!(
+            dep_files(d),
+            vec![
+                PathBuf::from("/usr/include/stdio.h"),
+                PathBuf::from("/usr/include/features.h"),
+                PathBuf::from("/usr/include/math.h"),
+            ]
+        );
+    }
+
+    /// What `store` writes, `load` reads back, while the files it depends on are unchanged.
+    #[test]
+    fn the_cache_round_trips() {
+        let dir = std::env::temp_dir().join(format!("zink-cheader-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dep = dir.join("fake.h");
+        std::fs::write(&dep, "int x;").unwrap();
+        let mut scope = CScope::default();
+        scope.consts.insert("EOF".into(), -1);
+        scope.handles.insert("FILE".into());
+        scope.funcs.insert(
+            "fopen".into(),
+            CFunc {
+                params: vec![Ty::string(), Ty::string()],
+                ret: Ty::CHandle("FILE".into()),
+                why_not: None,
+            },
+        );
+        scope.funcs.insert(
+            "printf".into(),
+            CFunc {
+                params: Vec::new(),
+                ret: Ty::Prim(Prim::I32),
+                why_not: Some("it takes a variable number of arguments".into()),
+            },
+        );
+        let f = dir.join("h-test");
+        store(&f, &scope, std::slice::from_ref(&dep));
+        let back = load(&f, &["stdio.h".to_string()]).expect("cached");
+        assert_eq!(back.consts.get("EOF"), Some(&-1));
+        assert!(back.handles.contains("FILE"));
+        let fopen = &back.funcs["fopen"];
+        assert_eq!(fopen.params, vec![Ty::string(), Ty::string()]);
+        assert_eq!(fopen.ret, Ty::CHandle("FILE".into()));
+        assert_eq!(
+            back.funcs["printf"].why_not.as_deref(),
+            Some("it takes a variable number of arguments")
+        );
+        // A changed dependency makes the entry stale.
+        std::fs::write(&dep, "int x; int y;").unwrap();
+        assert!(load(&f, &["stdio.h".to_string()]).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

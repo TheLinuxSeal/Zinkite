@@ -139,8 +139,10 @@ Functions whose signatures have one clear meaning are called directly: numbers,
 structs as handles. The generated C includes the header, so the C compiler checks
 every call. An explicit `extern` declaration gets a prototype bound to the C symbol
 by an asm label, so it can't clash with the header's own. `extern link m;` reaches
-the driver through a comment at the top of the C. The headers are read again on
-every run, about 25 ms each; caching that is still to do.
+the driver through a comment at the top of the C. What clang finds is cached in the
+cache directory, keyed by the headers' names and the clang binary, and kept while
+every file clang read is unchanged; a cached read checks those files' sizes and times
+and starts no process.
 
 Not yet: interfaces (calls through an interface reference), a capturing lambda
 passed to a function of the program's own (which needs that function specialized per lambda), `filter`, `map`
