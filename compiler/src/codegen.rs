@@ -131,6 +131,8 @@ fn prim_c(p: Prim) -> &'static str {
         Prim::U16 => "uint16_t",
         Prim::U32 => "uint32_t",
         Prim::U64 => "uint64_t",
+        Prim::I128 => "zr_i128",
+        Prim::U128 => "zr_u128",
         Prim::F32 => "float",
         Prim::F64 => "double",
     }
@@ -141,7 +143,17 @@ fn unsigned_of(p: Prim) -> &'static str {
         Prim::I8 | Prim::U8 => "uint8_t",
         Prim::I16 | Prim::U16 => "uint16_t",
         Prim::I32 | Prim::U32 => "uint32_t",
+        Prim::I128 | Prim::U128 => "zr_u128",
         _ => "uint64_t",
+    }
+}
+
+/// Integer temporaries wide enough for a conversion between `a` and `b`.
+fn wide_temps(a: Prim, b: Prim) -> (&'static str, &'static str) {
+    if bits(a) == 128 || bits(b) == 128 {
+        ("zr_i128", "zr_u128")
+    } else {
+        ("int64_t", "uint64_t")
     }
 }
 
@@ -155,6 +167,8 @@ fn min_max(p: Prim) -> (String, String) {
         Prim::U16 => ("0", "UINT16_MAX"),
         Prim::U32 => ("0", "UINT32_MAX"),
         Prim::U64 => ("0", "UINT64_MAX"),
+        Prim::I128 => ("ZR_I128_MIN", "ZR_I128_MAX"),
+        Prim::U128 => ("0", "ZR_U128_MAX"),
         Prim::F32 => ("-FLT_MAX", "FLT_MAX"),
         Prim::F64 => ("-DBL_MAX", "DBL_MAX"),
         Prim::Bool => ("0", "1"),
@@ -370,6 +384,8 @@ impl<'p, 'a> Gen<'p, 'a> {
             Ty::Prim(Prim::I64) => return "zr_res_i64".into(),
             Ty::Prim(Prim::U64) => return "zr_res_u64".into(),
             Ty::Prim(Prim::F64) => return "zr_res_f64".into(),
+            Ty::Prim(Prim::I128) => return "zr_res_i128".into(),
+            Ty::Prim(Prim::U128) => return "zr_res_u128".into(),
             _ => {}
         }
         let c = self.cty(t, span);
@@ -1612,7 +1628,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                 expr,
             } if matches!(expr.kind, E::Int { suffix: None, .. }) => {
                 if let E::Int { value, .. } = &expr.kind {
-                    return self.int_lit(-(*value as i128), want);
+                    return self.int_lit((*value as i128).wrapping_neg(), want);
                 }
             }
             E::Null => return "NULL".into(),
@@ -1691,6 +1707,20 @@ impl<'p, 'a> Gen<'p, 'a> {
         match want {
             Ty::Prim(p) if p.is_float() => format!("{}.0", v),
             Ty::Prim(Prim::I64) if v == i64::MIN as i128 => "INT64_MIN".into(),
+            // C has no 128-bit literals: beyond 64 bits, two halves.
+            Ty::Prim(p @ (Prim::I128 | Prim::U128)) => {
+                if v > i64::MIN as i128 && v <= i64::MAX as i128 {
+                    format!("(({}){}LL)", prim_c(*p), v)
+                } else {
+                    let b = v as u128;
+                    format!(
+                        "(({})(((zr_u128)0x{:x}ULL << 64) | 0x{:x}ULL))",
+                        prim_c(*p),
+                        (b >> 64) as u64,
+                        b as u64
+                    )
+                }
+            }
             Ty::Prim(p) if p.is_int() => {
                 let suffix = if *p == Prim::U64 {
                     "ULL"
@@ -1939,10 +1969,15 @@ impl<'p, 'a> Gen<'p, 'a> {
     fn rv(&mut self, e: &Expr) -> (String, Ty) {
         let t = settle(&self.ty(e));
         match &e.kind {
-            E::Int { value, suffix } => (
-                self.int_lit(*value as i128, &suffix.map_or(Ty::i64(), Ty::Prim)),
-                t,
-            ),
+            E::Int { value, suffix } => {
+                // Unsuffixed, it's an `i64`, or a `u128` when only that holds it.
+                let lt = match (suffix, &t) {
+                    (Some(p), _) => Ty::Prim(*p),
+                    (None, Ty::Prim(Prim::U128)) => t.clone(),
+                    (None, _) => Ty::i64(),
+                };
+                (self.int_lit(*value as i128, &lt), t)
+            }
             E::Float { text, suffix } => (
                 if *suffix == Some(Prim::F32) {
                     format!("{}f", float_text(text))
@@ -2632,13 +2667,15 @@ impl<'p, 'a> Gen<'p, 'a> {
                 // Exact comparison of a signed and an unsigned value (DESIGN §9.2).
                 let x = self.expr(l, &lu);
                 let y = self.expr(r, &ru);
-                if signed(*a) {
-                    format!("(zr_cmp_su((int64_t)({}), (uint64_t)({})) {} 0)", x, y, sym)
+                let (f, st, ut) = if bits(*a) == 128 || bits(*b) == 128 {
+                    ("zr_cmp_su128", "zr_i128", "zr_u128")
                 } else {
-                    format!(
-                        "(-zr_cmp_su((int64_t)({}), (uint64_t)({})) {} 0)",
-                        y, x, sym
-                    )
+                    ("zr_cmp_su", "int64_t", "uint64_t")
+                };
+                if signed(*a) {
+                    format!("({}(({})({}), ({})({})) {} 0)", f, st, x, ut, y, sym)
+                } else {
+                    format!("(-{}(({})({}), ({})({})) {} 0)", f, st, y, ut, x, sym)
                 }
             }
             (Ty::Class(c, _), _) if self.prog.classes[*c].kind != ClassKind::Enum => {
@@ -2744,18 +2781,33 @@ impl<'p, 'a> Gen<'p, 'a> {
             };
             return (code, out);
         }
+        let (st, ut) = wide_temps(fp, *to);
         let code = match mode {
             ast::CastMode::Wrap => format!("(({})({})({}))", tc, unsigned_of(*to), v),
             ast::CastMode::Saturate => {
                 if signed(fp) {
                     format!(
-                        "({{ int64_t _v = (int64_t)({}); _v < (int64_t){} ? ({}){} : (uint64_t)_v > (uint64_t){} && _v > 0 ? ({}){} : ({})_v; }})",
-                        v, lo, tc, lo, hi, tc, hi, tc
+                        "({{ {st} _v = ({st})({}); _v < ({st}){} ? ({}){} : ({ut})_v > ({ut}){} && _v > 0 ? ({}){} : ({})_v; }})",
+                        v,
+                        lo,
+                        tc,
+                        lo,
+                        hi,
+                        tc,
+                        hi,
+                        tc,
+                        st = st,
+                        ut = ut
                     )
                 } else {
                     format!(
-                        "({{ uint64_t _v = (uint64_t)({}); _v > (uint64_t){} ? ({}){} : ({})_v; }})",
-                        v, hi, tc, hi, tc
+                        "({{ {ut} _v = ({ut})({}); _v > ({ut}){} ? ({}){} : ({})_v; }})",
+                        v,
+                        hi,
+                        tc,
+                        hi,
+                        tc,
+                        ut = ut
                     )
                 }
             }
@@ -2764,22 +2816,25 @@ impl<'p, 'a> Gen<'p, 'a> {
                     format!("(({}){})", tc, v)
                 } else if signed(fp) {
                     format!(
-                        "({{ int64_t _v = (int64_t)({}); if (_v < (int64_t){} || (_v > 0 && (uint64_t)_v > (uint64_t){})) zr_fail({}, \"the value doesn't fit in {}\"); ({})_v; }})",
+                        "({{ {st} _v = ({st})({}); if (_v < ({st}){} || (_v > 0 && ({ut})_v > ({ut}){})) zr_fail({}, \"the value doesn't fit in {}\"); ({})_v; }})",
                         v,
                         lo,
                         hi,
                         loc,
                         to.name(),
-                        tc
+                        tc,
+                        st = st,
+                        ut = ut
                     )
                 } else {
                     format!(
-                        "({{ uint64_t _v = (uint64_t)({}); if (_v > (uint64_t){}) zr_fail({}, \"the value doesn't fit in {}\"); ({})_v; }})",
+                        "({{ {ut} _v = ({ut})({}); if (_v > ({ut}){}) zr_fail({}, \"the value doesn't fit in {}\"); ({})_v; }})",
                         v,
                         hi,
                         loc,
                         to.name(),
-                        tc
+                        tc,
+                        ut = ut
                     )
                 }
             }
@@ -2910,19 +2965,18 @@ impl<'p, 'a> Gen<'p, 'a> {
                     ("pad" | "zeroPad", Some(p)) => {
                         let w = arg(self, pre);
                         let fill = if name.name == "pad" { "' '" } else { "'0'" };
-                        let f = if p.is_float() {
-                            "zr_w_f64_pad"
+                        let (f, cast) = if p.is_float() {
+                            ("zr_w_f64_pad", "double")
+                        } else if bits(p) == 128 {
+                            if signed(p) {
+                                ("zr_w_i128_pad", "zr_i128")
+                            } else {
+                                ("zr_w_u128_pad", "zr_u128")
+                            }
                         } else if signed(p) {
-                            "zr_w_i64_pad"
+                            ("zr_w_i64_pad", "int64_t")
                         } else {
-                            "zr_w_u64_pad"
-                        };
-                        let cast = if p.is_float() {
-                            "double"
-                        } else if signed(p) {
-                            "int64_t"
-                        } else {
-                            "uint64_t"
+                            ("zr_w_u64_pad", "uint64_t")
                         };
                         let _ = write!(writes, "{}({}, ({}){}, {}, {}); ", f, k, cast, v, w, fill);
                     }
@@ -2932,15 +2986,23 @@ impl<'p, 'a> Gen<'p, 'a> {
                             "bin" => 1,
                             _ => 3,
                         };
-                        let _ = write!(
-                            writes,
-                            "zr_w_radix({}, (uint64_t)({}){}, {}, {}); ",
-                            k,
-                            unsigned_of(p),
-                            v,
-                            bits(p),
-                            shift
-                        );
+                        if bits(p) == 128 {
+                            let _ = write!(
+                                writes,
+                                "zr_w_radix128({}, (zr_u128)({}), {}); ",
+                                k, v, shift
+                            );
+                        } else {
+                            let _ = write!(
+                                writes,
+                                "zr_w_radix({}, (uint64_t)({}){}, {}, {}); ",
+                                k,
+                                unsigned_of(p),
+                                v,
+                                bits(p),
+                                shift
+                            );
+                        }
                     }
                     ("fixed", Some(_)) => {
                         let d = arg(self, pre);
@@ -3001,6 +3063,12 @@ impl<'p, 'a> Gen<'p, 'a> {
             Ty::Prim(p) if p.is_float() => {
                 let _ = write!(writes, "zr_w_f64({}, (double){}); ", k, v);
             }
+            Ty::Prim(Prim::I128) => {
+                let _ = write!(writes, "zr_w_i128({}, {}); ", k, v);
+            }
+            Ty::Prim(Prim::U128) => {
+                let _ = write!(writes, "zr_w_u128({}, {}); ", k, v);
+            }
             Ty::Prim(p) if signed(*p) => {
                 let _ = write!(writes, "zr_w_i64({}, (int64_t){}); ", k, v);
             }
@@ -3031,6 +3099,8 @@ impl<'p, 'a> Gen<'p, 'a> {
                 let one = match &el {
                     Ty::Prim(p) if p.is_float() => format!("zr_w_f64({}, (double)_e)", k),
                     Ty::Prim(Prim::Bool) => format!("zr_w_bool({}, _e)", k),
+                    Ty::Prim(Prim::I128) => format!("zr_w_i128({}, _e)", k),
+                    Ty::Prim(Prim::U128) => format!("zr_w_u128({}, _e)", k),
                     Ty::Prim(p) if signed(*p) => format!("zr_w_i64({}, (int64_t)_e)", k),
                     Ty::Prim(_) => format!("zr_w_u64({}, (uint64_t)_e)", k),
                     Ty::Slice(_) => format!("zr_w_str({}, _e)", k),
@@ -3323,6 +3393,13 @@ impl<'p, 'a> Gen<'p, 'a> {
                                     "_r"
                                 }
                             )
+                        } else if bits(p) == 128 {
+                            let f = if signed(p) {
+                                "zr_parse_i128"
+                            } else {
+                                "zr_parse_u128"
+                            };
+                            format!("{}({}, {})", f, s, base)
                         } else if signed(p) {
                             let (lo, hi) = min_max(p);
                             let rt = self.result_ty(&Ty::Prim(p), span);
@@ -3351,6 +3428,53 @@ impl<'p, 'a> Gen<'p, 'a> {
                             self.result_ty(&Ty::Prim(Prim::F32), span);
                         }
                         fail(code, Ty::Prim(p))
+                    }
+                    // A checked conversion that reports RANGE, and gives 0, where a cast
+                    // would stop the program (STDLIB §2).
+                    "from" if prim.is_int() => {
+                        let to = *prim;
+                        let ft = settle(self.ty(&args[0].expr).unref());
+                        let x = self.expr(&args[0].expr, &ft);
+                        let tc = prim_c(to);
+                        let rt = self.result_ty(&Ty::Prim(to), span);
+                        let (lo, hi) = min_max(to);
+                        let code = match ft {
+                            Ty::Prim(fp) if lossless(fp, to) => {
+                                format!("(({}){{({})({}), 0}})", rt, tc, x)
+                            }
+                            Ty::Prim(fp) if fp.is_float() => format!(
+                                "({{ double _v = (double)({}); {} _r = {{0, 34}}; if (_v > (double){} - 1.0 && _v < (double){} + 1.0) {{ _r.v = ({})_v; _r.s = 0; }} _r; }})",
+                                x, rt, lo, hi, tc
+                            ),
+                            Ty::Prim(fp) if signed(fp) => {
+                                let (st, ut) = wide_temps(fp, to);
+                                format!(
+                                    "({{ {st} _v = ({st})({}); {} _r = {{0, 34}}; if (!(_v < ({st}){} || (_v > 0 && ({ut})_v > ({ut}){}))) {{ _r.v = ({})_v; _r.s = 0; }} _r; }})",
+                                    x,
+                                    rt,
+                                    lo,
+                                    hi,
+                                    tc,
+                                    st = st,
+                                    ut = ut
+                                )
+                            }
+                            Ty::Prim(fp) => {
+                                let (_, ut) = wide_temps(fp, to);
+                                format!(
+                                    "({{ {ut} _v = ({ut})({}); {} _r = {{0, 34}}; if (_v <= ({ut}){}) {{ _r.v = ({})_v; _r.s = 0; }} _r; }})",
+                                    x,
+                                    rt,
+                                    hi,
+                                    tc,
+                                    ut = ut
+                                )
+                            }
+                            _ => {
+                                return ok(self.unsupported(span, "`from` on this value"), ret);
+                            }
+                        };
+                        fail(code, Ty::Prim(to))
                     }
                     _ => ok(
                         self.unsupported(span, &format!("`{}.{}`", prim.name(), m.name)),
@@ -3454,6 +3578,13 @@ impl<'p, 'a> Gen<'p, 'a> {
                         Ty::Prim(p),
                     )
                 }
+                "popCount" if bits(p) == 128 => ok(
+                    format!(
+                        "({{ zr_u128 _x = (zr_u128)({}); (int64_t)(__builtin_popcountll((uint64_t)_x) + __builtin_popcountll((uint64_t)(_x >> 64))); }})",
+                        v
+                    ),
+                    Ty::i64(),
+                ),
                 "popCount" => ok(
                     format!(
                         "(int64_t)__builtin_popcountll((uint64_t)({})({}))",

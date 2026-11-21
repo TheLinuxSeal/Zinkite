@@ -129,6 +129,34 @@ fn literals_take_their_type_from_where_they_are_used() {
         "u8 b = 200; f64 x = 0.5; var i = 0; i64 big = 100000 * 100000; u32 c = 'a'; u8 comma = ','; f32 h = 1.5f32; i64 m = -1;",
     ));
     rejects(&body("u8 b = 300;"), "300 doesn't fit in u8");
+    // 128-bit literals (DESIGN §9.1): above `i128.MAX`, only a `u128` holds one.
+    ok(&body(
+        "u128 a = 340282366920938463463374607431768211455; i128 b = -170141183460469231731687303715884105728; i128 c = 18446744073709551616; u128 d = 7u128;",
+    ));
+    rejects(
+        &body("u8 a = 340282366920938463463374607431768211455;"),
+        "340282366920938463463374607431768211455 doesn't fit in u8",
+    );
+    rejects(
+        &body("i128 b = 170141183460469231731687303715884105728;"),
+        "170141183460469231731687303715884105728 doesn't fit in i128",
+    );
+    rejects(
+        &body("i128 b = 170141183460469231731687303715884105728i128;"),
+        "doesn't fit in i128",
+    );
+    rejects(
+        &body("i64 e = 18446744073709551616;"),
+        "18446744073709551616 doesn't fit in i64",
+    );
+    // Widening to 128 bits is implicit; a third, wider type is never chosen.
+    ok(&body(
+        "i64 x = 1; u64 y = 2; i128 a = x; i128 b = y; u128 c = y; i128 s = a + y;",
+    ));
+    rejects(
+        &body("i64 x = 1; u64 y = 2; var s = x + y;"),
+        "neither i64 nor u64 holds every value of the other",
+    );
     rejects(
         &body("i64[~.~2] q = [1, 2, 3];"),
         "this literal has 3 elements, and the array holds 2",
@@ -179,11 +207,11 @@ fn mixed_integer_arithmetic() {
     ));
     rejects(
         &body("u32 c = 1; i32 d = 2; var x = c + d;"),
-        "no type holds every u32 and every i32",
+        "neither u32 nor i32 holds every value of the other",
     );
     rejects(
         &body("u64 h = 1; i64 len = 2; var x = h % len;"),
-        "no type holds every u64 and every i64",
+        "neither u64 nor i64 holds every value of the other",
     );
     rejects(
         &body("i32 n = 1; i64 len = 2; n += len;"),
@@ -191,7 +219,7 @@ fn mixed_integer_arithmetic() {
     );
     rejects(
         &body("i64 n = 1; f64 x = 2.0; var y = n * x;"),
-        "no type holds every i64 and every f64",
+        "neither i64 nor f64 holds every value of the other",
     );
     ok(&body("i32 n = 1; f64 x = 2.0; f64 y = n * x;"));
     rejects(

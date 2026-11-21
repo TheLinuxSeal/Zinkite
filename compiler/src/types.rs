@@ -315,11 +315,12 @@ pub fn bits(p: Prim) -> u32 {
         Prim::I16 | Prim::U16 => 16,
         Prim::I32 | Prim::U32 | Prim::F32 => 32,
         Prim::I64 | Prim::U64 | Prim::F64 => 64,
+        Prim::I128 | Prim::U128 => 128,
     }
 }
 
 pub fn signed(p: Prim) -> bool {
-    matches!(p, Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64)
+    matches!(p, Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64 | Prim::I128)
 }
 
 /// Whether every value of `from` is a value of `to`: the implicit conversions (DESIGN §9.1).
@@ -345,7 +346,8 @@ pub fn lossless(from: Prim, to: Prim) -> bool {
     }
 }
 
-/// Whether an integer literal's value fits a type.
+/// Whether an integer literal's value fits a type. Values above `i128.MAX` aren't held
+/// as an `i128`; see `fits_u128`.
 pub fn fits(value: i128, p: Prim) -> bool {
     let (lo, hi): (i128, i128) = match p {
         Prim::I8 => (i8::MIN as i128, i8::MAX as i128),
@@ -356,10 +358,20 @@ pub fn fits(value: i128, p: Prim) -> bool {
         Prim::U16 => (0, u16::MAX as i128),
         Prim::U32 => (0, u32::MAX as i128),
         Prim::U64 => (0, u64::MAX as i128),
+        Prim::I128 => (i128::MIN, i128::MAX),
+        Prim::U128 => (0, i128::MAX),
         Prim::F32 | Prim::F64 => return true,
         Prim::Bool => return false,
     };
     value >= lo && value <= hi
+}
+
+/// Whether a literal as written, up to `u128.MAX`, fits a type.
+pub fn fits_u128(value: u128, p: Prim) -> bool {
+    match i128::try_from(value) {
+        Ok(v) => fits(v, p),
+        Err(_) => p == Prim::U128 || p.is_float(),
+    }
 }
 
 /// The built-in generic bounds (DESIGN §10.1).

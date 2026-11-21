@@ -234,6 +234,9 @@ struct Checker<'p, 'a> {
     root_new_ok: bool,
     /// Whether the last call chosen is a `mut` method.
     last_call_mut: bool,
+    /// Unsuffixed literals above `i128.MAX`, typed `u128`, by span: for saying they
+    /// don't fit rather than that a `u128` doesn't convert.
+    huge_lits: HashMap<(u32, u32), u128>,
 }
 
 fn is_status_const(name: &str) -> bool {
@@ -279,6 +282,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             lambdas: Vec::new(),
             root_new_ok: false,
             last_call_mut: false,
+            huge_lits: HashMap::new(),
         }
     }
 
@@ -1060,6 +1064,13 @@ impl<'p, 'a> Checker<'p, 'a> {
         }
         let shown_to = self.show(to);
         let shown_from = self.show(from);
+        if let (Some(v), Prim(p)) = (self.huge_lits.get(&key(span)), to)
+            && p.is_int()
+        {
+            let msg = format!("{} doesn't fit in {}", v, p.name());
+            self.err_help(span, msg, "only a `u128` holds it (DESIGN §9.1)");
+            return false;
+        }
         match (from.unref(), to) {
             (IntLit { value: Some(v), is_char: true }, Prim(crate::token::Prim::U8)) if fits(*v, crate::token::Prim::U8) => self.err_help(
                 span,
@@ -2300,14 +2311,21 @@ impl<'p, 'a> Checker<'p, 'a> {
         match &e.kind {
             E::Int { value, suffix } => match suffix {
                 Some(p) => {
-                    if p.is_int() && !fits(*value as i128, *p) {
+                    if p.is_int() && !fits_u128(*value, *p) {
                         self.err(e.span, format!("{} doesn't fit in {}", value, p.name()));
                     }
                     Ty::Prim(*p)
                 }
-                None => Ty::IntLit {
-                    value: i128::try_from(*value).ok(),
-                    is_char: false,
+                None => match i128::try_from(*value) {
+                    Ok(v) => Ty::IntLit {
+                        value: Some(v),
+                        is_char: false,
+                    },
+                    // Only a `u128` holds it.
+                    Err(_) => {
+                        self.huge_lits.insert(key(e.span), *value);
+                        Ty::Prim(crate::token::Prim::U128)
+                    }
                 },
             },
             E::Float { suffix, .. } => suffix.map_or(Ty::FloatLit, Ty::Prim),
@@ -3151,6 +3169,18 @@ impl<'p, 'a> Checker<'p, 'a> {
                 self.cond(x);
                 Ty::bool()
             }
+            // `-170141183460469231731687303715884105728` is `i128.MIN`, though its digits
+            // alone don't fit an `i128`.
+            UnaryOp::Neg if matches!(x.kind, E::Int { value, suffix: None } if value == 1u128 << 127) =>
+            {
+                self.facts
+                    .types
+                    .insert(key(x.span), Ty::Prim(crate::token::Prim::U128));
+                Ty::IntLit {
+                    value: Some(i128::MIN),
+                    is_char: false,
+                }
+            }
             UnaryOp::Plus | UnaryOp::Neg => {
                 let t = self.expr(x, want);
                 match t.unref() {
@@ -3599,7 +3629,11 @@ impl<'p, 'a> Checker<'p, 'a> {
                     };
                     self.err_help(
                         span,
-                        format!("no type holds every {} and every {}", x.name(), y.name()),
+                        format!(
+                            "neither {} nor {} holds every value of the other",
+                            x.name(),
+                            y.name()
+                        ),
                         help,
                     );
                     return Unknown;
@@ -3750,7 +3784,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                     Ok(())
                 } else {
                     Err(format!(
-                        "no type holds every {} and every {}; cast one side (DESIGN §9.2)",
+                        "neither {} nor {} holds every value of the other; cast one side (DESIGN §9.2)",
                         x.name(),
                         y.name()
                     ))

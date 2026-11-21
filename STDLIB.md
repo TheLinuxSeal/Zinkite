@@ -53,7 +53,7 @@ These follow from the memory model and the status code. Every section below keep
 2. **Text that is computed is returned as a `u8[.]`, built in place** where the caller keeps it (DESIGN §3.3).
    - `u8[.] up = name.toUpper();` writes the text once, into `up`.
    - Passed straight to a `string` parameter, the result is a statement temporary (DESIGN §4.11).
-3. **Small fixed-size results are returned by value**, in capped arrays, and never touch a data stack. `n.hex()` is a `u8[..~16]`, and `hash.sha256(b)` is a `u8[.32]`.
+3. **Small fixed-size results are returned by value**, in capped arrays, and never touch a data stack. `n.hex()` of a `u64` is a `u8[..~16]`, and `hash.sha256(b)` is a `u8[.32]`.
 4. **Views point into the input.** These are all views into their argument, rooted there (REFERENCES §4), so nothing is copied:
    - `s.trim()`, `s.split(",")` and `path.base(p)`;
    - every parsed string that has no escapes.

@@ -16,6 +16,14 @@
 #define ZR_NORETURN __attribute__((noreturn))
 #define ZR_UNUSED __attribute__((unused))
 
+/* i128 and u128 (DESIGN §9.1): GCC's and Clang's 128-bit integers, on 64-bit targets.
+ * C has no 128-bit literals, so the limits are built from shifts. */
+typedef __int128 zr_i128;
+typedef unsigned __int128 zr_u128;
+#define ZR_U128_MAX (~(zr_u128)0)
+#define ZR_I128_MAX ((zr_i128)(ZR_U128_MAX >> 1))
+#define ZR_I128_MIN (-ZR_I128_MAX - 1)
+
 /* A slice or a view: `T[:]`, `T[:]&`, and `string`, which is `u8[:]`. */
 typedef struct { void *p; int64_t n; } zr_slice;
 
@@ -575,6 +583,39 @@ static ZR_UNUSED void zr_w_i64_pad(zr_sink s, int64_t x, int64_t w, char fill) {
 static ZR_UNUSED void zr_w_u64_pad(zr_sink s, uint64_t x, int64_t w, char fill) { char b[24]; zr_pad(s, b, zr_fmt_u64(b, x), w, fill); }
 static ZR_UNUSED void zr_w_f64_pad(zr_sink s, double x, int64_t w, char fill) { char b[400]; zr_pad(s, b, zr_fmt_f64(b, x), w, fill); }
 
+/* 128-bit numbers as text: at most 39 digits and a sign. */
+static int zr_fmt_u128(char *buf, zr_u128 x) {
+    if (x <= UINT64_MAX) return zr_fmt_u64(buf, (uint64_t)x);
+    char t[40];
+    int n = 0;
+    /* Nineteen digits at a time, in 64-bit arithmetic. */
+    while (x > UINT64_MAX) {
+        uint64_t part = (uint64_t)(x % 10000000000000000000ull);
+        x /= 10000000000000000000ull;
+        for (int i = 0; i < 19; i++) { t[n++] = (char)('0' + part % 10); part /= 10; }
+    }
+    for (uint64_t y = (uint64_t)x; y; y /= 10) t[n++] = (char)('0' + y % 10);
+    for (int i = 0; i < n; i++) buf[i] = t[n - 1 - i];
+    return n;
+}
+static int zr_fmt_i128(char *buf, zr_i128 x) {
+    if (x >= 0) return zr_fmt_u128(buf, (zr_u128)x);
+    buf[0] = '-';
+    return 1 + zr_fmt_u128(buf + 1, (zr_u128)0 - (zr_u128)x);
+}
+static ZR_UNUSED void zr_w_i128(zr_sink s, zr_i128 x) { char b[48]; zr_put(s, b, (size_t)zr_fmt_i128(b, x)); }
+static ZR_UNUSED void zr_w_u128(zr_sink s, zr_u128 x) { char b[48]; zr_put(s, b, (size_t)zr_fmt_u128(b, x)); }
+static ZR_UNUSED void zr_w_i128_pad(zr_sink s, zr_i128 x, int64_t w, char fill) { char b[48]; zr_pad(s, b, zr_fmt_i128(b, x), w, fill); }
+static ZR_UNUSED void zr_w_u128_pad(zr_sink s, zr_u128 x, int64_t w, char fill) { char b[48]; zr_pad(s, b, zr_fmt_u128(b, x), w, fill); }
+static ZR_UNUSED void zr_w_radix128(zr_sink s, zr_u128 x, int shift) {
+    char b[130];
+    int n = 0;
+    const char *digits = "0123456789abcdef";
+    unsigned mask = (1u << shift) - 1;
+    do { b[n++] = digits[(unsigned)x & mask]; x >>= shift; } while (x);
+    for (int i = n - 1; i >= 0; i--) zr_put(s, &b[i], 1);
+}
+
 static ZR_UNUSED void zr_w_fixed(zr_sink s, double x, int64_t d) {
     char b[400];
     if (d < 0) d = 0;
@@ -646,6 +687,8 @@ static int64_t zr_find_from(zr_slice s, zr_slice x, int64_t from) {
 typedef struct { int64_t v; uint8_t s; } zr_res_i64;
 typedef struct { uint64_t v; uint8_t s; } zr_res_u64;
 typedef struct { double v; uint8_t s; } zr_res_f64;
+typedef struct { zr_i128 v; uint8_t s; } zr_res_i128;
+typedef struct { zr_u128 v; uint8_t s; } zr_res_u128;
 
 static ZR_UNUSED zr_res_i64 zr_find(zr_slice s, zr_slice x, int64_t from) {
     zr_res_i64 r = {zr_find_from(s, x, from), 0};
@@ -766,6 +809,7 @@ static ZR_UNUSED uint8_t zr_cp_next(zr_iter *it, uint32_t *out) {
 
 /* Exact comparisons between a signed and an unsigned integer (DESIGN §9.2). */
 static ZR_UNUSED int zr_cmp_su(int64_t a, uint64_t b) { return a < 0 ? -1 : (uint64_t)a < b ? -1 : (uint64_t)a > b ? 1 : 0; }
+static ZR_UNUSED int zr_cmp_su128(zr_i128 a, zr_u128 b) { return a < 0 ? -1 : (zr_u128)a < b ? -1 : (zr_u128)a > b ? 1 : 0; }
 
 /* A checked index: out of range stops the program (DESIGN §4.10). */
 static ZR_UNUSED int64_t zr_ix(int64_t i, int64_t n, const char *f, int l) {
@@ -833,6 +877,42 @@ static ZR_UNUSED zr_res_u64 zr_parse_u64(zr_slice s, int64_t base) {
     }
     r.v = acc;
     r.s = 0;
+    return r;
+}
+
+/* Digits in a base from 2 to 36 into a 128-bit magnitude, up to `limit`: INVALID (22)
+ * for a bad digit, RANGE (34) past the limit. */
+static uint8_t zr_parse_mag128(const uint8_t *p, int64_t i, int64_t n, int64_t base, zr_u128 limit, zr_u128 *out) {
+    if (base < 2 || base > 36 || i == n) return 22;
+    zr_u128 acc = 0;
+    for (; i < n; i++) {
+        int d = p[i] >= '0' && p[i] <= '9' ? p[i] - '0' : p[i] >= 'a' && p[i] <= 'z' ? p[i] - 'a' + 10 : p[i] >= 'A' && p[i] <= 'Z' ? p[i] - 'A' + 10 : 99;
+        if (d >= base) return 22;
+        if (acc > (limit - (zr_u128)d) / (zr_u128)base) return 34;
+        acc = acc * (zr_u128)base + (zr_u128)d;
+    }
+    *out = acc;
+    return 0;
+}
+
+static ZR_UNUSED zr_res_u128 zr_parse_u128(zr_slice s, int64_t base) {
+    zr_res_u128 r = {0, 22};
+    const uint8_t *p = (const uint8_t *)s.p;
+    if (s.n == 0) return r;
+    zr_u128 v = 0;
+    r.s = zr_parse_mag128(p, p[0] == '+' ? 1 : 0, s.n, base, ZR_U128_MAX, &v);
+    if (!r.s) r.v = v;
+    return r;
+}
+
+static ZR_UNUSED zr_res_i128 zr_parse_i128(zr_slice s, int64_t base) {
+    zr_res_i128 r = {0, 22};
+    const uint8_t *p = (const uint8_t *)s.p;
+    if (s.n == 0) return r;
+    int neg = p[0] == '-';
+    zr_u128 v = 0, limit = neg ? (zr_u128)ZR_I128_MAX + 1 : (zr_u128)ZR_I128_MAX;
+    r.s = zr_parse_mag128(p, p[0] == '-' || p[0] == '+' ? 1 : 0, s.n, base, limit, &v);
+    if (!r.s) r.v = neg ? (zr_i128)((zr_u128)0 - v) : (zr_i128)v;
     return r;
 }
 

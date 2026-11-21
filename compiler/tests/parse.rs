@@ -233,7 +233,12 @@ fn number_literals() {
     assert_eq!(expr("'\\u{1F600}'"), "'😀'");
     assert!(has(&expr_errors("12abc"), "isn't a number suffix"));
     assert!(has(&expr_errors("1_"), "can only separate digits"));
-    assert!(has(&expr_errors("99999999999999999999999"), "too large"));
+    // Up to u128.MAX is a literal; one more is too large for any integer type.
+    assert!(expr_errors("340282366920938463463374607431768211455").is_empty());
+    assert!(has(
+        &expr_errors("340282366920938463463374607431768211456"),
+        "too large"
+    ));
 }
 
 #[test]

@@ -212,6 +212,18 @@ fn bugs_stop_the_program_with_their_location() {
         ),
         ("fail(\"unreachable\");", "prog.zn:3: unreachable"),
         (
+            "i128 m = i128.MAX; m = m + 1;",
+            "prog.zn:3: integer overflow",
+        ),
+        (
+            "u128 a = u128.MAX; u128 b = a * 2;",
+            "prog.zn:3: integer overflow",
+        ),
+        (
+            "i128 big = i128.MAX; u64 t = (u64) big;",
+            "prog.zn:3: the value doesn't fit in u64",
+        ),
+        (
             "string s = \"abcdef\"; u8[~4] g = s;",
             "prog.zn:3: the value doesn't fit in an array that holds 4",
         ),
@@ -1011,6 +1023,96 @@ void main() {
 y 2, f[2] 2, [0, 1, 2, 3] full true, last 3, all [0, 1, 2, 3] total 6
 a slice from before the inserts still shows [2, 3]
 z 6, front was 4, [5, 6]
+"#,
+    );
+}
+
+/// `i128` and `u128` (DESIGN §9.1): literals of every size, limits, the full product of
+/// two `u64`s, mixed-sign comparisons, casts in every mode, `from`, text and parsing,
+/// shifts, wrapping and saturating operators, arrays, fields and `switch`.
+#[test]
+fn wide_integers() {
+    prints(
+        r#"class Account {
+    i128 cents;
+    new(i128 c) { this.cents = c; }
+}
+
+u128 mulWide(u64 a, u64 b) {
+    return (u128) a * b;
+}
+
+void main() {
+    // Limits and literals of every size.
+    println("${i128.MIN} ${i128.MAX}");
+    println("${u128.MAX}");
+    i128 neg = -170141183460469231731687303715884105728;
+    u128 mask = 0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff;
+    i128 big = 18446744073709551616;
+    u128 small = 42u128;
+    println("${neg == i128.MIN} ${mask == u128.MAX} ${big} ${small}");
+
+    // The full product of two u64s.
+    u128 p = mulWide(u64.MAX, u64.MAX);
+    println("${p} hi ${(u64) (p >> 64)} lo ${(u64%) p}");
+
+    // Arithmetic, widening and mixed-sign comparison.
+    i64 x = -5;
+    u64 y = 7;
+    i128 s = x + (i128) y;
+    i128 q = big / 3;
+    i128 r = big % 3;
+    println("${s} ${q} ${r} ${-big} ${abs(neg + 1)} ${min(big, s)} ${max(big, s)}");
+    u128 u = 5;
+    println("${neg < u} ${x < u} ${mask > big} ${(i128) 10 == u}");
+
+    // Casts in every mode.
+    println("${(u64%) mask} ${(u64|) mask} ${(i8|) neg} ${(u128|) neg} ${(i128) 1.5e30} ${(f64) mask}");
+    u64 got @bad = u64.from(big);
+    println("checked: ${(i64) (big - 18446744073709551616)} from: ${got} ${bad}");
+
+    // Text.
+    println("${big.pad(25)}|${s.zeroPad(6)}|${mask.hex()}|${((u128) 5).bin()}|${((u128) 64).oct()}");
+    u8[..~32] h = mask.hex();
+    println("${h.len} ${((u128) 255).popCount()} ${mask.popCount()}");
+    i128 parsed @e1 = i128.parse("-170141183460469231731687303715884105728");
+    u128 parsed2 @e2 = u128.parse("340282366920938463463374607431768211455");
+    u128 over @e3 = u128.parse("340282366920938463463374607431768211456");
+    i128 hexed @e4 = i128.parse("-ff", 16);
+    println("${parsed == i128.MIN} ${e1} ${parsed2 == u128.MAX} ${e2} ${over} ${e3} ${hexed} ${e4}");
+
+    // Shifts, wrapping and saturating operators.
+    u128 one = 1;
+    println("${one << 127} ${(one << 127) >> 120} ${i128.MAX +% 1 == i128.MIN} ${u128.MAX +| 1 == u128.MAX} ${neg >> 126}");
+
+    // Arrays, fields and switch.
+    i128[..~] xs = [big, -big, 3, neg + 1];
+    xs.sort();
+    println("${xs} sum ${xs[1] + xs[2] + xs[3]}");
+    Account acct = new Account(big * 100);
+    acct.cents += 1;
+    println("${acct.cents}");
+    switch (s) {
+        case 2 => println("two");
+        default => println("other");
+    }
+}
+"#,
+        r#"-170141183460469231731687303715884105728 170141183460469231731687303715884105727
+340282366920938463463374607431768211455
+true true 18446744073709551616 42
+340282366920938463426481119284349108225 hi 18446744073709551614 lo 1
+2 6148914691236517205 1 -18446744073709551616 170141183460469231731687303715884105727 2 18446744073709551616
+true true true false
+18446744073709551615 18446744073709551615 -128 0 1499999999999999889089448902656 3.402823669209385e38
+checked: 0 from: 0 34
+     18446744073709551616|000002|ffffffffffffffffffffffffffffffff|101|100
+32 8 128
+true 0 true 0 0 34 -255 0
+170141183460469231731687303715884105728 128 true true -2
+[-170141183460469231731687303715884105727, -18446744073709551616, 3, 18446744073709551616] sum 3
+1844674407370955161601
+two
 "#,
     );
 }

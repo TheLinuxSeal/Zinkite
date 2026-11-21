@@ -7,14 +7,16 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The C compiler: `$CC`, then `cc`, `gcc` and `clang` (DESIGN §14.2).
+/// The C compiler: `$CC`, then `clang`, `gcc`, and `cc` as a last resort (DESIGN §14.2).
+/// Clang comes first: its code was as fast as gcc's or faster, and it compiles faster
+/// at `-O0`, which `zink run` uses.
 pub fn c_compiler() -> Result<String, String> {
     if let Ok(cc) = std::env::var("CC")
         && !cc.is_empty()
     {
         return Ok(cc);
     }
-    for c in ["cc", "gcc", "clang"] {
+    for c in ["clang", "gcc", "cc"] {
         if Command::new(c)
             .arg("--version")
             .output()

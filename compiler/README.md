@@ -94,11 +94,12 @@ and to remove from nothing.
 
 `zink run` and `zink build` generate one C file for the program, with the runtime
 (`runtime/zink_rt.h`) at its top, and compile it with the system C compiler:
-`$CC`, `cc`, `gcc` or `clang` (DESIGN §12.5, §14.2). `zink run` builds at `-O0`
-and caches the executable by a hash of the C; `-O` builds at `-O2`. TinyCC, which
-DESIGN plans for `zink run`, isn't built in yet.
+`$CC`, `clang`, `gcc` or `cc`, in that order (DESIGN §12.5, §14.2). `zink run` builds at `-O0`
+and caches the executable by a hash of the C; `-O` builds at `-O2`. A built-in
+TinyCC for `zink run` is a maybe-later (DESIGN §17).
 
 It covers script files, classes, enums, constructors and methods, statuses,
+every number type including `i128` and `u128` (as `__int128`),
 references, strings and interpolation, every array kind, slices (except of cursor,
 chunked and reversed arrays on data stacks, which are undecided), every statement
 form, casts and

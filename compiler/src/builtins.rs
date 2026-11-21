@@ -99,6 +99,10 @@ fn text() -> Ty {
 }
 
 fn small_text() -> Ty {
+    small_text_of(16)
+}
+
+fn small_text_of(size: u64) -> Ty {
     Ty::Array(
         Box::new(Ty::u8()),
         ArrayKind {
@@ -106,9 +110,24 @@ fn small_text() -> Ty {
             cursor: '.',
             end: '~',
             cap: CapKind::Capped,
-            size: 16,
+            size,
         },
     )
+}
+
+/// What `hex`, `oct` and `bin` give: a capped array as wide as the type's digits
+/// (DESIGN §4.13), 32 for a `u128` in hex, 128 in binary.
+fn radix_text(me: &Ty, name: &str) -> Ty {
+    let bits = match me {
+        Ty::Prim(p) => crate::types::bits(*p) as u64,
+        _ => 128,
+    };
+    let per = match name {
+        "hex" => 4,
+        "oct" => 3,
+        _ => 1,
+    };
+    small_text_of(bits.div_ceil(per))
 }
 
 fn grow(e: Ty) -> Ty {
@@ -224,7 +243,7 @@ pub fn number_method(me: &Ty, caps: NumCaps, name: &str) -> Vec<Sig> {
     let b = Ty::bool;
     let one = |ok: bool, sig: Sig| if ok { vec![sig] } else { Vec::new() };
     match name {
-        "hex" | "bin" | "oct" => one(caps.int, Sig::new(name, vec![], small_text())),
+        "hex" | "bin" | "oct" => one(caps.int, Sig::new(name, vec![], radix_text(me, name))),
         "pad" | "zeroPad" => one(caps.number, Sig::new(name, vec![i64t()], text())),
         "fixed" | "sci" => one(caps.float, Sig::new(name, vec![i64t()], text())),
         "utf8" => one(caps.is_u32, Sig::new(name, vec![], small_text()).fails()),

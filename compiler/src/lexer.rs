@@ -274,8 +274,8 @@ impl<'a> Lexer<'a> {
 
     fn int_value(&mut self, start: usize, digits: &str, radix: u32) -> u128 {
         match u128::from_str_radix(digits, radix) {
-            Ok(v) if v <= u64::MAX as u128 => v,
-            Ok(_) | Err(_) if !digits.is_empty() => {
+            Ok(v) => v,
+            Err(_) if !digits.is_empty() => {
                 self.error(
                     start,
                     self.pos,

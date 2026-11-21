@@ -53,7 +53,7 @@ Left out to stay light: inheritance, exceptions, destructors, reflection, dynami
 | Discarding | `_` takes any value or status and can never be read | Decided | 7.3 |
 | Bugs | Overflow, an index out of range, division by zero and similar stop the program with a message | Decided | 7.6 |
 | Cleanup | No destructors, as in Goose; `defer` runs a statement when its block ends; the runtime flushes and closes files still open at exit | Decided | 6.4 |
-| Number types | `i8`–`i64`, `u8`–`u64`, `f32`, `f64`, plus `bool`; no aliases; lengths and indexes are `i64` | Decided | 9.1 |
+| Number types | `i8`–`i128`, `u8`–`u128`, `f32`, `f64`, plus `bool`; no aliases; lengths and indexes are `i64` | Decided | 9.1 |
 | Literals | An integer literal is an `i64` and a float literal an `f64` unless where it is used says otherwise; Rust-style suffixes (`255u8`, `1.5f32`) | Decided | 9.1 |
 | Casts | `(u8) n` stops when the value doesn't fit; `(u8%) n` wraps and `(u8\|) n` saturates; `u8.from(n)` fails with `RANGE` instead | Decided | 9.1 |
 | Mixed integer types | Allowed when one type holds every value of the other, and the result has that type; otherwise a cast; comparisons between any two integer types are exact | Decided | 9.2 |
@@ -65,7 +65,7 @@ Left out to stay light: inheritance, exceptions, destructors, reflection, dynami
 | Lambdas and `switch` cases | `(i32 a, i32 b) => a + b`, with every parameter's type written; `case 0 => ...`; `->` is the pop operator | Decided | 9.3, 9.4 |
 | Undecided features | The compiler rejects a program that uses a language feature still open in §17 or `GRAMMAR.md` §8, and says the feature is undecided | Decided | 17 |
 | Standard library | Packages under `zink.*`; text that is read goes into caller buffers, computed text is built in place, failures are status codes; JSON, JSON5, TOML and YAML share one parsed tree | Proposed | `STDLIB.md` |
-| Implementation | Compiler in Rust, runtime in C; the compiler emits C, compiled by a built-in TinyCC for `zink run` and by the system C compiler for `zink build` | Decided | 12.5, 14 |
+| Implementation | Compiler in Rust, runtime in C; the compiler emits C, compiled by the system C compiler, clang or gcc: at `-O0` for `zink run`, at `-O2` for `zink build` | Decided | 12.5, 14 |
 | Output | Native code, through C; the embedding model is Open (§13) | Decided | 12, 13 |
 | Program settings | One setting per program, as `#` directives at the top of the file containing `main` | Decided | 8.2 |
 | Conditional compilation | `#if` / `#else` / `#endif` | Decided | 8.3 |
@@ -82,7 +82,7 @@ Left out to stay light: inheritance, exceptions, destructors, reflection, dynami
 | Index modes | `a[i]` checked, `a[%i]` wraps, `a[\|i]` clamps, `a[^k]` from the end | Decided | 4.10 |
 | Slices | `a[i:j]`, `a[i:]`, `a[:j]`, `a[:]`; `T[:]` is a read-only view and `T[:]&` a writable one; an array converts to a slice wherever one is expected | Decided | 4.10 |
 | Name | Zinkite; command `zink`, source files `.zn` | Decided | — |
-| `zink run` | Compiles to a cached native binary with TinyCC, then `exec`s it | Decided | 14.4 |
+| `zink run` | Compiles to a cached native binary with the system C compiler, then `exec`s it | Decided | 14.4 |
 | Grammar | `GRAMMAR.md`, version 2 (version 1 kept in `GRAMMAR-refcount.md`) | Decided | `GRAMMAR.md` |
 
 ---
@@ -407,7 +407,7 @@ println("cost:  ${x.fixed(2)}");      // 3.14
   - `fixed(d)`: a float with `d` decimal places;
   - `utf8()`: a `u32` code point, or an array of them, encoded as UTF-8 text. A value that isn't a code point (a surrogate, or above 0x10FFFF) is written as `�` (U+FFFD), with `status.INVALID`.
 - **They are methods, not global functions**, so common names such as `hex` and `pad` never clash with a program's own. This matches `i32.parse(s)` and `a.divOr(b, 0)`.
-- **Methods whose width is fixed by the type return small capped arrays**: `hex()` of a `u64` fits in `u8[..~16]`, so they never touch a data stack.
+- **Methods whose width is fixed by the type return small capped arrays**: `hex()` of a `u64` fits in `u8[..~16]`, and of a `u128` in `u8[..~32]`, so they never touch a data stack. Each is as wide as the type's digits in its base: `bin()` of a `u64` is a `u8[..~64]`.
 - **`pad(w)`, `zeroPad(w)` and `fixed(d)` build their text in place** (§3.3), as `utf8()` of an array does, since their length depends on a value known only at run time (Decided). Inside `${...}`, the usual case, the text goes straight to the output with no temporary (§4.11). `u8[.] s = n.pad(8);` builds it where `s` lives.
 - **A program's own formatting works the same way**: a method or function that returns text, such as `money(cents)`, goes in `${...}` like `hex()`.
 - **No format strings and no format specs** (`printf("%x")`, `${n:x}`), and no separate print function per format (Appendix A.11).
@@ -1062,8 +1062,8 @@ void main(string[.] args) {
 
 | Type | Size | Meaning |
 |---|---|---|
-| `i8` `i16` `i32` `i64` | 1, 2, 4, 8 | signed integers |
-| `u8` `u16` `u32` `u64` | 1, 2, 4, 8 | unsigned integers |
+| `i8` `i16` `i32` `i64` `i128` | 1, 2, 4, 8, 16 | signed integers |
+| `u8` `u16` `u32` `u64` `u128` | 1, 2, 4, 8, 16 | unsigned integers |
 | `f32` `f64` | 4, 8 | floating point |
 | `bool` | 1 | |
 | class values | the sum of their fields, plus alignment (§11) | |
@@ -1076,6 +1076,10 @@ void main(string[.] args) {
 - **Literals take their type from where they are used**: `u8 b = 200;` is a `u8`, and `f64 x = 0.5;` an `f64`. With nothing to go by, an integer literal is an `i64`, the type of lengths and indexes, and a floating-point literal an `f64` (Decided). So `var i = 0;` is an `i64`, as are `"${1 << 40}"` and `max(3, 5)`. A suffix gives another type where it's needed: `255u8`, `1.5f32` (Decided, as in Rust). A literal that doesn't fit its type is a compile error.
   - **The type flows into arithmetic** (Decided). In `i64 big = 100000 * 100000;`, both literals are `i64`, so the multiplication is done in 64 bits instead of overflowing. In `a.len * 2`, the `2` takes the type of the other operand.
 - **Conversions that can't lose information are implicit** (Decided): to a type that holds every value of the source. That is a wider integer type of the same signedness (`i8` to `i32`), a wider signed type for an unsigned one (`u8` to `i32`, `u32` to `i64`), `f32` for integers of up to 16 bits, and `f64` for integers of up to 32 bits and for `f32`. Anything else is a cast. Arithmetic on two different types follows the same rule (§9.2). An array also converts to a slice of its elements (§4.10).
+- **`i128` and `u128`** (Decided) are for what 64 bits can't hold: the full product of two `u64`s (`(u128) a * b`, one instruction), 128-bit hashes and IDs, IPv6 addresses, and sums that would overflow. They follow every rule above, and the widening from 64 bits is implicit.
+  - **A literal above `i128.MAX` is a `u128`**, as only a `u128` holds it: `u128 mask = 0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff;`. Elsewhere it doesn't fit, a compile error. `-170141183460469231731687303715884105728` is `i128.MIN`, though its digits alone don't fit an `i128`.
+  - **They map to the C compilers' 128-bit integers** (`__int128`, in GCC and Clang on 64-bit targets), so arithmetic and its overflow checks cost about two 64-bit operations. They're 16-byte aligned.
+  - **There are no 256-bit types.** C compilers don't have them yet (C23's `_BitInt` would), and the main use, cryptography, needs constant-time code that checked arithmetic isn't. `BigInt` (`STDLIB.md` §10.4) covers big numbers.
 - **`null` applies only to nullable references** (`T&?`): `i32 x = null` is a compile error.
 - **Casts exist only for numbers.** Interface references use `instanceof` (§6.3).
 - **A cast never changes a value silently** (Decided). With `n` an `i64`:
@@ -1111,10 +1115,10 @@ void main(string[.] args) {
   // b: u8, n: i32, c: u32, d: i32, h: u64, len: i64
   n + b          // an i32: every u8 fits in an i32
   len - c        // an i64
-  c + d          // error: no type holds every u32 and every i32. Write (i64) c + d
+  c + d          // error: neither u32 nor i32 holds every value of the other. Write (i64) c + d
   h % len        // error: write h % (u64) len
   ```
-  - So a result always has one of its operands' types, and `u64` with `i64`, which has no wider type, gets the same answer as `u32` with `i32`.
+  - So a result always has one of its operands' types, and `u64` with `i64` gets the same answer as `u32` with `i32`, though an `i128` would hold both.
   - Literals take the other operand's type (§9.1), so `c - 1` and `b + 1` need nothing.
   - Integers with floats follow the same rule: `n * x` with an `i32` `n` and an `f64` `x` is an `f64`, while an `i64` `n` needs `(f64) n`.
   - `x += y` needs `y` to convert implicitly to the type of `x`, so `x += len` with an `i32` `x` is an error.
@@ -1280,8 +1284,8 @@ A generic body can use only what its bounds allow (§10). Seven bounds for the b
 
 | Bound | Satisfied by | Allows, besides `==` |
 |---|---|---|
-| `sint` | `i8` `i16` `i32` `i64` | what `int` allows, and negative literals |
-| `uint` | `u8` `u16` `u32` `u64` | what `int` allows, and use as a condition (§9.4) |
+| `sint` | `i8` `i16` `i32` `i64` `i128` | what `int` allows, and negative literals |
+| `uint` | `u8` `u16` `u32` `u64` `u128` | what `int` allows, and use as a condition (§9.4) |
 | `int` | every `sint` and `uint` | what `number` allows, plus `%`, the wrapping and saturating operators, bitwise operators and shifts, `T.MIN`, `T.MAX` and the bit methods (`STDLIB.md` §8.1) |
 | `float` | `f32` `f64` | what `number` allows, plus `T.NAN`, `T.INFINITY`, `T.EPSILON`, `isNaN()`, `isFinite()` and the `math` functions |
 | `number` | every `int` and `float` | what `ordered` allows, plus `+`, `-`, `*`, `/`, unary `-`, casts between `T` and any number type (`(T) x`, `(f64) t`), `T.from(x)` and `T.parse(s)` |
@@ -1364,17 +1368,17 @@ There is no allocator, no counting and no collector. With dead-code elimination 
 
 ### 12.5 Backends and executables (Decided)
 - **The compiler emits C**: one C file for the whole program, as Goose does. A C compiler then turns it into native code.
-  - `zink run` compiles that C with TinyCC, which is built into `zink`, so running a script needs no C toolchain (§14.4).
-  - `zink build` uses the system's C compiler, gcc or clang, at `-O2`, so the executable gets their full optimizer.
+  - `zink run` compiles that C with the system's C compiler at `-O0`, and caches the executable (§14.4).
+  - `zink build` uses the same compiler at `-O2`, so the executable gets its full optimizer. Which compiler is used: §14.2.
 - **Why C rather than machine code.** This reverses the earlier plan, to emit machine code through Cranelift, on 2026-11-19:
   - programs run faster, since gcc and clang optimize better than Cranelift, which trades code quality for compile speed;
   - the compiler is far less work: no instruction selection, register allocation, ELF writer or linker;
   - it reaches every platform with a C compiler, instead of one CPU at a time;
   - calling C becomes an ordinary C call (§17).
-- **The costs**: optimized builds need a C compiler installed, which most Linux systems have. TinyCC doesn't optimize, so `zink run` code is noticeably slower than `-O2` in hot loops; `zink run -O` builds with the system compiler instead.
+- **The costs**: running or building needs a C compiler installed, which most Linux systems have, and the first run after an edit pays for compiling, about a quarter of a second for a small program (measured on 2026-11-20). `zink run` code at `-O0` is slower than `-O2` in hot loops, so `zink run -O` builds at `-O2`.
+- **A built-in TinyCC for `zink run` is a maybe-later** (§17), moved there from Decided on 2026-11-20. It would make the first run faster and need no installed compiler, but it lacks what the generated C relies on.
 - **Calling convention**: the platform's C ABI. The status rides in a small returned struct, `{value, status}`, which C compilers return in two registers on Linux x86-64 and AArch64. Large results are built in place through a destination pointer (§3.3).
 - **Debug info** comes from the C compiler's `-g`, with `#line` directives pointing debuggers and messages at the `.zn` source.
-- **TinyCC is LGPL-2.1.** `zink` links it so that those terms are met, for example as a shared library, which keeps the compiler's own code under Apache-2.0.
 - **A direct machine-code backend** stays possible later, over the same typed IR, if depending on a C compiler ever becomes a problem.
 
 ---
@@ -1396,7 +1400,7 @@ Whichever is chosen, the host sets program settings through the API (precedence 
 **Rust for the compiler**
 - Compilers are mostly tree and graph transformations. Enums with exhaustive matching flag every place that fails to handle a new AST or IR node.
 - Many passes (parsing, type checking, monomorphization, layout, root inference, IR lowering, codegen): the type system catches most cross-pass refactoring mistakes.
-- Calling C from Rust is routine, so embedding TinyCC, a C library, costs nothing extra, and running the system C compiler is a process launch.
+- Calling C from Rust is routine, and running the system C compiler is a process launch.
 - Graph-shaped data is stored in arenas and referred to by integer index.
 - Cargo, tests and fuzzing work out of the box.
 
@@ -1409,15 +1413,15 @@ Whichever is chosen, the host sets program settings through the API (precedence 
 - **Names**: Zinkite identifiers are mangled into C identifiers that can't clash with C keywords, the C library or the runtime.
 - **`#line` directives**, so C compiler messages and debuggers point at `.zn` lines.
 - **The status** in a small returned struct, and large results built through a destination pointer (§12.5).
-- **Finding the system C compiler** for `zink build` and `zink run -O`: `$CC`, then `cc`, `gcc` and `clang`. A missing one is an error that suggests installing gcc or clang, or building with `--tcc`.
-- **Checking the generated C** under both TinyCC and gcc or clang, since the two must give the same results (§18).
+- **Finding the system C compiler** for `zink build` and `zink run -O`: `$CC`, then `clang`, then `gcc`, and `cc` as a last resort (Decided). Clang comes first because, measured on Zinkite programs, its code was as fast as gcc's or faster (by a quarter to a third on sorting and text) and it compiled faster at `-O0`. A missing one is an error that suggests installing clang or gcc.
+- **Checking the generated C** under both clang and gcc, at `-O0` and `-O2`, since all four must give the same results (§18).
 
 ### 14.3 Build order (Decided)
 1. **Write the reference rules** as a specification before any compiler code. They decide what is safe, and Goose's author credits this kind of spec work for much of that language's quality. Drafted: `REFERENCES.md`.
 2. **Prototype the array layouts in C** and benchmark them (started: `bench/gap_buffer.c`, §15).
 3. **Typed IR**: layouts, slot arrays, references with roots, the status channel; monomorphization done before the IR.
 4. **Root inference and lifetime checks**: the hardest part of the compiler.
-5. **C backend with TinyCC**: `zink run` works end to end.
+5. **C backend**: `zink run` works end to end, through the system C compiler.
 6. **Optimized builds** through the system C compiler: `zink build`, and `zink run -O`.
 7. **A direct machine-code backend** later, only if depending on a C compiler becomes a problem.
 
@@ -1426,7 +1430,7 @@ The compiler ships as one command, `zink`:
 
 | Command | What it does |
 |---|---|
-| `zink build main.zn -o tool` | Compile to a native executable at the given path, with the system C compiler at `-O2`; `--tcc` uses TinyCC instead |
+| `zink build main.zn -o tool` | Compile to a native executable at the given path, with the system C compiler at `-O2` |
 | `zink run main.zn [args...]` | Compile into the cache if needed, then run the result |
 | `zink main.zn [args...]` | Same as `zink run`; this is what a `#!/usr/bin/env zink` shebang calls |
 | `zink run -O main.zn [args...]` | The same, but built with the system C compiler at `-O2`, for scripts with hot loops |
@@ -1439,7 +1443,7 @@ zink run main.zn arg1 arg2
   1. hash the sources + compiler version + target + build flags
   2. look in the cache for <hash>
        hit  -> go to 4
-       miss -> generate C, and compile it with TinyCC (or the system compiler, with -O) to a native executable
+       miss -> generate C, and compile it with the system C compiler (at -O0, or -O2 with -O) to a native executable
   3. write it to a temporary file in the cache, then rename it into place
   4. exec it with arg1 arg2
 ```
@@ -1450,7 +1454,7 @@ Rules:
 - **Cache key.** The entry file and everything it imports, the compiler version, the target, which C compiler builds it, and the build flags (including `#if` symbols set on the command line). Upgrading Zinkite therefore rebuilds everything, and a binary from an older compiler is never run. File modification times can be checked first to skip rehashing unchanged sources.
 - **Cache location.** `$XDG_CACHE_HOME/zink/`, or `~/.cache/zink/` if that is unset. The directory is created with mode 0700 and must be owned by the user, so another user can't plant a binary that `zink run` would execute.
 - **Atomic writes.** Writing to a temporary file and renaming it means two runs at once never see a half-written binary; if both compile, the second rename harmlessly replaces the first.
-- **Cost.** The first run pays for compilation, targeted at tens of milliseconds for a small script, since TinyCC compiles C very quickly. With `-O`, gcc or clang take longer. Later runs cost a hash of the sources plus about 1 ms of startup.
+- **Cost.** The first run pays for compilation: about a quarter of a second for a small script, most of it the C compiler (150–250 ms with clang or gcc, measured on 2026-11-20). Compiling the runtime once and caching it is the first thing to try if that needs to be faster (§17). Later runs cost a hash of the sources plus about 1 ms of startup.
 - Compiling in memory and jumping into it, and running on a VM by default, were considered and rejected (`DESIGN-refcount.md`, Appendix A.19).
 
 ---
@@ -1524,7 +1528,7 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
   - building in place;
   - relative references;
   - root structs, which Zinkite calls roots (§6.6);
-  - compiling to C, with TinyCC built in for running from source (§12.5).
+  - compiling to C (§12.5), which Goose runs from source through a built-in TinyCC (§17).
 - **Hylo** (formerly Val): mutable value semantics with second-class references.
 - **Rust**: ownership and borrowing; `Vec`, `VecDeque` and slices; `saturating_add`; graphs through indices.
 - **Zig** and **Go**: `defer`. **Zig** also has `+%` and `+|` for wrapping and saturating arithmetic; `i32`/`u8` type names and arbitrary-width integers; implicit integer conversions only where no value is lost; error unions as a light error channel.
@@ -1573,6 +1577,7 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 - Stored closures that capture (§9.3); method references.
 - Static imports and aliases for whole packages (§8.5); the library search path (§8.4).
 - **A direct machine-code backend**, only if depending on a C compiler becomes a problem (§12.5).
+- **A built-in TinyCC for `zink run`** (maybe later; Decided until 2026-11-20, §12.5). It would cut the first run after an edit from about a quarter of a second to tens of milliseconds, and let `zink run` work with no C compiler installed. Against it: it has no `__int128` for `i128` and `u128` (§9.1), and its last release (0.9.27) lacks the `__builtin_add_overflow` family that every overflow check uses, so both would need slower fallbacks; it doesn't optimize; it's LGPL-2.1, so `zink` would link it as a shared library to keep its own code under Apache-2.0; and generated programs would be tested against another compiler. Caching a compiled runtime, so a first run compiles only the program's own code, is cheaper to try first.
 - **Embedding model** (§13): TinyCC inside the host, precompiled `.so` plugins, a bytecode VM, or none; the host C ABI's shape.
 - Smaller syntax items not in the grammar yet (map literals, `?.`, `assert`, `#elif` and others): `GRAMMAR.md` §8.
 - **Standard library**: the open questions in `STDLIB.md` §11.
@@ -1677,7 +1682,7 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 64. A second `zink run` of unchanged sources doesn't recompile; changing any imported file, the compiler version or a build flag does.
 65. Two concurrent `zink run`s of the same new script both succeed and never execute a half-written binary.
 66. `zink run` refuses to use a cache directory that is writable by other users or owned by someone else.
-67. `zink run` (TinyCC) and `zink build` (system C compiler at `-O2`) produce the same output on the whole test suite.
+67. `zink run` (`-O0`) and `zink build` (`-O2`), each with clang and with gcc, produce the same output on the whole test suite.
 
 **Hash maps**
 68. For-each over a `hashmap` visits entries in insertion order, and the output is the same across runs although the hash seed differs.
