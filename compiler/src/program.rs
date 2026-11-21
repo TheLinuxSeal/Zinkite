@@ -395,7 +395,29 @@ impl<'a> Program<'a> {
                 }
             }
         }
+        prog.interface_failures();
         prog
+    }
+
+    /// An interface method has no body to write a status, so it can fail when any class
+    /// that implements it has a method of that name that can (DESIGN §6.3, §7.3): the
+    /// whole program is known, so `Shape.area()` warns about no dropped status, and a
+    /// repeat loop over `Iterator.next()` ends.
+    fn interface_failures(&mut self) {
+        let mut fails: Vec<(ClassId, usize)> = Vec::new();
+        for c in &self.classes {
+            for imp in &c.implements {
+                let Ty::Class(i, _) = imp else { continue };
+                for (j, im) in self.classes[*i].methods.iter().enumerate() {
+                    if c.methods.iter().any(|m| m.name == im.name && m.can_fail) {
+                        fails.push((*i, j));
+                    }
+                }
+            }
+        }
+        for (i, j) in fails {
+            self.classes[i].methods[j].can_fail = true;
+        }
     }
 
     fn error(&mut self, file: usize, span: Span, msg: impl Into<String>) {
@@ -726,6 +748,14 @@ impl<'a> Program<'a> {
                 }
             }
         }
+        // `zink.lang` is imported into every file, after its own imports.
+        if let Some(i) = self
+            .classes
+            .iter()
+            .position(|c| c.name == name && c.package == "zink.lang")
+        {
+            return Lookup::Found(i);
+        }
         if !f.unmodelled.is_empty() {
             return Lookup::Unmodelled;
         }
@@ -884,7 +914,6 @@ impl<'a> Program<'a> {
                 "pool" if arity(1, diags) => return Ty::Pool(Box::new(args[0].clone())),
                 "Handle" if arity(1, diags) => return Ty::Handle(Box::new(args[0].clone())),
                 "hashmap" | "hashset" | "pool" | "Handle" => return Ty::Unknown,
-                "Iterator" => return Ty::Unknown,
                 _ => {}
             }
             if let Some(k) = BoundKind::from_name(name) {

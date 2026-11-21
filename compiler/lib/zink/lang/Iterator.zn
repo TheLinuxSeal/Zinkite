@@ -1,0 +1,9 @@
+package zink.lang;
+
+// An iterator (DESIGN §9.4): next() gives the next value, and END when none are left.
+// A for-each needs no interface, since any class with `mut T next()` is an iterator;
+// this one is for generic code, `<I implements Iterator<T>>`, and for references to
+// iterators of different classes, `Iterator<string>&`.
+public interface Iterator<T> {
+    mut T next();
+}

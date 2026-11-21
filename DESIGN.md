@@ -494,6 +494,7 @@ items[0].heavier(1.0);         // works in place, with no copy
 - **Parameters** (Decided): a plain parameter is a read-only copy. The compiler passes large ones by pointer when the difference can't be observed. A `T&` parameter lets the callee change the caller's value.
 - **Nothing marks a changeable argument at the call site** (Decided, as in Goose). `File.readAll(path, text)` binds `text` to a `u8[..>]&` parameter, and only the declaration says it may change. Writing `&text` at the call means the same, and draws a warning.
 - **Interface references** are always references: `Shape&` (§6.3).
+- **A reference held in a slot reaches what it refers to** (Decided). Storing a reference in an array element or a field needs one that can be written through, so a read-only view or a read-only object keeps its slots from being given new references, but not what those references refer to, as C's `T *const *`. `for (Shape& s : shapes)` over a `Shape&[:]` binds `s` to what the element refers to, and `s` can be passed to a `Shape&` parameter; `shapes[0] .= other` is still an error.
 
 ### 5.2 Roots: lifetime checks without annotations (Decided)
 Every reference and slice has a static **root**: the variable that bounds its target's lifetime. This is rule S (`REFERENCES.md` §3). The compiler infers roots, and a summary for each function of how its result and stores relate to its parameters' roots, so no annotations are needed. There are no aliasing or exclusivity rules. This is Goose's approach, except that functions are compiled once instead of once per root. The full rules are in `REFERENCES.md`.
@@ -648,6 +649,10 @@ for (Shape& s : shapes) { total += s.area(); }
 - **An interface is never a value type.** `Shape s;`, a `Shape` field and a `Shape[..>]` are compile errors, because the size isn't known. Store each concrete class in its own array and keep `Shape&` references. Those references follow the root rules (§5.2).
 - **Generic bounds are static**: `<T implements Shape>` compiles once per type, with direct calls. The built-in bounds, such as `ordered` and `number`, are in §10.1.
 - **`instanceof`** on an interface reference compares the method-table pointer: `if (s instanceof Circle c)` binds `c` as a `Circle&` only when it matches. There are no casts between reference types.
+- **An interface method can fail when any class that implements it has a method of that name that can** (Decided). It has no body to write a status, and the compiler sees the whole program, so `s.area()` draws no dropped-status warning when no `area` fails, and `while (T x : it.next())` ends when an `Iterator`'s does.
+- **`=` through an interface reference is an error** (Decided): it would copy a value whose class isn't known. `s .= other` rebinds it (§5.1).
+- **`==` on interface references is an error** (Decided): `==` compares fields (§6.1), and the two values may be of different classes. Test them with `instanceof` first.
+- **Generic inference sees through `implements`**: a `Cell<string>` passed as `Box<T>&` gives `T = string` (§10).
 - Open (§17):
   - default methods;
   - static methods in interfaces;
@@ -1278,7 +1283,7 @@ enum Color { RED, GREEN, BLUE }
   - Runaway instantiation (`Foo<T>` using `Foo<Pair<T, T>>`) is stopped by a depth limit, or rejected.
   - Only what is used is instantiated. The compiler sees the whole program (no dynamic loading).
   - Generic bodies are type-checked once, against their declared bounds.
-- **Type arguments are inferred from the arguments** (Decided). Each parameter whose type mentions a type parameter fixes it from its argument, and an array passed where a slice (`T[:]` or `T[:]&`) is expected gives its element type: `summarize(ints)` with an `i64[..>]` gives `T = i64`. A literal takes the type the other arguments fix. Arguments that fix one type parameter differently, such as `max(a, b)` with a `u8` and a `u32`, are an error; no conversion is applied to make them agree. Explicit type arguments (`f<i64>(x)`) are Open (`GRAMMAR.md` §8).
+- **Type arguments are inferred from the arguments** (Decided). Each parameter whose type mentions a type parameter fixes it from its argument, and an array passed where a slice (`T[:]` or `T[:]&`) is expected gives its element type: `summarize(ints)` with an `i64[..>]` gives `T = i64`. A literal takes the type the other arguments fix. A class passed for an interface fixes them through what it implements: a `Cell<string>` passed as `Box<T>&` gives `T = string`. Arguments that fix one type parameter differently, such as `max(a, b)` with a `u8` and a `u32`, are an error; no conversion is applied to make them agree. Explicit type arguments (`f<i64>(x)`) are Open (`GRAMMAR.md` §8).
 
 ### 10.1 Built-in bounds (Decided)
 A generic body can use only what its bounds allow (§10). Seven bounds for the built-in operations are built in. They are used with `implements`, like interfaces, and `&` combines several: `<T implements ordered & hashable>`.
@@ -1413,7 +1418,7 @@ writeBytes(1, msg, (u64) msg.len);
 - **Zinkite's output goes through C's `stdout`** (Decided), so text printed by Zinkite and by C code it calls comes out in the order it was written, on a terminal and through pipes alike. stdio buffers it by lines on a terminal and in 64 KB blocks otherwise; stderr is unbuffered, and stdout is flushed before anything goes to stderr. On glibc, Zinkite writes into the block buffer directly, as glibc's own `putc_unlocked` does, so output costs what a private buffer would.
 
 ### 12.7 The standard library is Zinkite (Decided)
-- **The library's packages are Zinkite source** inside the `zink` binary (`compiler/lib/zink/`), checked and compiled with the program like its own files. A program gets the packages its files import, and the ones those import.
+- **The library's packages are Zinkite source** inside the `zink` binary (`compiler/lib/zink/`), checked and compiled with the program like its own files. A program gets the packages its files import, and the ones those import. `zink.lang` is partly built into the compiler (`print`, `status`, the methods on numbers and arrays) and partly Zinkite (`Iterator<T>`), which every program gets.
 - **An error in a library file is a bug in zink**, reported on the program's first file with the library file and line, since there's no file of the program's to point at. The library's warnings aren't shown.
 - **Its C layer is the runtime's `zr_` functions**, declared as explicit `extern`s (§12.6) with the runtime's C name, such as `extern("zr_io_open") i64 cOpen(string path, i32 how);`. Unlike C from a header, they take Zinkite's representations as they are: a `string` as a slice with no NUL copy, and a growable array by reference, so the runtime appends to it. No prototype is written, since the runtime defines them.
 - **Only files in `zink.*` packages may declare them**, and only the library's own files may declare a `zink.*` package (§8.4). A program that wants a C function declares it under the C function's own name.

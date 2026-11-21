@@ -15,9 +15,9 @@ class Found {
     string value;
 }
 
-// The values of one option, or the rest, in the order given (STDLIB §6.1). Loop over it
-// with `while (string v : it.next())`; for-each comes with Iterator (DESIGN §17).
-public class ArgIterator {
+// The values of one option, or the rest, in the order given (STDLIB §6.1):
+// `for (string f : cli.restValues())`.
+public class ArgIterator implements Iterator<string> {
     private Found[:] found;
     private i64 spec;
     private i64 at;

@@ -27,6 +27,7 @@ use crate::token::Prim;
 use crate::types::*;
 
 mod generics;
+mod interfaces;
 mod lambdas;
 mod maps;
 mod sorting;
@@ -120,6 +121,10 @@ struct Gen<'p, 'a> {
     class_insts: HashMap<String, String>,
     fn_insts: HashMap<String, String>,
     inst_queue: Vec<Inst>,
+    /// Interface instantiations: their reference struct and method table struct.
+    iface_refs: HashMap<String, (String, String)>,
+    /// Method tables, by class and interface.
+    vtables: HashMap<String, String>,
 }
 
 fn c_string(s: &[u8]) -> String {
@@ -269,6 +274,8 @@ impl<'p, 'a> Gen<'p, 'a> {
             class_insts: HashMap::new(),
             fn_insts: HashMap::new(),
             inst_queue: Vec::new(),
+            iface_refs: HashMap::new(),
+            vtables: HashMap::new(),
         }
     }
 
@@ -438,7 +445,13 @@ impl<'p, 'a> Gen<'p, 'a> {
             Ty::IntLit { .. } => "int64_t".into(),
             Ty::FloatLit => "double".into(),
             Ty::Slice(_) | Ty::View(_) => "zr_slice".into(),
-            Ty::Ref(x) => format!("{}*", self.cty(x, span)),
+            Ty::Ref(x) => match &**x {
+                // Two pointers: the value and its class's table (DESIGN §6.3).
+                Ty::Class(id, args) if self.prog.classes[*id].kind == ClassKind::Interface => {
+                    self.iface_ref(*id, args, span)
+                }
+                _ => format!("{}*", self.cty(x, span)),
+            },
             Ty::Nullable(x) => self.cty(x, span),
             Ty::Class(id, args) => {
                 let c = &self.prog.classes[*id];
@@ -537,6 +550,11 @@ impl<'p, 'a> Gen<'p, 'a> {
                 vec![c]
             }
             Ty::Tuple(_) => {
+                let c = self.cty(t, Span::default());
+                vec![c]
+            }
+            // An interface reference is a struct held by value.
+            Ty::Ref(_) | Ty::Nullable(_) if interfaces::iface_target(self.prog, t).is_some() => {
                 let c = self.cty(t, Span::default());
                 vec![c]
             }
@@ -1608,6 +1626,12 @@ impl<'p, 'a> Gen<'p, 'a> {
             self.line("}");
             return;
         }
+        if let Ty::Class(..) = settle(it.unref()) {
+            self.iter_for_each(label, name, iter, body);
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
         let elem = it.elem().cloned();
         let Some(elem) = elem else {
             self.unsupported(iter.span, "this for-each");
@@ -1657,7 +1681,8 @@ impl<'p, 'a> Gen<'p, 'a> {
         };
         let vc = self.cty(&vty, iter.span);
         let at = looped.at(&i);
-        let bind = if by_ref {
+        // A reference to an element that is itself a reference is that reference.
+        let bind = if by_ref && !is_ref(&elem) {
             format!("{} {} = &{};", vc, vname, at)
         } else {
             format!("{} {} = {};", vc, vname, at)
@@ -1881,7 +1906,14 @@ impl<'p, 'a> Gen<'p, 'a> {
                     return self.int_lit((*value as i128).wrapping_neg(), want);
                 }
             }
-            E::Null => return "NULL".into(),
+            E::Null => {
+                // A null interface reference is two null pointers.
+                if let Some((id, args, _)) = interfaces::iface_target(self.prog, want) {
+                    let zi = self.iface_ref(id, &args, e.span);
+                    return format!("(({}){{0}})", zi);
+                }
+                return "NULL".into();
+            }
             E::ArrayLit(items) if items.is_empty() => {
                 if let Ty::Array(..) = want {
                     let ct = self.cty(want, e.span);
@@ -2025,6 +2057,9 @@ impl<'p, 'a> Gen<'p, 'a> {
     fn conv(&mut self, code: &str, from: &Ty, to: &Ty, span: Span) -> String {
         if from == to || to.is_unknown() {
             return code.to_string();
+        }
+        if let Some(c) = self.iface_conv(code, from, to, span) {
+            return c;
         }
         match (from, to) {
             (Ty::Null, _) => "NULL".into(),
@@ -2346,7 +2381,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                 (format!("(({}){})", prim_c(*prim), v), Ty::Prim(*prim))
             }
             E::Lambda { .. } => (self.lambda_value(e), t),
-            E::InstanceOf { .. } => (self.unsupported(e.span, "`instanceof`"), t),
+            E::InstanceOf { expr, ty, bind } => (self.instance_of(expr, ty, bind.as_ref()), t),
             E::ArrayLit(_) => (self.unsupported(e.span, "an array literal here"), t),
             E::Discard => ("0".into(), t),
         }
@@ -2910,13 +2945,16 @@ impl<'p, 'a> Gen<'p, 'a> {
         };
         let lt = self.ty(l);
         let rt = self.ty(r);
-        // Null tests compare pointers.
+        // Null tests compare pointers: an interface reference's is its value's.
         if matches!(l.kind, E::Null) || matches!(r.kind, E::Null) {
-            let (a, _) = if matches!(l.kind, E::Null) {
+            let (a, at) = if matches!(l.kind, E::Null) {
                 self.rv(r)
             } else {
                 self.rv(l)
             };
+            if interfaces::iface_target(self.prog, &at).is_some() {
+                return format!("(({}).p {} NULL)", a, sym);
+            }
             return format!("({} {} NULL)", a, sym);
         }
         let (lu, ru) = (settle(lt.unref()), settle(rt.unref()));
@@ -3534,7 +3572,11 @@ impl<'p, 'a> Gen<'p, 'a> {
                 }
                 let m = &self.prog.classes[c].methods[i];
                 if self.prog.classes[c].kind == ClassKind::Interface {
-                    let u = self.unsupported(e.span, "calls through interfaces");
+                    let params: Vec<Ty> = fact.params.iter().map(|t| self.sb(t)).collect();
+                    if let E::Member { expr: base, .. } = &callee.kind {
+                        return self.iface_call(base, c, i, args, &params, e.span);
+                    }
+                    let u = self.unsupported(e.span, "this call through an interface");
                     return CallOut {
                         code: u,
                         ret,

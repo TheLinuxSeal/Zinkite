@@ -103,10 +103,11 @@ TinyCC for `zink run` is a maybe-later (DESIGN §17).
 
 It covers script files, classes, enums, constructors and methods, statuses,
 every number type including `i128` and `u128` (as `__int128`),
-references, strings and interpolation, every array kind, slices (except of cursor,
+references, interfaces, strings and interpolation, every array kind, slices (except of cursor,
 chunked and reversed arrays on data stacks, which are undecided), every statement
 form, casts and the integer rules, generics, lambdas and function values, hash
-maps and sets, calling C, and for-each over arrays, maps, sets and text iterators. Bugs stop the
+maps and sets, calling C, and for-each over arrays, maps, sets, text iterators and
+iterator classes. Bugs stop the
 program with the file and line, and exit status 1. Six of the eight examples run:
 `csvsort`, `dirwalk`, `linebuf`, `sortlines`, `stats` and `wordfreq`. `cachesim`
 needs pools, and `jsonfmt` needs `zink.json`.
@@ -142,6 +143,18 @@ class gets a struct per instantiation, named before its fields so a type like
 interface is a known class, so its methods are called directly. Instantiation that
 grows its type arguments without end is rejected.
 
+Interfaces (DESIGN §6.3, §12.4): a `Shape&` is two pointers, to the value and to
+the method table of its class for `Shape`. There is one table per class and
+interface (and per instantiation of either), in static data, made the first time
+the pair is needed. Each entry is a thunk that takes the value as `void *` and
+calls the class's method directly, adding a status of 0 when the interface's method
+can fail and this class's can't. `instanceof` compares the table pointer. A call
+through an interface costs an indirect call: 100 million `area()` calls over a
+`Shape&[..>]` take 0.22 s, against 0.11 s for direct calls over the two concrete
+arrays. A for-each over an iterator is a repeat loop on a hidden local (DESIGN
+§9.4), on any class with `mut T next()`, a class with `iterator()`, or an
+`Iterator<T>&`.
+
 Calling C (DESIGN §12.6): `extern import stdio.h;` runs clang over the header
 (`src/cheader.rs`), which lists its functions, typedefs, enum constants and macros.
 Functions whose signatures have one clear meaning are called directly: numbers,
@@ -169,16 +182,19 @@ representations as they are. Written so far:
 - `zink.cli`: `Args`, with the `--help` it generates, and `ArgIterator` for
   `getAll` and `restValues`.
 
+`zink.lang`'s `Iterator<T>` is in `lib/zink/lang/`, and `ArgIterator` implements
+it, so `for (string f : cli.restValues())` works. The text iterators (`lines()`,
+`splitBy()`) are still built in, so they don't implement it yet.
+
 Where they differ from STDLIB: `Stat.modified` is nanoseconds as an `i64` until
-`zink.time` is written; an `ArgIterator` is looped over with
-`while (string v : it.next())` until `Iterator` is; file writes aren't buffered,
+`zink.time` is written; file writes aren't buffered,
 so `flush` has nothing to do (`println` is one `writev`); and `fs.move` of a
 directory across file systems still fails with `CROSS_DEVICE`. `fs.walk` and
 `ansi` aren't written yet. A bug the library finds, such as asking `Args` for an
 option that was never declared, is reported at the library's line, not the
 caller's.
 
-Not yet: interfaces (calls through an interface reference), a capturing lambda
+Not yet: a capturing lambda
 passed to a function of the program's own (which needs that function specialized per lambda), `filter`, `map`
 and the other methods that build a new array, iterators in variables, comparing
 class values, and the library packages that aren't written yet (`zink.json`,
@@ -247,11 +263,11 @@ stops the program, as a cast that doesn't fit does (DESIGN §9.1).
 | `src/flow.rs` | the state definite assignment tracks: what is assigned on every path, and on some |
 | `src/lifetimes.rs` | roots and lifetimes: rules S and R, function summaries, recursion |
 | `src/codegen.rs` | the C backend |
-| `src/codegen/` | its parts for lambdas, hash maps, sorting and generics |
+| `src/codegen/` | its parts for lambdas, hash maps, sorting, generics and interfaces |
 | `src/cheader.rs` | reading C headers with clang, and caching what it finds |
 | `src/driver.rs` | compiling the C, the cache, and running the result |
 | `src/stdlib.rs` | the standard library's files, built into `zink`, and which a program needs |
-| `lib/zink/` | the standard library, in Zinkite: `io/` and `cli/` so far |
+| `lib/zink/` | the standard library, in Zinkite: `io/`, `cli/` and `lang/` so far |
 | `runtime/zink_rt.h` | the runtime: data stacks, output, failures, checked arithmetic, text |
 | `src/main.rs` | the `zink` command |
 | `tests/parse.rs` | parser tests |

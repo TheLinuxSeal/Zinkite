@@ -31,6 +31,7 @@ lib! {
     "zink.io", "zink/io/Stat.zn";
     "zink.io", "zink/io/Dir.zn";
     "zink.cli", "zink/cli/Args.zn";
+    "zink.lang", "zink/lang/Iterator.zn";
 }
 
 /// `zink` and `zink.*`, which only the library's own files may declare.
@@ -42,9 +43,10 @@ pub fn has_package(p: &str) -> bool {
     FILES.iter().any(|f| f.package == p)
 }
 
-/// The packages a file imports.
+/// The packages a file imports, and `zink.lang`, which every file does (DESIGN §8.4).
 pub fn imported_packages(f: &ast::File) -> Vec<String> {
-    f.imports
+    let mut out: Vec<String> = f
+        .imports
         .iter()
         .map(|imp| match imp.kind {
             ast::ImportKind::Wildcard => imp.path.text(),
@@ -54,7 +56,9 @@ pub fn imported_packages(f: &ast::File) -> Vec<String> {
                 .collect::<Vec<_>>()
                 .join("."),
         })
-        .collect()
+        .collect();
+    out.push("zink.lang".into());
+    out
 }
 
 /// The library files for these packages, as sources named `<zink>/zink/io/File.zn`.

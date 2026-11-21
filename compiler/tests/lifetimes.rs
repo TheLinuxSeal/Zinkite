@@ -584,3 +584,43 @@ fn a_removable_field_is_storage_of_its_own() {
         "`->` removes from `this.a` while `x` may still refer into it",
     );
 }
+
+/// Interface references follow rules S and R like any reference.
+#[test]
+fn interface_references_follow_the_rules() {
+    let e = errors(
+        r##"interface Shape { f64 area(); }
+class Circle implements Shape {
+    f64 r;
+    f64 area() { return r; }
+}
+
+Shape& escape() {
+    Circle c = new Circle(1.0);
+    Shape& s = c;
+    return s;
+}
+
+void main() {
+    Shape&[..>] keep = [];
+    {
+        Circle inner = new Circle(2.0);
+        keep +> inner;
+    }
+    Circle[..~] cs = [];
+    cs +> new Circle(3.0);
+    Shape& first = cs[0];
+    cs.clear();
+    println("${first.area()}");
+}
+"##,
+    );
+    assert_eq!(e.len(), 3, "{:#?}", e);
+    assert!(e[0].contains("returns a reference into `c`"), "{}", e[0]);
+    assert!(e[1].contains("can't be stored in `keep`"), "{}", e[1]);
+    assert!(
+        e[2].contains("`clear` removes from `cs` while `first` may still refer into it"),
+        "{}",
+        e[2]
+    );
+}

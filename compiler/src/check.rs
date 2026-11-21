@@ -1306,9 +1306,12 @@ impl<'p, 'a> Checker<'p, 'a> {
                 let after_iter = self.flow.clone();
                 self.push_scope();
                 self.bind_local_type(ty, name, &elem, by_ref, iter.span);
+                // Bound to an element; when the elements are references themselves, to what
+                // they refer to, which a read-only view doesn't make read-only.
                 if let Name::Ident(n) = name
                     && let Some(id) = self.lookup_local(&n.name)
                     && is_ref_ty(&self.locals[id].ty)
+                    && !matches!(elem, Ty::Ref(_))
                 {
                     self.bind_ref(id, iter);
                 }
@@ -1837,7 +1840,9 @@ impl<'p, 'a> Checker<'p, 'a> {
         let prog = self.prog;
         match it.unref() {
             Ty::Array(e, _) | Ty::View(e) => ((**e).clone(), true),
-            Ty::Slice(e) => ((**e).clone(), false),
+            // A copy of a reference is that reference, so `for (Shape& s : shapes)` works on
+            // a slice of them too.
+            Ty::Slice(e) => ((**e).clone(), matches!(**e, Ty::Ref(_))),
             Ty::Map(k, v) => (Ty::MapEntry(k.clone(), v.clone()), true),
             Ty::Set(e) => ((**e).clone(), false),
             Ty::Pool(e) => ((**e).clone(), true),
@@ -2443,6 +2448,8 @@ impl<'p, 'a> Checker<'p, 'a> {
                     _ => None,
                 };
                 let target = self.resolve(ty);
+                // For the backend, which compares tables.
+                self.facts.types.insert(key(ty.span), target.clone());
                 match (&iface, &target) {
                     (Some(i), Ty::Class(c, _)) => {
                         if !self.implements(&target, i) {
@@ -3177,6 +3184,18 @@ impl<'p, 'a> Checker<'p, 'a> {
                     return tt;
                 }
                 self.need_writable(target, "can't assign to this");
+                // Writing through would copy a value of a class not known here.
+                if let Ty::Ref(x) = &tt
+                    && matches!(x.unref(), Ty::Class(id, _) if self.is_interface(*id))
+                {
+                    self.err_help(
+                        target.span,
+                        "`=` writes through a reference, and an interface reference's value has no known class to copy",
+                        "to make it refer to something else, rebind it with `.=` (DESIGN §5.1, §6.3)",
+                    );
+                    self.expr_c(value, None, consumed);
+                    return Ty::Unknown;
+                }
                 let to = match &tt {
                     Ty::Ref(x) => (**x).clone(),
                     Ty::View(e) => Ty::Slice(e.clone()),
@@ -3822,6 +3841,21 @@ impl<'p, 'a> Checker<'p, 'a> {
             (Null, _) | (_, Null) => {
                 return Err("only nullable references (`T&?`) can be compared with `null`".into());
             }
+            _ => {}
+        }
+        // `==` compares fields (DESIGN §6.1), and an interface reference's value has no
+        // known class to compare by.
+        let iface = |t: &Ty| {
+            matches!(t.unref(), Class(id, _) if self.is_interface(*id))
+                || matches!(t, Nullable(x) if matches!(x.unref(), Class(id, _) if self.is_interface(*id)))
+        };
+        if iface(a) || iface(b) {
+            return Err(format!(
+                "can't {} interface references: their values' classes aren't known here; test them with `instanceof` first (DESIGN §6.3)",
+                what
+            ));
+        }
+        match (a, b) {
             (Nullable(x), Nullable(y)) if !ordering && self.same(x, y) => return Ok(()),
             (Nullable(_), _) | (_, Nullable(_)) => return Err(
                 "this may be null here; check `x != null` first, in a local variable (DESIGN §5.1)"
@@ -4303,7 +4337,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                 "can't call `{}` here, since it changes what it's called on",
                 name.name
             );
-            self.need_writable(base, &action);
+            self.need_writable_through(base, &action);
         }
         t
     }
@@ -5076,7 +5110,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                 && let Some(e) = exprs[i]
             {
                 let action = format!("can't pass this to `{}`, which may change it", what);
-                self.need_writable(e, &action);
+                self.need_writable_through(e, &action);
             }
         }
         self.note_status(Some(chosen.can_fail), consumed, span, &chosen.name);
@@ -5175,6 +5209,9 @@ impl<'p, 'a> Checker<'p, 'a> {
             E::Paren(x) => self.read_only(x),
             E::Ident(n) => self.read_only_name(n, true),
             E::This => self.this_read_only(),
+            // Through a reference held in a slot, the storage is what it refers to.
+            E::Member { expr, .. } if self.stored_ref(expr) => None,
+            E::Index { expr, .. } | E::Slice { expr, .. } if self.stored_ref(expr) => None,
             E::Member { expr, .. } => self.read_only(expr),
             E::Index { expr, .. } | E::Slice { expr, .. } => {
                 if let Some(Ty::Slice(el)) = self
@@ -5260,6 +5297,40 @@ impl<'p, 'a> Checker<'p, 'a> {
     }
 
     /// Reports `action` when `e` can't be changed here.
+    /// A reference read out of an array element or a field. Storing a reference needs
+    /// one that can be written through, so what a stored reference refers to can be
+    /// changed even where the slot holding it can't, as in C's `T *const *`: a read-only
+    /// view of references, `Shape&[:]`, can't be given new references, but what they
+    /// refer to can change.
+    fn stored_ref(&self, e: &Expr) -> bool {
+        let e = match &e.kind {
+            E::Paren(x) => x,
+            _ => e,
+        };
+        matches!(e.kind, E::Index { .. } | E::Member { .. })
+            && self.facts.types.get(&key(e.span)).is_some_and(|t| {
+                matches!(t, Ty::Ref(_)) || matches!(t, Ty::Nullable(x) if matches!(**x, Ty::Ref(_)))
+            })
+    }
+
+    /// Why what `e` refers to can't be changed, for a reference bound or passed to it.
+    fn referent_read_only(&self, e: &Expr) -> Option<Ro> {
+        if self.stored_ref(e) {
+            None
+        } else {
+            self.read_only(e)
+        }
+    }
+
+    /// As `need_writable`, for what `e` refers to: a reference bound or passed to it, or
+    /// a `mut` method called on it.
+    fn need_writable_through(&mut self, e: &Expr, action: &str) {
+        if self.stored_ref(e) {
+            return;
+        }
+        self.need_writable(e, action);
+    }
+
     fn need_writable(&mut self, e: &Expr, action: &str) {
         match self.read_only(e) {
             Some(ro) => self.err_help(e.span, format!("{}: {}", action, ro.msg), ro.help),
@@ -5276,7 +5347,7 @@ impl<'p, 'a> Checker<'p, 'a> {
     /// A reference local is bound to `source`. Bound to something the code can't change,
     /// it can't be written through.
     fn bind_ref(&mut self, id: usize, source: &Expr) {
-        let Some(ro) = self.read_only(source) else {
+        let Some(ro) = self.referent_read_only(source) else {
             return;
         };
         let name = self.locals[id].name.clone();
@@ -5322,7 +5393,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                         format!("can't rebind this: {}", ro.msg),
                         ro.help,
                     ),
-                    None => self.need_writable(value, "can't store a reference to this"),
+                    None => self.need_writable_through(value, "can't store a reference to this"),
                 }
             }
         }
@@ -5551,6 +5622,20 @@ impl<'p, 'a> Checker<'p, 'a> {
             (Nullable(p), Nullable(x)) => self.unify_infer(p, x, names, binds),
             (Nullable(p), _) => self.unify_infer(p, a, names, binds),
             (Class(i, ps), Class(j, xs)) if i == j => pair(self, ps, xs, binds),
+            // A class given for an interface: its type arguments come from what the class
+            // implements, so a `Cell<string>` passed as `Box<T>&` gives `string`.
+            (Class(i, ps), Class(j, xs)) if self.is_interface(*i) => {
+                let map = self.class_subst(*j, xs);
+                let found = self.prog.classes[*j]
+                    .implements
+                    .iter()
+                    .map(|t| t.subst(&map))
+                    .find(|t| matches!(t, Class(k, _) if k == i));
+                match found {
+                    Some(Class(_, ys)) => pair(self, ps, &ys, binds),
+                    _ => Ok(()),
+                }
+            }
             (Func(ps, r), Func(xs, xr)) if ps.len() == xs.len() => {
                 pair(self, ps, xs, binds)?;
                 self.unify_infer(r, xr, names, binds)

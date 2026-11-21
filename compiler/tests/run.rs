@@ -2290,3 +2290,340 @@ void main() {
         "ab cd\nfalse\nkl\n",
     );
 }
+
+// ---------------------------------------------------------------- interfaces
+
+/// DESIGN §6.3's example: references into two arrays of different classes, in one array
+/// of `Shape&`, called through their tables, and `instanceof` binding a `Circle&`.
+#[test]
+fn interfaces_dispatch() {
+    prints(
+        r##"interface Shape {
+    f64 area();
+}
+
+class Circle implements Shape {
+    f64 r;
+    new(f64 r) { this.r = r; }
+    f64 area() { return 3.14159 * r * r; }
+}
+
+class Rect implements Shape {
+    f64 w;
+    f64 h;
+    new(f64 w, f64 h) { this.w = w; this.h = h; }
+    f64 area() { return w * h; }
+}
+
+void main() {
+    Circle[..>] circles = [];
+    Rect[..>] rects = [];
+    Shape&[..>] shapes = [];
+    shapes.push(circles.push(new Circle(1.0)));
+    shapes.push(rects.push(new Rect(2.0, 3.0)));
+
+    f64 total = 0.0;
+    for (Shape& s : shapes) { total += s.area(); }
+    println("${total}");
+    for (Shape& s : shapes) {
+        if (s instanceof Circle c) { println("circle ${c.r}"); }
+    }
+}
+"##,
+        "9.14159\ncircle 1.0\n",
+    );
+}
+
+/// Methods with arguments, `mut` and `void` ones through an interface, a status from
+/// only some implementations, nullable references, `instanceof` in `&&` and `else if`,
+/// references in a field, a capped array and a slice, one interface for two classes and
+/// two interfaces on one class, and a generic class for a generic interface, with `T`
+/// inferred through `implements`.
+#[test]
+fn interfaces_in_depth() {
+    prints(
+        r##"interface Shape {
+    f64 area();
+    string name();
+    bool bigger(Shape& other);
+}
+
+interface Counter {
+    mut void add(i64 n);
+    i64 total();
+    // Fails in some implementations only.
+    mut i64 take();
+}
+
+class Circle implements Shape, Counter {
+    f64 r;
+    i64 hits = 0;
+    new(f64 r) { this.r = r; }
+    f64 area() { return 3.0 * r * r; }
+    string name() { return "circle"; }
+    bool bigger(Shape& other) { return area() > other.area(); }
+    mut void add(i64 n) { hits += n; }
+    i64 total() { return hits; }
+    mut i64 take() {
+        if (hits == 0) { return #status.END 0; }
+        hits--;
+        return hits;
+    }
+}
+
+class Square implements Shape {
+    f64 s;
+    new(f64 s) { this.s = s; }
+    f64 area() { return s * s; }
+    string name() { return "square"; }
+    bool bigger(Shape& other) { return area() > other.area(); }
+}
+
+class Tally implements Counter {
+    i64 n = 0;
+    mut void add(i64 k) { n += k; }
+    i64 total() { return n; }
+    mut i64 take() { return n; }
+}
+
+interface Box<T> {
+    T get();
+}
+
+class Cell<T> implements Box<T> {
+    T v;
+    new(T v) { this.v = v; }
+    T get() { return v; }
+}
+
+class Holder {
+    Shape& shape;
+    new(Shape& s) { this.shape = s; }
+}
+
+Shape& largest(Shape&[:] all) {
+    Shape& best = all[0];
+    for (Shape& s : all) {
+        if (s.bigger(best)) { best .= s; }
+    }
+    return best;
+}
+
+void bump(Counter& c, i64 times) {
+    for (i64 i = 0; i < times; i++) { c.add(i); }
+}
+
+string describe(Shape&? s) {
+    if (s == null) { return "nothing"; }
+    if (s instanceof Circle c && c.r > 1.0) { return "a big circle"; }
+    else if (s instanceof Circle) { return "a small circle"; }
+    return s.name();
+}
+
+<T> T unbox(Box<T>& b) { return b.get(); }
+
+void main() {
+    Circle c1 = new Circle(1.0);
+    Circle c2 = new Circle(2.0);
+    Square q = new Square(3.0);
+    Shape&[..~4] shapes = [];
+    @_ = shapes +> c1;
+    @_ = shapes +> q;
+    @_ = shapes +> c2;
+    Shape& big = largest(shapes);
+    println("largest ${big.name()} ${big.area()}");
+
+    Holder h = new Holder(q);
+    println("held ${h.shape.name()} ${h.shape.area()}");
+
+    bump(c1, 4);
+    Tally t = new Tally();
+    bump(t, 3);
+    println("counts ${c1.total()} ${t.total()}");
+    Counter& k = c1;
+    i64 sum = 0;
+    while (i64 x : k.take()) { sum += x; }
+    println("took ${sum}, left ${k.total()}");
+    Counter& tk = t;
+    i64 v @st = tk.take();
+    println("tally take ${v} ${st}");
+
+    Shape&? none = null;
+    println("${describe(none)}, ${describe(c1)}, ${describe(c2)}, ${describe(q)}");
+
+    Cell<i64> ci = new Cell<i64>(42);
+    Cell<string> cs = new Cell<string>("hi");
+    Box<i64>& bi = ci;
+    println("boxes ${bi.get()} ${unbox(cs)} ${unbox(ci)}");
+}
+"##,
+        "largest circle 12.0
+held square 9.0
+counts 6 3
+took 15, left 0
+tally take 3 0
+nothing, a small circle, a big circle, square
+boxes 42 hi 42
+",
+    );
+    prints(
+        r##"interface Named { string name(); }
+interface Marker {}
+interface Box<T> { T& slot(); }
+
+class Cell<T> implements Box<T>, Marker, Named {
+    T v;
+    new(T v) { this.v = v; }
+    T& slot() { return v; }
+    string name() { return "cell"; }
+}
+
+class Dog implements Named, Marker {
+    string n;
+    string name() { return n; }
+}
+
+<T> string twice(T& x) { return "?"; }
+
+void main() {
+    Cell<i64> c = new Cell<i64>(5);
+    Box<i64>& b = c;
+    b.slot() = 9;
+    println("slot ${c.v} ${b.slot()}");
+    Dog d = new Dog("rex");
+    Named& n1 = d;
+    Named& n2 = c;
+    Marker& m = d;
+    println("${n1.name()} ${n2.name()} ${n2 instanceof Cell<i64>} ${n2 instanceof Cell<string>} ${m instanceof Dog}");
+    println(twice(n1));
+}
+"##,
+        "slot 9 9\nrex cell true false true\n?\n",
+    );
+}
+
+/// A for-each over an iterator class is a repeat loop on a hidden local (DESIGN §9.4):
+/// with `continue` and `break`, on a class with `iterator()`, on a generic iterator, and
+/// a repeat loop through an interface reference.
+#[test]
+fn iterator_classes() {
+    prints(
+        r##"class Range implements Iterable {
+    i64 lo;
+    i64 hi;
+    Steps iterator() { return new Steps(lo, hi); }
+}
+
+interface Iterable {
+    Steps iterator();
+}
+
+class Steps {
+    i64 at;
+    i64 hi;
+    mut i64 next() {
+        if (at >= hi) { return #status.END 0; }
+        at++;
+        return at - 1;
+    }
+}
+
+class Words {
+    string text;
+    i64 at = 0;
+    mut string next() {
+        while (at < text.len && text[at] == ' ') { at++; }
+        if (at >= text.len) { return #status.END ""; }
+        i64 start = at;
+        while (at < text.len && text[at] != ' ') { at++; }
+        return text[start:at];
+    }
+}
+
+interface Source<T> {
+    mut T next();
+}
+
+class Pairs<T> implements Source<T> {
+    T a;
+    T b;
+    i64 n = 0;
+    mut T next() {
+        n++;
+        if (n == 1) { return a; }
+        if (n == 2) { return b; }
+        return #status.END a;
+    }
+}
+
+Words split(string s) { return new Words(s); }
+
+void main() {
+    for (i64 i : new Range(2, 5)) { print("${i} "); }
+    println("");
+    for (string w : split("  the quick  fox ")) {
+        if (w == "quick") { continue; }
+        print("[${w}]");
+    }
+    println("");
+    i64 found = -1;
+    for (i64 i : new Steps(0, 100)) {
+        if (i * i > 50) { found = i; break; }
+    }
+    println("found ${found}");
+    Pairs<string> p = new Pairs<string>("x", "y");
+    Source<string>& src = p;
+    while (string s : src.next()) { print("${s} "); }
+    println("");
+    for (i64 v : new Pairs<i64>(7, 8)) { print("${v} "); }
+    println("");
+}
+"##,
+        "2 3 4 \n[the][fox]\nfound 8\nx y \n7 8 \n",
+    );
+}
+
+/// `zink.lang`'s `Iterator<T>`, without an import: as a bound, as a reference, and
+/// implemented by `zink.cli`'s `ArgIterator`, so a for-each loops over `restValues()`.
+#[test]
+fn the_iterator_interface() {
+    let r = run(
+        r##"import zink.cli.*;
+
+class Countdown implements Iterator<i64> {
+    i64 n;
+    mut i64 next() {
+        if (n == 0) { return #status.END 0; }
+        n--;
+        return n + 1;
+    }
+}
+
+<I implements Iterator<i64>> i64 sum(I& it) {
+    i64 total = 0;
+    while (i64 x : it.next()) { total += x; }
+    return total;
+}
+
+i64 count(Iterator<string>& it) {
+    i64 n = 0;
+    while (string s : it.next()) { n++; }
+    return n;
+}
+
+void main(string[.] args) {
+    Countdown c = new Countdown(4);
+    println("sum ${sum(c)}");
+    Args cli = new Args("t", "");
+    cli.rest("files", "the files");
+    cli.parseOrExit(args);
+    for (string f : cli.restValues()) { print("<${f}>"); }
+    println("");
+    ArgIterator all = cli.restValues();
+    println("count ${count(all)}");
+}
+"##,
+        &["a", "bb", "c"],
+    );
+    assert_eq!(r.stdout, "sum 10\n<a><bb><c>\ncount 3\n", "{}", r.stderr);
+}

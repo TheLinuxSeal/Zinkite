@@ -1761,3 +1761,107 @@ fn package_private_members() {
         ]
     );
 }
+
+/// Interfaces (DESIGN §6.3): what can't be done with an interface reference, a slot that
+/// holds one, and an interface method that can fail because an implementation can.
+#[test]
+fn interface_rules() {
+    let e = errors(
+        r##"interface Shape { f64 area(); mut void grow(); }
+interface Source<T> { mut T next(); }
+class Circle implements Shape {
+    f64 r;
+    f64 area() { return r; }
+    mut void grow() { r += 1.0; }
+}
+class Count implements Source<i64> {
+    i64 n;
+    mut i64 next() {
+        if (n == 0) { return #status.END 0; }
+        n--;
+        return n;
+    }
+}
+
+void rebind(Shape&[:] all, Shape& o) {
+    all[0] .= o;
+}
+
+void through(Shape&[:] all) {
+    for (Shape& s : all) { s.grow(); }
+    Shape& first = all[0];
+    first.grow();
+}
+
+void main() {
+    Circle a = new Circle(1.0);
+    Circle b = new Circle(2.0);
+    Shape& s = a;
+    Shape& t = b;
+    s = t;
+    bool same = s == t;
+    s.area();
+    Count c = new Count(3);
+    Source<i64>& src = c;
+    while (i64 x : src.next()) {}
+    Source<string>& wrong = c;
+}
+"##,
+    );
+    let want = [
+        "can't rebind this: a `Shape&[:]` is a read-only view",
+        "`=` writes through a reference, and an interface reference's value has no known class to copy",
+        "can't compare interface references: their values' classes aren't known here",
+        "`Count` doesn't implement `Source<string>`",
+    ];
+    assert_eq!(e.len(), want.len(), "{:#?}", e);
+    for (got, w) in e.iter().zip(want) {
+        assert!(got.contains(w), "{} / {}", got, w);
+    }
+    // No implementation of `area` fails, so dropping its result draws no warning.
+    assert!(
+        warnings(
+            r##"interface Shape { f64 area(); mut void grow(); }
+interface Source<T> { mut T next(); }
+class Circle implements Shape {
+    f64 r;
+    f64 area() { return r; }
+    mut void grow() { r += 1.0; }
+}
+class Count implements Source<i64> {
+    i64 n;
+    mut i64 next() {
+        if (n == 0) { return #status.END 0; }
+        n--;
+        return n;
+    }
+}
+
+void rebind(Shape&[:] all, Shape& o) {
+    all[0] .= o;
+}
+
+void through(Shape&[:] all) {
+    for (Shape& s : all) { s.grow(); }
+    Shape& first = all[0];
+    first.grow();
+}
+
+void main() {
+    Circle a = new Circle(1.0);
+    Circle b = new Circle(2.0);
+    Shape& s = a;
+    Shape& t = b;
+    s = t;
+    bool same = s == t;
+    s.area();
+    Count c = new Count(3);
+    Source<i64>& src = c;
+    while (i64 x : src.next()) {}
+    Source<string>& wrong = c;
+}
+"##
+        )
+        .is_empty()
+    );
+}
