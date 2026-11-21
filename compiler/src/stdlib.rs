@@ -49,7 +49,8 @@ pub fn has_package(p: &str) -> bool {
     FILES.iter().any(|f| f.package == p)
 }
 
-/// The packages a file imports, and `zink.lang`, which every file does (DESIGN §8.4).
+/// The packages a file imports, and `zink.lang`, which every file does (DESIGN §8.4), and
+/// `zink.io`, which `zink.lang`'s streams need.
 pub fn imported_packages(f: &ast::File) -> Vec<String> {
     let mut out: Vec<String> = f
         .imports
@@ -64,6 +65,9 @@ pub fn imported_packages(f: &ast::File) -> Vec<String> {
         })
         .collect();
     out.push("zink.lang".into());
+    // `stdin`, `stdout` and `stderr` are `File`s in every program (STDLIB §2.1), and only
+    // the library code a program calls is generated.
+    out.push("zink.io".into());
     out
 }
 

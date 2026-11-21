@@ -823,7 +823,9 @@ for (Conn& c : conns) { ... }            // live slots only
   - Freeing a slot bumps its generation, so a stale handle fails with `MISSING` instead of reading the slot's next value.
   - On failure, `get` still returns a reference to the slot, which is safe because a pool slot always holds a `T` (REFERENCES §5.4).
 - **`T&` references into a pool are exempt from rule R** (REFERENCES §5.4), and may be stored in fields (REFERENCES §7.4). A stale one reads the replacement: a logic bug, never memory corruption.
-- **Layout**: one grow-only array of slots, each with a 4-byte header that holds its generation and, while the slot is free, the next free slot.
+- **Layout**: one grow-only array of slots, each with an 8-byte header that holds its generation and, while the slot is free, the next free slot. An element with 8-byte alignment, as most are, would pad a 4-byte header to 8 anyway. A slot's generation is odd while it holds a value and even once freed.
+- **A handle to a slot the pool never had is a bug**, which stops the program: it comes from another pool, or is the zero value a failed call gave.
+- **A for-each visits the live slots in slot order.** Slots added during the loop aren't visited; one freed before the loop reaches it is skipped.
 - **Built in** like `hashmap`, so it is created with `[]` and is a built-in type name.
 
 ### 7.6 Later containers

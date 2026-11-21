@@ -2976,3 +2976,119 @@ again 0
 "
     );
 }
+
+// ---------------------------------------------------------------- pools and streams
+
+/// `pool<T>` (DESIGN §3.5, STDLIB §7.5): add, get, free, a stale handle failing with
+/// MISSING while a stale reference still reads a value of the type, a freed slot reused,
+/// for-each over the live slots by reference and by value, `len`, and `clear`.
+#[test]
+fn pools() {
+    prints(
+        r##"class Conn {
+    i64 fd;
+    string name;
+}
+
+void main() {
+    pool<Conn> conns = [];
+    Handle<Conn> a = conns.add(new Conn(3, "a"));
+    Handle<Conn> b = conns.add(new Conn(4, "b"));
+    Handle<Conn> c = conns.add(new Conn(5, "c"));
+    println("len ${conns.len}");
+    Conn& cb @_ = conns.get(b);
+    cb.fd = 40;
+    u8 f1 = @conns.free(b);
+    u8 f2 = @conns.free(b);
+    Conn& stale @gone = conns.get(b);
+    println("free ${f1} again ${f2 == status.MISSING}, get freed ${gone == status.MISSING}, stale still reads ${stale.fd}");
+    Handle<Conn> d = conns.add(new Conn(6, "d"));
+    Conn& dd @e = conns.get(d);
+    println("reused ${dd.name} ${e}, old handle ${b == d}, same ${d == d}, stale reads ${stale.name}");
+    for (Conn& x : conns) { print("${x.fd}:${x.name} "); }
+    println("");
+    @_ = conns.free(a);
+    for (Conn x : conns) { print("${x.name} "); }
+    println("len ${conns.len}");
+    conns.clear();
+    Conn& after @ce = conns.get(c);
+    println("cleared ${conns.len} ${ce == status.MISSING}");
+    Handle<Conn> e1 = conns.add(new Conn(7, "e"));
+    Handle<Conn> e2 = conns.add(new Conn(8, "f"));
+    Conn& g1 @_ = conns.get(e1);
+    Conn& g2 @_ = conns.get(e2);
+    println("after clear ${g1.name}${g2.name} len ${conns.len}");
+}
+"##,
+        "len 3
+free 0 again true, get freed true, stale still reads 40
+reused d 0, old handle false, same true, stale reads d
+3:a 6:d 5:c 
+d c len 2
+cleared 0 true
+after clear ef len 2
+",
+    );
+}
+
+/// stdin, stdout and stderr are `File`s (STDLIB §2.1): writes through them stay in order
+/// with print, stdout.flush() works, and a copy of stdout writes there too.
+#[test]
+fn standard_streams_are_files() {
+    let r = run(
+        r##"import zink.io.*;
+
+void main() {
+    println("1 println");
+    @_ = stdout.write("2 stdout.write\n");
+    errprintln("3 errprintln");
+    @_ = stderr.println("4 stderr.println");
+    @_ = stdout.println("5 stdout.println");
+    print("6 print");
+    u8 f = @stdout.flush();
+    println(" flushed ${f}");
+    File out = stdout;
+    @_ = out.println("7 through a copy");
+    println("terminal ${stdin.isTerminal()} ${stdout.isTerminal()}");
+}
+"##,
+        &[],
+    );
+    assert_eq!(
+        r.stdout,
+        "1 println\n2 stdout.write\n5 stdout.println\n6 print flushed 0\n7 through a copy\nterminal false false\n"
+    );
+    assert_eq!(r.stderr, "3 errprintln\n4 stderr.println\n");
+}
+
+/// cachesim: an LRU cache as a root holding a pool of nodes linked through references into
+/// it, and a hash map of handles, reading a trace from a file or from stdin.
+#[test]
+fn cachesim_example_runs() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("zink-cachesim");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let trace = dir.join("trace.txt");
+    std::fs::write(&trace, "5\n6\n5\n7\n5\n8\n6\nx\n").unwrap();
+    let exe = example("cachesim");
+    let expected = "capacity  2\naccesses  7\nhits      2 (28.57%)\nmisses    5\n";
+    let r = exec(&exe, &["-c", "2", trace.to_str().unwrap()]);
+    assert_eq!(r.stdout, expected, "{}", r.stderr);
+    assert_eq!(r.stderr, "cachesim: skipped 1 lines that weren't keys\n");
+    use std::io::Write;
+    let mut child = Command::new(&exe)
+        .args(["-c", "2"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"5\n6\n5\n7\n5\n8\n6\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
+}

@@ -30,6 +30,7 @@ mod generics;
 mod interfaces;
 mod lambdas;
 mod maps;
+mod pools;
 mod sorting;
 
 use generics::{Inst, InstKind};
@@ -134,6 +135,10 @@ struct Gen<'p, 'a> {
     iface_refs: HashMap<String, (String, String)>,
     /// Method tables, by class and interface.
     vtables: HashMap<String, String>,
+    /// The standard library's methods and constructors are generated only once something
+    /// calls them: `(class, index, is a constructor)`.
+    lib_queue: Vec<(ClassId, usize, bool)>,
+    lib_done: HashSet<(ClassId, usize, bool)>,
 }
 
 fn c_string(s: &[u8]) -> String {
@@ -224,7 +229,7 @@ fn min_max(p: Prim) -> (String, String) {
 /// An array whose header points at elements on a data stack, or a map or set on one.
 fn on_stack(t: &Ty) -> bool {
     matches!(t, Ty::Array(_, k) if k.cap != CapKind::Capped)
-        || matches!(t, Ty::Map(..) | Ty::Set(_))
+        || matches!(t, Ty::Map(..) | Ty::Set(_) | Ty::Pool(_))
 }
 
 fn is_ref(t: &Ty) -> bool {
@@ -288,6 +293,8 @@ impl<'p, 'a> Gen<'p, 'a> {
             inst_queue: Vec::new(),
             iface_refs: HashMap::new(),
             vtables: HashMap::new(),
+            lib_queue: Vec::new(),
+            lib_done: HashSet::new(),
         }
     }
 
@@ -619,7 +626,8 @@ impl<'p, 'a> Gen<'p, 'a> {
                 Some(ops) => ops.entry,
                 None => "int".into(),
             },
-            Ty::Pool(_) | Ty::Handle(_) => self.unsupported(span, "pools"),
+            Ty::Pool(_) => "zr_pool".into(),
+            Ty::Handle(_) => "zr_handle".into(),
             Ty::Param(_) => self.unsupported(span, "generics"),
             _ => self.unsupported(span, "this library type"),
         }
@@ -722,34 +730,66 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
         }
         self.drain_lambdas();
-        // Functions.
+        // Functions: the program's all, the library's when something calls them.
         for (id, c) in prog.classes.iter().enumerate() {
             if !c.type_params.is_empty() {
                 continue;
             }
             self.file = c.file;
+            let lib = crate::stdlib::reserved(&c.package);
             for (i, m) in c.methods.iter().enumerate() {
                 if let Some(cn) = &m.c_name {
                     self.extern_proto(id, i, m, cn);
                     continue;
                 }
-                if m.decl.body.is_none() {
-                    continue;
-                }
-                if !m.type_params.is_empty() {
+                if m.decl.body.is_none() || !m.type_params.is_empty() || lib {
                     continue;
                 }
                 self.method(id, i, m);
                 self.drain_lambdas();
             }
             for (i, k) in c.ctors.iter().enumerate() {
-                if matches!(c.kind, ClassKind::Class | ClassKind::Root) {
+                if matches!(c.kind, ClassKind::Class | ClassKind::Root) && !lib {
                     self.ctor(id, i, k);
                     self.drain_lambdas();
                 }
             }
         }
-        self.drain_insts();
+        loop {
+            self.drain_lib();
+            self.drain_insts();
+            if self.lib_queue.is_empty() && self.inst_queue.is_empty() {
+                break;
+            }
+        }
+    }
+
+    /// Asks for a library method or constructor, which is generated after the function
+    /// being generated now.
+    fn want_lib(&mut self, c: ClassId, i: usize, ctor: bool) {
+        let cls = &self.prog.classes[c];
+        if !crate::stdlib::reserved(&cls.package) || !cls.type_params.is_empty() {
+            return;
+        }
+        if !ctor && (cls.methods[i].c_name.is_some() || cls.methods[i].decl.body.is_none()) {
+            return;
+        }
+        if self.lib_done.insert((c, i, ctor)) {
+            self.lib_queue.push((c, i, ctor));
+        }
+    }
+
+    fn drain_lib(&mut self) {
+        while let Some((c, i, ctor)) = self.lib_queue.pop() {
+            let prog = self.prog;
+            self.file = prog.classes[c].file;
+            if ctor {
+                self.ctor(c, i, &prog.classes[c].ctors[i]);
+            } else {
+                self.method(c, i, &prog.classes[c].methods[i]);
+            }
+            self.drain_lambdas();
+        }
     }
 
     fn site(&mut self) -> u32 {
@@ -1391,6 +1431,10 @@ impl<'p, 'a> Gen<'p, 'a> {
             let a = self.site();
             return format!("zr_map_new(zr_stack({}))", a);
         }
+        if matches!(ty, Ty::Pool(_)) {
+            let a = self.site();
+            return format!("zr_pool_new(zr_stack({}))", a);
+        }
         match layout(ty) {
             Some(Layout::Cur) => {
                 let (a, b) = (self.site(), self.site());
@@ -1444,6 +1488,7 @@ impl<'p, 'a> Gen<'p, 'a> {
         }
         let fails = self.prog.classes[c].ctors[i].can_fail;
         let fname = if self.prog.classes[c].type_params.is_empty() {
+            self.want_lib(c, i, true);
             self.ctor_name(c, i)
         } else {
             let targs = match settle(self.ty_at(span).unref()) {
@@ -1464,12 +1509,12 @@ impl<'p, 'a> Gen<'p, 'a> {
     /// filled in place, text is built in place (DESIGN §3.3, §4.11).
     fn store_into(&mut self, place: &str, ty: &Ty, init: &Expr) -> String {
         let fresh = std::mem::take(&mut self.fresh_dst);
-        // A map or set starts empty on its data stack; `[]` is all that makes one.
-        if matches!(ty, Ty::Map(..) | Ty::Set(_)) {
+        // A map, set or pool starts empty on its data stack; `[]` is all that makes one.
+        if matches!(ty, Ty::Map(..) | Ty::Set(_) | Ty::Pool(_)) {
             if matches!(&init.kind, E::ArrayLit(items) if items.is_empty()) {
                 return "(void)0".into();
             }
-            return self.unsupported(init.span, "copying a map");
+            return self.unsupported(init.span, "copying a map, a set or a pool");
         }
         if let Ty::Array(el, _) = ty
             && matches!(layout(ty), Some(Layout::Deq | Layout::Cur | Layout::Chk))
@@ -1722,6 +1767,12 @@ impl<'p, 'a> Gen<'p, 'a> {
             || matches!(ty, LocalType::Type(t) if matches!(t.kind, ast::TypeKind::Ref { .. }));
         self.line("{");
         self.indent += 1;
+        if matches!(it.unref(), Ty::Pool(_)) {
+            self.pool_for_each(label, name, iter, body, by_ref);
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
         if matches!(it.unref(), Ty::Map(..) | Ty::Set(_)) {
             self.map_for_each(label, name, iter, body, by_ref);
             self.indent -= 1;
@@ -2545,6 +2596,20 @@ impl<'p, 'a> Gen<'p, 'a> {
                 };
                 (self.int_lit(*v, &lt), lt)
             }
+            // The standard streams: Files for descriptors 0, 1 and 2, whose handles have
+            // generation 0 (STDLIB §2.1).
+            None if matches!(n, "stdin" | "stdout" | "stderr")
+                && matches!(settle(&t), Ty::Class(..)) =>
+            {
+                let ty = settle(&t);
+                let ct = self.cty(&ty, span);
+                let fd = match n {
+                    "stdin" => 0,
+                    "stdout" => 1,
+                    _ => 2,
+                };
+                (format!("(({}){{.f_h = {}}})", ct, fd), ty)
+            }
             None => (
                 self.unsupported(span, &format!("`{}` (a library name)", n)),
                 t,
@@ -2624,7 +2689,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             // An entry's key is read-only (the checker sees to it); its value is writable.
             Ty::MapEntry(k, _) if name.name == "key" => (format!("{}k", acc), (**k).clone()),
             Ty::MapEntry(_, v) if name.name == "value" => (format!("{}v", acc), (**v).clone()),
-            Ty::Map(..) | Ty::Set(_) if name.name == "len" => {
+            Ty::Map(..) | Ty::Set(_) | Ty::Pool(_) if name.name == "len" => {
                 (format!("((int64_t){}live)", acc), Ty::i64())
             }
             Ty::Array(_, k) if k.cap == CapKind::Chunked && name.name == "cursor" => {
@@ -3066,6 +3131,20 @@ impl<'p, 'a> Gen<'p, 'a> {
             return format!("({} {} NULL)", a, sym);
         }
         let (lu, ru) = (settle(lt.unref()), settle(rt.unref()));
+        // Handles are equal when they name the same slot in the same generation.
+        if matches!(lu, Ty::Handle(_)) {
+            let a = self.expr(l, &lu);
+            let b = self.expr(r, &ru);
+            let eq = format!(
+                "({{ zr_handle _ha = {}, _hb = {}; _ha.i == _hb.i && _ha.g == _hb.g; }})",
+                a, b
+            );
+            return if op == BinOp::Ne {
+                format!("(!{})", eq)
+            } else {
+                eq
+            };
+        }
         let textish = |t: &Ty| matches!(t, Ty::Slice(_) | Ty::View(_) | Ty::Array(..));
         if textish(&lu) && textish(&ru) {
             let el = lu.elem().cloned().unwrap_or(Ty::u8());
@@ -3616,63 +3695,6 @@ impl<'p, 'a> Gen<'p, 'a> {
         // Taken first, so the calls in the arguments don't see it.
         let direct = self.direct_result.take();
         let ret = settle(&self.ty(e));
-        // `stdin.readAll()`, which returns the input: built where the caller keeps it
-        // (DESIGN §3.3), or for a temporary or an assignment, on the scratch stack, where
-        // nothing else grows while `zr_read_all` runs.
-        if let E::Member { expr: base, name } = &callee.kind
-            && matches!(&base.kind, E::Ident(n) if n == "stdin")
-            && !self.facts.names.contains_key(&key(base.span))
-            && args.is_empty()
-            && name.name == "readAll"
-        {
-            let t = Ty::Array(Box::new(Ty::u8()), ArrayKind::frozen());
-            let rt = self.result_ty(&t, e.span);
-            let code = match direct.as_deref() {
-                Some(d) if d != "NULL" => format!(
-                    "({{ zr_vec _v = {{{}, 0}}; uint8_t _s = zr_read_all(0, &_v); if (_s) _v.n = 0; ({}){{_v, _s}}; }})",
-                    d, rt
-                ),
-                _ => {
-                    self.used_scratch = true;
-                    format!(
-                        "({{ zr_vec _v = zr_scratch_begin(); uint8_t _s = zr_read_all(0, &_v); if (_s) _v.n = 0; zr_scratch_end(_v); ({}){{_v, _s}}; }})",
-                        rt
-                    )
-                }
-            };
-            return CallOut {
-                code,
-                ret: t,
-                fails: true,
-            };
-        }
-        // `stdin.readAll(buf)` and `stdin.nextLine(buf)`: the first of the library (STDLIB §4.1),
-        // known by name until the checker models `File`.
-        if let E::Member { expr: base, name } = &callee.kind
-            && matches!(&base.kind, E::Ident(n) if n == "stdin")
-            && !self.facts.names.contains_key(&key(base.span))
-            && args.len() == 1
-            && matches!(name.name.as_str(), "readAll" | "nextLine")
-            && layout(&self.ty(&args[0].expr)) == Some(Layout::Vec)
-        {
-            let (p, _) = self.place(&args[0].expr);
-            if name.name == "readAll" {
-                return CallOut {
-                    code: format!("zr_read_all(0, &({}))", p),
-                    ret: Ty::Void,
-                    fails: true,
-                };
-            }
-            let rt = self.result_ty(&Ty::string(), e.span);
-            return CallOut {
-                code: format!(
-                    "({{ zr_slice _l; uint8_t _s = zr_next_line(0, &({}), &_l); ({}){{_l, _s}}; }})",
-                    p, rt
-                ),
-                ret: Ty::string(),
-                fails: true,
-            };
-        }
         let Some(fact) = self.facts.calls.get(&key(e.span)) else {
             let u = self.unsupported(e.span, "calls into library packages that aren't written");
             return CallOut {
@@ -4151,6 +4173,9 @@ impl<'p, 'a> Gen<'p, 'a> {
         }
         if matches!(recv_t, Ty::Map(..) | Ty::Set(_)) {
             return self.map_method(base, m, args, ret, span);
+        }
+        if matches!(recv_t, Ty::Pool(_)) {
+            return self.pool_method(base, m, args, ret, span);
         }
         let Some(el) = recv_t.elem().cloned() else {
             return ok(

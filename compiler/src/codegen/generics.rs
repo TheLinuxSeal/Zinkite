@@ -244,6 +244,7 @@ impl<'p, 'a> Gen<'p, 'a> {
         let cls = &self.prog.classes[c];
         let m = &cls.methods[i];
         if cls.type_params.is_empty() && m.type_params.is_empty() {
+            self.want_lib(c, i, false);
             return (self.fn_name(c, i), Vec::new());
         }
         let cargs = if cls.type_params.is_empty() {

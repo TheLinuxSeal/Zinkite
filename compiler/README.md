@@ -106,11 +106,21 @@ every number type including `i128` and `u128` (as `__int128`),
 references, interfaces, strings and interpolation, every array kind, slices (except of cursor,
 chunked and reversed arrays on data stacks, which are undecided), every statement
 form, casts and the integer rules, generics, lambdas and function values, hash
-maps and sets, calling C, and for-each over arrays, maps, sets and iterators. Bugs
-stop the
-program with the file and line, and exit status 1. Six of the eight examples run:
-`csvsort`, `dirwalk`, `linebuf`, `sortlines`, `stats` and `wordfreq`. `cachesim`
-needs pools, and `jsonfmt` needs `zink.json`.
+maps, sets and pools, calling C, and for-each over arrays, maps, sets, pools and
+iterators. Bugs stop the program with the file and line, and exit status 1. Seven of
+the eight examples run: `cachesim`, `csvsort`, `dirwalk`, `linebuf`, `sortlines`,
+`stats` and `wordfreq`. `jsonfmt` needs `zink.json`.
+
+`pool<T>` (DESIGN §3.5) is one grow-only array of slots on a data stack, each
+`{generation, next free, value}`, with the free slots in a list through `next`
+(`zr_pool` in the runtime, a slot struct per element type). A slot's generation is
+odd while it holds a value and even once freed, so a stale handle fails with
+`MISSING`; the value stays, so a stale reference reads a value of the type. `add`
+takes the last slot freed before growing; a for-each visits the live slots in slot
+order. A `Handle<T>` is the slot's index and generation, 8 bytes. A handle whose slot
+the pool never had, from another pool or a failed call's zero value, stops the
+program as a bug. `cachesim` replays 200,000 keys through its LRU cache in 10 ms, and
+gives the same hits as a Python `OrderedDict` at every capacity tried.
 
 A function's array result is built where the caller keeps it (DESIGN §3.3). A
 function returning a `T[.]`, `T[..>]` or `T[..~]` takes a hidden first argument: the
@@ -178,7 +188,10 @@ and starts no process.
 
 The standard library (DESIGN §12.7) is Zinkite in `lib/zink/`, built into the
 `zink` binary (`src/stdlib.rs`) and added to a program when one of its files
-imports a package, as further files with spans of their own. Its C layer is the
+imports a package, as further files with spans of their own. `zink.lang` and
+`zink.io` are in every program, since `stdin`, `stdout` and `stderr` are `File`s.
+Only the library functions a program calls are generated, the way instantiations of
+generics are, so a program that prints "hi" has none. Its C layer is the
 runtime's `zr_` functions, declared as `extern`s that take Zinkite's
 representations as they are. Written so far:
 - `zink.io`: `File` (open, create, append, createNew, update; read, readLine,
@@ -213,7 +226,7 @@ caller's.
 Not yet: a capturing lambda
 passed to a function of the program's own (which needs that function specialized per lambda), `filter`, `map`
 and the other methods that build a new array, comparing class values, and the library packages that aren't written yet (`zink.json`,
-`zink.time` and the others). Of `stdin`, only `readAll()`, `readAll(buf)` and `nextLine(buf)` work so far.
+`zink.time` and the others).
 Using any of the rest is a clear error, not wrong code.
 
 Arrays on data stacks, by layout:

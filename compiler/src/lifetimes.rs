@@ -2471,7 +2471,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
         }
     }
 
-    fn ident(&mut self, _n: &str, span: Span, writing: bool) -> Val {
+    fn ident(&mut self, n: &str, span: Span, writing: bool) -> Val {
         match self.an.facts.names.get(&key(span)) {
             Some(NameRes::Local(d)) => match self.var_of.get(d).copied() {
                 Some(v) => {
@@ -2496,6 +2496,8 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                     Val::none()
                 }
             }
+            // The standard streams live for the whole program, as static data does.
+            None if matches!(n, "stdin" | "stdout" | "stderr") => Val::place(R::root(Var::Literal)),
             None => Val::none(),
         }
     }

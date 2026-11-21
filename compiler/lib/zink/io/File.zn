@@ -2,7 +2,8 @@ package zink.io;
 
 // A file (STDLIB §4.1). It's a handle (DESIGN §6.4): copies share the file, and once one
 // copy closes it the others fail with BAD_HANDLE, even if the descriptor is reused.
-// Writes go straight to the file; `flush` has nothing to do.
+// stdin, stdout and stderr are Files for descriptors 0, 1 and 2. Writes go straight to
+// the file, but stdout's go into C's stdout buffer, in order with print.
 public class File {
     private i64 h;
 
@@ -17,6 +18,7 @@ public class File {
     private static extern("zr_io_info") i64 cInfo(i64 h, i32 what);
     private static extern("zr_io_seek") u8 cSeek(i64 h, i64 pos);
     private static extern("zr_io_sync") u8 cSync(i64 h);
+    private static extern("zr_io_flush") u8 cFlush(i64 h);
     private static extern("zr_io_read_path") u8 cReadPath(string path, u8[..>]& buf);
     private static extern("zr_io_write_path") u8 cWritePath(string path, string bytes, i32 append);
 
@@ -120,7 +122,11 @@ public class File {
         return #err;
     }
 
-    public void flush() {}
+    // Writes what stdout holds; other files aren't buffered. IO, NO_SPACE.
+    public void flush() {
+        u8 err = cFlush(h);
+        return #err;
+    }
 
     // Writes what the system holds for the file to the disk.
     public void sync() {

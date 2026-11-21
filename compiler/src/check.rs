@@ -2653,8 +2653,19 @@ impl<'p, 'a> Checker<'p, 'a> {
             "status" => return Ty::Namespace("status"),
             "math" => return Ty::Namespace("math"),
             "extern" => return Ty::Namespace("extern"),
-            // `File` handles; `zink.io` isn't modelled yet.
-            "stdin" | "stdout" | "stderr" | "env" => return Ty::Unknown,
+            // The standard streams are `File`s (STDLIB §2.1).
+            "stdin" | "stdout" | "stderr" => {
+                return match self
+                    .prog
+                    .classes
+                    .iter()
+                    .position(|c| c.name == "File" && c.package == "zink.io")
+                {
+                    Some(id) => Ty::Class(id, Vec::new()),
+                    None => Ty::Unknown,
+                };
+            }
+            "env" => return Ty::Unknown,
             _ => {}
         }
         if self.unmodelled() && builtins::LIBRARY_NAMESPACES.contains(&name) {

@@ -954,6 +954,67 @@ static ZR_UNUSED int64_t zr_num_prefix(zr_slice s, int32_t is_float) {
     return i;
 }
 
+/* ------------------------------------------------------------ pools (DESIGN §3.5, STDLIB §7.5) */
+
+/* A handle: a slot's index, and the generation the slot had when its value was added. */
+typedef struct { uint32_t i, g; } zr_handle;
+
+/* A pool: a grow-only array of slots on a data stack, each `{gen, next, value}`, and its
+ * free slots as a list through `next`. A slot's generation is odd while it holds a live
+ * value and even once it is freed, so a handle from before a free fails with MISSING.
+ * A slot's memory is never released or given another type while the pool lives. */
+typedef struct { zr_vec v; uint32_t free; int64_t live; } zr_pool;
+#define ZR_NO_SLOT 0xFFFFFFFFu
+
+static ZR_UNUSED zr_pool zr_pool_new(void *base) { zr_pool p = {{base, 0}, ZR_NO_SLOT, 0}; return p; }
+
+static uint32_t *zr_pool_slot(zr_pool *p, uint32_t i, size_t sz) { return (uint32_t *)((char *)p->v.p + (size_t)i * sz); }
+
+/* The slot for a new value: the last one freed, or one more at the end. */
+static ZR_UNUSED uint32_t zr_pool_take(zr_pool *p, size_t sz) {
+    uint32_t i;
+    if (p->free != ZR_NO_SLOT) {
+        i = p->free;
+        uint32_t *h = zr_pool_slot(p, i, sz);
+        p->free = h[1];
+        h[0]++;
+    } else {
+        if (p->v.n >= (int64_t)ZR_NO_SLOT) zr_fail("zink runtime", 0, "a pool holds at most 4294967295 slots");
+        i = (uint32_t)p->v.n++;
+        zr_pool_slot(p, i, sz)[0] = 1;
+    }
+    p->live++;
+    return i;
+}
+
+/* 0 when the handle's value is still there, MISSING once it was freed. A handle to a slot
+ * the pool never had is from another pool, or a failed call's zero value: a bug. */
+static ZR_UNUSED uint8_t zr_pool_check(zr_pool *p, zr_handle h, size_t sz, const char *f, int l) {
+    if ((int64_t)h.i >= p->v.n) zr_fail(f, l, "this handle isn't from this pool");
+    return zr_pool_slot(p, h.i, sz)[0] == h.g ? 0 : 195;
+}
+
+/* Frees a live slot: its value stays, for any reference still reading it (DESIGN §3.5). */
+static ZR_UNUSED void zr_pool_release(zr_pool *p, uint32_t i, size_t sz) {
+    uint32_t *h = zr_pool_slot(p, i, sz);
+    h[0]++;
+    h[1] = p->free;
+    p->free = i;
+    p->live--;
+}
+
+/* Frees every slot, so every handle fails; slot 0 is reused first. */
+static ZR_UNUSED void zr_pool_clear(zr_pool *p, size_t sz) {
+    p->free = ZR_NO_SLOT;
+    for (int64_t i = p->v.n - 1; i >= 0; i--) {
+        uint32_t *h = zr_pool_slot(p, (uint32_t)i, sz);
+        if (h[0] & 1) h[0]++;
+        h[1] = p->free;
+        p->free = (uint32_t)i;
+    }
+    p->live = 0;
+}
+
 /* ------------------------------------------------------------ input and files (STDLIB §4) */
 
 /* The status for the errno a failed call left: Zinkite's codes follow errno's (DESIGN §7.7). */
@@ -1080,6 +1141,7 @@ static ZR_UNUSED int64_t zr_io_open(zr_slice path, int32_t how) {
 static ZR_UNUSED uint8_t zr_io_close(int64_t h) {
     int fd = zr_io_fd(h);
     if (fd < 0) return 9;
+    if (fd == 1) zr_flush();
     zr_inbuf *e = &zr_ins[fd];
     free(e->b);
     e->b = NULL;
@@ -1092,15 +1154,40 @@ static ZR_UNUSED uint8_t zr_io_close(int64_t h) {
 static uint8_t zr_write_fd(int fd, zr_slice s);
 
 /* Writes all of `s`: 0, or the error's status. */
+/* stdout and stderr through a File go where print does, so they stay in order with it
+ * (STDLIB §2.1). A failed write to stdout is reported at exit, and at the next flush. */
+static uint8_t zr_std_write(int fd, zr_slice s) {
+    zr_out(fd, s.p, (size_t)s.n);
+    return 0;
+}
+
 static ZR_UNUSED uint8_t zr_io_write(int64_t h, zr_slice s) {
     int fd = zr_io_fd(h);
+    if (fd == 1 || fd == 2) return zr_std_write(fd, s);
     return fd < 0 ? 9 : zr_write_fd(fd, s);
+}
+
+/* Writes what stdout holds; nothing else is buffered. */
+static ZR_UNUSED uint8_t zr_io_flush(int64_t h) {
+    int fd = zr_io_fd(h);
+    if (fd < 0) return 9;
+    if (fd != 1) return 0;
+    if (fflush(stdout) == 0) return 0;
+    uint8_t s = zr_errno();
+    if (errno == EPIPE) exit(141);
+    clearerr(stdout);
+    return s;
 }
 
 /* File.println: the text and its newline in one writev, then whatever a short write left. */
 static ZR_UNUSED uint8_t zr_io_write_line(int64_t h, zr_slice s) {
     int fd = zr_io_fd(h);
     if (fd < 0) return 9;
+    if (fd == 1 || fd == 2) {
+        zr_out(fd, s.p, (size_t)s.n);
+        zr_end_line(fd);
+        return 0;
+    }
     struct iovec v[2] = {{(void *)s.p, (size_t)s.n}, {(void *)"\n", 1}};
     ssize_t r;
     do { r = writev(fd, v, 2); } while (r < 0 && errno == EINTR);
@@ -1588,6 +1675,8 @@ static ZR_UNUSED void zr_start(int argc, char **argv) {
         zr_stdout = stdout;
     }
     zr_seed_init();
+    /* stdin, stdout and stderr are Files from the start (STDLIB §2.1). */
+    for (int fd = 0; fd < 3; fd++) zr_in_entry(fd)->open = 1;
     zr_slice *a = (zr_slice *)zr_stack(1);
     for (int i = 1; i < argc; i++) { a[i - 1].p = argv[i]; a[i - 1].n = (int64_t)strlen(argv[i]); }
     zr_args.p = a;

@@ -98,7 +98,7 @@ The compiler parses and type-checks the whole grammar, and runs the reference
 checks for lifetimes and removals (rules S and R of `REFERENCES.md`; rules V and
 L are still to come). It generates C for:
 - classes, generics, lambdas and interfaces;
-- every kind of array, hash maps and sets;
+- every kind of array, hash maps, sets and pools;
 - statuses;
 - calling C.
 
@@ -106,9 +106,8 @@ Of the standard library, `zink.io` (files, directories, paths) and `zink.cli`
 (argument parsing with generated `--help`) are written, in Zinkite, and built
 into the compiler.
 
-Six of the eight programs in `examples/` run. `cachesim` needs pools, and
-`jsonfmt` needs `zink.json`. `compiler/README.md` lists what's done and what
-isn't, in detail.
+Seven of the eight programs in `examples/` run; `jsonfmt` needs `zink.json`.
+`compiler/README.md` lists what's done and what isn't, in detail.
 
 ## Building
 
