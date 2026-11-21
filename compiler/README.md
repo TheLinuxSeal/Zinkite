@@ -79,9 +79,17 @@ Done:
   captures. A root can't be copied, passed or returned by value, or be a
   temporary (DESIGN §6.6).
 
+- rule V (variable-size values, `REFERENCES.md` §6): a variable-size field isn't
+  assigned once its record is built (V1), though a fixed-size field of it can be;
+  assigning a whole variable-size variable is a removal under rule R (V2); an array
+  of variable-size values is only added to at its end, cleared and looped over, by
+  reference, never indexed, sliced, popped, reordered or given a cursor (V3). V4 is
+  met by the code generator rather than refused: a record whose building calls
+  code that could grow its array is built aside and moved to the array's end.
+
 Not yet:
-- rules V (variable-size values) and L (links) of `REFERENCES.md`, and rule G's
-  check that nothing grows an array while a value is built in it;
+- rule L (links) of `REFERENCES.md`, and rule G's check that nothing grows an array
+  while text is built in it;
 - the lint for unused array capabilities (DESIGN §4.3).
 
 The checker models `zink.lang` (output, `status`, `min`, `max` and the rest),
@@ -110,6 +118,22 @@ maps, sets and pools, calling C, and for-each over arrays, maps, sets, pools and
 iterators. Bugs stop the program with the file and line, and exit status 1. Seven of
 the eight examples run: `cachesim`, `csvsort`, `dirwalk`, `linebuf`, `sortlines`,
 `stats` and `wordfreq`. `jsonfmt` needs `zink.json`.
+
+Variable-size records (DESIGN §3.2, §11): a class with a `T[.*]` or `T[.]` field, or
+a field that is such a class, is one run of bytes. Its fixed-size fields come first,
+as a packed C struct sorted by size, then each variable-size field in declaration
+order: an array as its count (a varint for `T[.*]`, 8 bytes for `T[.]`) and its
+elements, a record as its bytes (`codegen/records.rs`). A variable of the class is a
+pointer to its record on a data stack of its own, and a parameter of it is passed by
+pointer. `new C(...)` writes the record where it goes, field after field, nested
+array literals included, so `book +> new Order(1, "alice", [new Item("SKU-7", 1,
+500)])` writes the order once, at the end of `book`. An array of variable-size values
+is `zr_rvec`, which keeps its byte length beside its count; a for-each walks it with
+each type's size function. A million items with a short SKU take 16 MB inline,
+against 35 MB as `string` views into one buffer, and 20 passes over them take
+0.10 s against 0.07 s, since finding the next record decodes its lengths. Not yet:
+an explicit constructor of a variable-size class, returning one from a function,
+and variable-size values in hash maps, pools and tuples.
 
 `pool<T>` (DESIGN §3.5) is one grow-only array of slots on a data stack, each
 `{generation, next free, value}`, with the free slots in a list through `next`

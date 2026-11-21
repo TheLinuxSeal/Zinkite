@@ -106,6 +106,10 @@ impl<'p, 'a> Gen<'p, 'a> {
         for f in &mut fields {
             f.2 = self.field_ty(id, f.0, args);
         }
+        // A variable-size record's struct is its fixed-size part (records.rs).
+        if self.vs(&Ty::Class(id, args.to_vec())) {
+            fields.retain(|f| !self.vs(&f.2));
+        }
         let size = |t: &Ty| -> u32 {
             match t {
                 Ty::Prim(p) => bits(*p) / 8,
@@ -153,6 +157,9 @@ impl<'p, 'a> Gen<'p, 'a> {
         );
         self.class_insts.insert(k, name.clone());
         let (body, deps) = self.struct_body(id, args);
+        if self.vs(&Ty::Class(id, args.to_vec())) {
+            self.packed.insert(name.clone());
+        }
         self.def_names.insert(name.clone(), name.clone());
         self.defs.push((name.clone(), body, deps));
         name

@@ -3092,3 +3092,150 @@ fn cachesim_example_runs() {
     let out = child.wait_with_output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
 }
+
+// ---------------------------------------------------------------- variable-size records
+
+/// DESIGN §3.2's order book: records with inline text and an inline array of records,
+/// built in place at the end of their array from nested literals, read through views,
+/// looped over, changed through a reference, and rebuilt by assigning the variable.
+#[test]
+fn records_stored_inline() {
+    prints(
+        r##"class Item { u8[.*] sku; i32 qty; i32 cents; }
+class Order { i32 id; u8[.*] customer; Item[.*] items; }
+
+i64 total(Order o) {
+    i64 t = 0;
+    for (Item& it : o.items) { t += (i64) it.qty * (i64) it.cents; }
+    return t;
+}
+
+void show(Order o) {
+    println("order ${o.id} for ${o.customer}: ${o.items.len} items, ${total(o)} cents");
+    for (Item& it : o.items) { println("  ${it.sku} x${it.qty} @ ${it.cents}"); }
+}
+
+void main() {
+    Order[..>] book = [];
+    book.push(new Order(1001, "alice", [new Item("SKU-441", 2, 1999), new Item("SKU-7", 1, 500)]));
+    book +> new Order(1002, "bob", []);
+    Order& third = book.push(new Order(1003, "christopher", [new Item("X", 10, 3)]));
+    third.id = 2003;
+    println("book ${book.len}");
+    for (Order& o : book) { show(o); }
+    Order single = new Order(7, "dee", [new Item("Y", 1, 1)]);
+    show(single);
+    single = new Order(8, "edward", []);
+    show(single);
+}
+"##,
+        "book 3
+order 1001 for alice: 2 items, 4498 cents
+  SKU-441 x2 @ 1999
+  SKU-7 x1 @ 500
+order 1002 for bob: 0 items, 0 cents
+order 2003 for christopher: 1 items, 30 cents
+  X x10 @ 3
+order 7 for dee: 1 items, 1 cents
+  Y x1 @ 1
+order 8 for edward: 0 items, 0 cents
+",
+    );
+}
+
+/// A record inside a record, a `u8[.]` field (an 8-byte count), a field initializer, a
+/// method changing a fixed field and one called through an interface, copies of records
+/// into an array and into a field, interpolated text, a generic record, an array of
+/// `u8[.]`, a build whose argument grows the array (built aside, REFERENCES §6 V4),
+/// `clear`, and a record passed by value or as a temporary.
+#[test]
+fn records_in_depth() {
+    prints(
+        r##"interface Named { string name(); }
+
+class Address { u8[.*] city; i32 zip; }
+class Person implements Named {
+    u8[.*] first;
+    Address home;
+    i32 age;
+    u8[.] notes;
+    i32 visits = 1;
+    string name() { return first; }
+    mut void older() { age++; }
+}
+
+class Tagged<T> { u8[.*] tag; T value; }
+
+class Item { u8[.*] sku; i32 qty; }
+
+i32 grow(Item[..>]& items) {
+    items +> new Item("pushed during the build", 0);
+    return 99;
+}
+
+void main() {
+    Person p = new Person("ann", new Address("Oslo", 150), 30, "likes tea");
+    p.older();
+    println("${p.first} ${p.home.city} ${p.home.zip} ${p.age} '${p.notes}' ${p.visits}");
+    Named& n = p;
+    println("named ${n.name()}");
+
+    Person[..>] people = [];
+    people +> p;
+    people +> new Person("bo", new Address("Rome", 100), 41, "");
+    people +> new Person("cy-${p.age}", p.home, 5, p.notes);
+    for (Person& q : people) { print("${q.first}/${q.home.city}/${q.age}/${q.notes.len} "); }
+    println("");
+
+    Tagged<i64> t = new Tagged<i64>("count", 42);
+    Tagged<string> s = new Tagged<string>("word", "hello");
+    println("${t.tag}=${t.value} ${s.tag}=${s.value}");
+
+    u8[.][..>] lines = [];
+    lines +> "first line";
+    lines +> "second";
+    i64 total = 0;
+    for (u8[.] l : lines) { total += l.len; print("[${l}]"); }
+    println(" ${total}");
+
+    Item[..>] items = [];
+    items +> new Item("a", 1);
+    items +> new Item("b", grow(items));
+    for (Item& it : items) { print("${it.sku}:${it.qty} "); }
+    println("${items.len}");
+    items.clear();
+    items +> new Item("again", 2);
+    for (Item& it : items) { println("${it.sku} ${it.qty} ${items.len}"); }
+
+    Person copy = p;
+    copy.older();
+    println("copy ${copy.age} original ${p.age}");
+}
+"##,
+        "ann Oslo 150 31 'likes tea' 1
+named ann
+ann/Oslo/31/9 bo/Rome/41/0 cy-31/Oslo/5/9 
+count=42 word=hello
+[first line][second] 16
+a:1 pushed during the build:0 b:99 3
+again 2 1
+copy 32 original 31
+",
+    );
+    prints(
+        r##"class Order { i32 id; u8[.*] customer; }
+
+i64 who(Order o) { return o.customer.len; }
+
+void main() {
+    Order o = new Order(1, "alice");
+    println("${who(o)}");
+    o = new Order(2, "alexander");
+    string name = o.customer;
+    println("${name} ${o.id}");
+    println("${who(new Order(3, "temporary"))}");
+}
+"##,
+        "5\nalexander 2\n9\n",
+    );
+}

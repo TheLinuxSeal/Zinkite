@@ -1865,3 +1865,45 @@ void main() {
         .is_empty()
     );
 }
+
+/// Rule V (REFERENCES §6): a variable-size field isn't assigned (V1), though a fixed one
+/// of the same record is; an array of variable-size values isn't indexed, popped, sorted
+/// or given a cursor (V3); and its elements are looped over by reference.
+#[test]
+fn variable_size_rules() {
+    let e = errors(
+        r##"class Order { i32 id; u8[.*] customer; }
+
+void main() {
+    Order o = new Order(1, "alice");
+    string name = o.customer;
+    o.customer = "bob";
+    o.id = 7;
+    o = new Order(2, "alexander");
+    println(name);
+    Order[..~] book = [];
+    book +> new Order(3, "cy");
+    Order& first = book[0];
+    @_ = book ->;
+    book.sort((Order& a, Order& b) => a.id < b.id);
+    Order[.~.] cur = [];
+    for (Order x : book) {}
+    for (Order& x : book) { println("${x.id}"); }
+    book.clear();
+}
+"##,
+    );
+    let want = [
+        "a variable-size field can't be assigned",
+        "Order[..~] can't be indexed",
+        "Order[..~] can't be removed from with `->`",
+        "Order[..~] can't be given `sort`",
+        "expected func(Order, Order => bool)",
+        "an array of Order can't have a cursor",
+        "the elements are variable-size records of Order",
+    ];
+    assert_eq!(e.len(), want.len(), "{:#?}", e);
+    for (got, w) in e.iter().zip(want) {
+        assert!(got.contains(w), "{} / {}", got, w);
+    }
+}

@@ -63,7 +63,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                 ps.insert(0, "void *".to_string());
             }
             for p in &m.params {
-                ps.push(self.cty(&p.subst(&map), span));
+                ps.push(self.param_cty(&p.subst(&map), span));
             }
             let _ = write!(slots, "{} (*m{})({}); ", rc, j, ps.join(", "));
         }
@@ -138,7 +138,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                 call.insert(0, "_dst".to_string());
             }
             for (n, p) in want.iter().enumerate() {
-                let pc = self.cty(p, span);
+                let pc = self.param_cty(p, span);
                 ps.push(format!("{} a{}", pc, n));
                 call.push(format!("a{}", n));
             }
@@ -261,7 +261,7 @@ impl<'p, 'a> Gen<'p, 'a> {
         let r = self.tmp("ir");
         let mut cargs = vec![format!("{}.p", r)];
         for (a, p) in args.iter().zip(params) {
-            cargs.push(self.expr(&a.expr, p));
+            cargs.push(self.arg_code(&a.expr, p));
         }
         let m = &self.prog.classes[id].methods[i];
         let map = self.class_map(id, &iargs);

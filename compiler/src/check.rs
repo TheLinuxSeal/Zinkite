@@ -763,6 +763,17 @@ impl<'p, 'a> Checker<'p, 'a> {
 
     /// Rules on a written type: hashable keys, and what can be an element (DESIGN §3.4, §4.14).
     fn type_rules(&mut self, ty: &Ty, span: Span) {
+        // V3: a cursor array reuses holes for elements of the same size.
+        if let Ty::Array(e, k) = ty
+            && k.has_cursor()
+            && self.prog.variable_size(e)
+        {
+            self.err_help(
+                span,
+                format!("an array of {} can't have a cursor: its elements are variable-size, and a cursor array reuses holes for elements of one size", self.show(e)),
+                "use `.` as the middle slot (REFERENCES §6, V3)",
+            );
+        }
         match ty {
             Ty::Map(k, v) => {
                 if !self.hashable(k) {
@@ -1305,6 +1316,27 @@ impl<'p, 'a> Checker<'p, 'a> {
                 let after_iter = self.flow.clone();
                 self.push_scope();
                 self.bind_local_type(ty, name, &elem, by_ref, iter.span);
+                // A variable-size record is stored inline in its array, and a copy of it
+                // would need a data stack of its own.
+                let declared_ref = matches!(ty, LocalType::VarRef)
+                    || matches!(ty, LocalType::Type(t) if matches!(t.kind, ast::TypeKind::Ref { .. }));
+                if matches!(elem, Ty::Class(..))
+                    && self.prog.variable_size(&elem)
+                    && matches!(it.unref(), Ty::Array(..))
+                    && !declared_ref
+                {
+                    self.err_help(
+                        iter.span,
+                        format!(
+                            "the elements are variable-size records of {}, looped over in place",
+                            self.show(&elem)
+                        ),
+                        format!(
+                            "bind each by reference: `for ({}& x : ...)` (REFERENCES §6)",
+                            self.show(&elem)
+                        ),
+                    );
+                }
                 // Bound to an element; when the elements are references themselves, to what
                 // they refer to, which a read-only view doesn't make read-only.
                 if let Name::Ident(n) = name
@@ -2509,6 +2541,10 @@ impl<'p, 'a> Checker<'p, 'a> {
                     );
                 }
                 match bt.unref() {
+                    Ty::Array(el, _) if self.prog.variable_size(el) => {
+                        self.vs_array_only(expr.span, &bt, "indexed");
+                        (**el).clone()
+                    }
                     Ty::Array(el, _) | Ty::Slice(el) | Ty::View(el) => (**el).clone(),
                     Ty::Unknown => Ty::Unknown,
                     Ty::Map(..) => {
@@ -2540,6 +2576,11 @@ impl<'p, 'a> Checker<'p, 'a> {
                 for b in [lo, hi].into_iter().flatten() {
                     let t = self.expr(&b.expr, None);
                     self.index_type(&t, &b.expr);
+                }
+                if let Ty::Array(el, _) = bt.unref()
+                    && self.prog.variable_size(el)
+                {
+                    self.vs_array_only(expr.span, &bt, "sliced");
                 }
                 match bt.unref() {
                     Ty::Array(el, k) => {
@@ -3134,6 +3175,21 @@ impl<'p, 'a> Checker<'p, 'a> {
         {
             self.err(name.span, "a hashmap entry's key can't be changed");
         }
+        // V1: a variable-size field is written once, when its value is built.
+        if op != AssignOp::Rebind && self.prog.variable_size(&tt) && !self.in_ctor() {
+            let field = match &target.kind {
+                E::Member { .. } => true,
+                E::Ident(n) => self.lookup_local(n).is_none() && self.field_type_quiet(n),
+                _ => false,
+            };
+            if field {
+                self.err_help(
+                    target.span,
+                    format!("a variable-size field can't be assigned: {} is stored inline, so its size is set when the value is built", self.show(&tt)),
+                    "build a new value instead (REFERENCES §6, V1)",
+                );
+            }
+        }
         match op {
             AssignOp::Rebind => {
                 // Rebinding compares with the declared type, not a narrowed one.
@@ -3386,6 +3442,11 @@ impl<'p, 'a> Checker<'p, 'a> {
             PostfixOp::RemoveAfter => ("^-", "removeAfter"),
         };
         let t = self.expr(x, None);
+        if let Ty::Array(el, _) = t.unref()
+            && self.prog.variable_size(el)
+        {
+            self.vs_array_only(span, &t, &format!("removed from with `{}`", sym));
+        }
         if matches!(t.unref(), Ty::Array(..)) {
             self.need_writable(
                 x,
@@ -3552,6 +3613,12 @@ impl<'p, 'a> Checker<'p, 'a> {
                     _ => ("+^", "insert"),
                 };
                 let lt = self.expr_c(l, None, consumed);
+                if let Ty::Array(el, _) = lt.unref()
+                    && self.prog.variable_size(el)
+                    && sym != "+>"
+                {
+                    self.vs_array_only(span, &lt, &format!("inserted into with `{}`", sym));
+                }
                 if matches!(lt.unref(), Ty::Array(..)) && !matches!(l.kind, E::Binary { .. }) {
                     self.need_writable(
                         l,
@@ -4523,6 +4590,9 @@ impl<'p, 'a> Checker<'p, 'a> {
         if let Some(t) = self.text_iterator(t, e, kind, base, name, args, span, consumed) {
             return t;
         }
+        if self.prog.variable_size(e) && !matches!(name.name.as_str(), "push" | "clear") {
+            self.vs_array_only(name.span, t, &format!("given `{}`", name.name));
+        }
         match builtins::seq_method(e, kind, &name.name) {
             Err(need) => {
                 self.type_args(args);
@@ -4562,6 +4632,21 @@ impl<'p, 'a> Checker<'p, 'a> {
             let private = ms.iter().all(|m| m.is_private);
             self.hidden(owner, &ms[0].name, private, span);
         }
+    }
+
+    /// V3: an array of variable-size values is only added to at its end, looped over and
+    /// cleared, since an element's place is known only by walking the ones before it.
+    fn vs_array_only(&mut self, span: Span, t: &Ty, what: &str) {
+        let msg = format!(
+            "{} can't be {}: its elements are variable-size, so it is only added to at its end, looped over and cleared",
+            self.show(t.unref()),
+            what
+        );
+        self.err_help(
+            span,
+            msg,
+            "keep an array of references to the elements to index or sort them (DESIGN §3.2, REFERENCES §6 V3)",
+        );
     }
 
     /// The library's iterators over text and arrays are classes of `zink.lang` (STDLIB
@@ -6013,7 +6098,7 @@ fn stmt_children(s: &Stmt) -> (Vec<&Stmt>, Vec<&Expr>) {
 }
 
 /// The expressions directly inside an expression (not inside block-bodied lambdas).
-fn expr_children(e: &Expr) -> Vec<&Expr> {
+pub(crate) fn expr_children(e: &Expr) -> Vec<&Expr> {
     fn args(a: &[ast::Arg]) -> Vec<&Expr> {
         a.iter().map(|a| &a.expr).collect()
     }

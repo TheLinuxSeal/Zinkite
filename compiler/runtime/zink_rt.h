@@ -37,6 +37,34 @@ typedef struct { void *p; int64_t n; } zr_slice;
 /* An array on a data stack: its elements start at p. */
 typedef struct { void *p; int64_t n; } zr_vec;
 
+/* An array of variable-size records (DESIGN §3.2): their bytes start at p, one after the
+ * other; n records in `bytes` bytes, so the next is built at p + bytes. */
+typedef struct { void *p; int64_t n; int64_t bytes; } zr_rvec;
+
+/* Varint lengths (DESIGN §4.6): LEB128, 7 bits a byte, the high bit set on all but the last. */
+static ZR_UNUSED int zr_uv_put(uint8_t *p, uint64_t v) {
+    int n = 0;
+    while (v >= 0x80) { p[n++] = (uint8_t)(v | 0x80); v >>= 7; }
+    p[n++] = (uint8_t)v;
+    return n;
+}
+
+static ZR_UNUSED int zr_uv_get(const uint8_t *p, uint64_t *v) {
+    uint64_t r = 0;
+    int n = 0, sh = 0;
+    uint8_t b;
+    do { b = p[n++]; r |= (uint64_t)(b & 0x7F) << sh; sh += 7; } while ((b & 0x80) && sh < 64);
+    *v = r;
+    return n;
+}
+
+/* The bytes of c variable-size values starting at e, each measured by sz. */
+static ZR_UNUSED int64_t zr_walk(const uint8_t *e, uint64_t c, int64_t (*sz)(const uint8_t *)) {
+    const uint8_t *q = e;
+    for (uint64_t i = 0; i < c; i++) q += sz(q);
+    return q - e;
+}
+
 /* ------------------------------------------------------------ failures (DESIGN §7.6) */
 
 static void zr_flush(void);

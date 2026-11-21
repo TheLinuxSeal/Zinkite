@@ -1011,6 +1011,40 @@ impl<'a> Program<'a> {
     }
 
     /// A type's name for messages.
+    /// A value whose size isn't fixed by its type (REFERENCES §6): a frozen array with a
+    /// runtime length, `T[.]` or `T[.*]`, or a class with a field that is one. Such a value
+    /// is stored inline where it lives, as one run of bytes (DESIGN §3.2).
+    pub fn variable_size(&self, t: &Ty) -> bool {
+        self.variable_size_in(t, 0)
+    }
+
+    fn variable_size_in(&self, t: &Ty, depth: u32) -> bool {
+        // A class can't hold itself by value; the limit only stops a runaway.
+        if depth > 32 {
+            return false;
+        }
+        match t {
+            Ty::Array(_, k) => k.is_frozen() && matches!(k.cap, CapKind::None | CapKind::Varint),
+            Ty::Class(id, args) => {
+                let c = &self.classes[*id];
+                if !matches!(c.kind, ClassKind::Class) {
+                    return false;
+                }
+                let map: Vec<(String, Ty)> = c
+                    .type_params
+                    .iter()
+                    .zip(args)
+                    .map(|(p, a)| (p.name.clone(), a.clone()))
+                    .collect();
+                c.fields
+                    .iter()
+                    .filter(|f| !f.is_static)
+                    .any(|f| self.variable_size_in(&f.ty.subst(&map), depth + 1))
+            }
+            _ => false,
+        }
+    }
+
     pub fn show(&self, t: &Ty) -> String {
         match t {
             Ty::Prim(p) => p.name().to_string(),

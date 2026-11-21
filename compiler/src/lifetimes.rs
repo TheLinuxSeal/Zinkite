@@ -11,7 +11,8 @@
 //! gets a summary (§4.1), found by repeating until nothing changes. Rule R then
 //! walks each function backward to find which references are still used.
 //!
-//! Not yet: rules V (variable-size values) and L (links).
+//! Rule V's removal, V2: assigning a variable-size variable rebuilds it. The rest of rule
+//! V is in the checker and the code generator. Not yet: rule L (links).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -2565,8 +2566,10 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 });
                 return Val::none();
             }
+            // V2: assigning a variable-size value rebuilds it (REFERENCES §6).
             if op == ast::AssignOp::Assign
-                && matches!(declared, Ty::Array(..) | Ty::Map(..) | Ty::Set(..))
+                && (matches!(declared, Ty::Array(..) | Ty::Map(..) | Ty::Set(..))
+                    || self.an.prog.variable_size(&declared))
             {
                 self.ev(Ev::Remove {
                     target: R::root(var),

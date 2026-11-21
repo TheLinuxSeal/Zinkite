@@ -31,6 +31,7 @@ mod interfaces;
 mod lambdas;
 mod maps;
 mod pools;
+mod records;
 mod sorting;
 
 use generics::{Inst, InstKind};
@@ -139,6 +140,10 @@ struct Gen<'p, 'a> {
     /// calls them: `(class, index, is a constructor)`.
     lib_queue: Vec<(ClassId, usize, bool)>,
     lib_done: HashSet<(ClassId, usize, bool)>,
+    /// The size functions of variable-size types (records.rs), by type.
+    vs_fns: HashMap<String, String>,
+    /// Structs laid out packed: the fixed part of a variable-size record (DESIGN §11).
+    packed: HashSet<String>,
 }
 
 fn c_string(s: &[u8]) -> String {
@@ -295,6 +300,8 @@ impl<'p, 'a> Gen<'p, 'a> {
             vtables: HashMap::new(),
             lib_queue: Vec::new(),
             lib_done: HashSet::new(),
+            vs_fns: HashMap::new(),
+            packed: HashSet::new(),
         }
     }
 
@@ -566,6 +573,14 @@ impl<'p, 'a> Gen<'p, 'a> {
                 }
             }
             Ty::Array(e, k) => {
+                if self.vs(e) {
+                    if k.cap == CapKind::Capped || k.has_cursor() || k.push_front() || k.pop_front()
+                    {
+                        return self
+                            .unsupported(span, "this kind of array of variable-size values");
+                    }
+                    return "zr_rvec".into();
+                }
                 if k.cap != CapKind::Capped {
                     if k.cap == CapKind::Chunked {
                         return "zr_chk".into();
@@ -703,6 +718,9 @@ impl<'p, 'a> Gen<'p, 'a> {
             self.file = c.file;
             let (body, deps) = self.struct_body(id, &[]);
             let name = self.class_name(id);
+            if self.vs(&Ty::Class(id, Vec::new())) {
+                self.packed.insert(name.clone());
+            }
             self.def_names.insert(name.clone(), name.clone());
             self.defs.push((name, body, deps));
         }
@@ -748,8 +766,9 @@ impl<'p, 'a> Gen<'p, 'a> {
                 self.method(id, i, m);
                 self.drain_lambdas();
             }
+            let record = self.vs(&Ty::Class(id, Vec::new()));
             for (i, k) in c.ctors.iter().enumerate() {
-                if matches!(c.kind, ClassKind::Class | ClassKind::Root) && !lib {
+                if matches!(c.kind, ClassKind::Class | ClassKind::Root) && !lib && !record {
                     self.ctor(id, i, k);
                     self.drain_lambdas();
                 }
@@ -838,11 +857,17 @@ impl<'p, 'a> Gen<'p, 'a> {
     fn params_c(&mut self, decl: &[ast::Param], tys: &[Ty]) -> Vec<String> {
         let mut out = Vec::new();
         for (i, (p, t)) in decl.iter().zip(tys).enumerate() {
-            let ct = self.cty(t, p.ty.span);
+            let ct = self.param_cty(t, p.ty.span);
             let name = match &p.name {
                 Name::Ident(id) => {
                     let n = format!("p_{}_{}", id.name, i);
-                    self.locals.insert(key(id.span), (n.clone(), t.clone()));
+                    // A record parameter is a pointer, read as the record.
+                    let shown = if self.vs_class(t) {
+                        format!("(*{})", n)
+                    } else {
+                        n.clone()
+                    };
+                    self.locals.insert(key(id.span), (shown, t.clone()));
                     n
                 }
                 Name::Discard(_) => format!("p__{}", i),
@@ -862,6 +887,9 @@ impl<'p, 'a> Gen<'p, 'a> {
         let c = &self.prog.classes[id];
         let span = m.decl.name.span;
         let m_ret = self.sb(&m.ret);
+        if self.vs_class(&m_ret) {
+            self.unsupported(span, "returning a variable-size record");
+        }
         self.begin_fn(id, m_ret.clone(), m.can_fail, !m.is_static, false);
         self.is_main = c.kind == ClassKind::Script && m.name == "main";
         let ret = self.ret_c(&m_ret, m.can_fail, span);
@@ -1018,6 +1046,7 @@ impl<'p, 'a> Gen<'p, 'a> {
         // Definitions, each after the structs it holds by value.
         let mut done: HashSet<String> = HashSet::new();
         let defs = std::mem::take(&mut self.defs);
+        let packed = std::mem::take(&mut self.packed);
         let index: HashMap<String, usize> = defs
             .iter()
             .enumerate()
@@ -1027,6 +1056,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             i: usize,
             defs: &[(String, String, Vec<String>)],
             index: &HashMap<String, usize>,
+            packed: &HashSet<String>,
             done: &mut HashSet<String>,
             out: &mut String,
         ) {
@@ -1035,13 +1065,18 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
             for d in &defs[i].2 {
                 if let Some(&j) = index.get(d) {
-                    emit(j, defs, index, done, out);
+                    emit(j, defs, index, packed, done, out);
                 }
             }
-            let _ = writeln!(out, "struct {} {{ {}}};", defs[i].0, defs[i].1);
+            let attr = if packed.contains(&defs[i].0) {
+                "__attribute__((packed)) "
+            } else {
+                ""
+            };
+            let _ = writeln!(out, "struct {}{} {{ {}}};", attr, defs[i].0, defs[i].1);
         }
         for i in 0..defs.len() {
-            emit(i, &defs, &index, &mut done, &mut out);
+            emit(i, &defs, &index, &packed, &mut done, &mut out);
         }
         out.push('\n');
         out.push_str(&self.protos);
@@ -1316,6 +1351,27 @@ impl<'p, 'a> Gen<'p, 'a> {
         for v in &d.decls {
             let (name, ty) = self.new_local(&v.name);
             let ct = self.cty(&ty, v.name.span);
+            // A variable-size record: a pointer to its bytes, on a data stack of its own,
+            // built there (DESIGN §3.2, §3.3). The name reads as the record itself.
+            if self.vs_class(&ty) {
+                let site = self.site();
+                self.line(&format!("{} *{} = ({} *)zr_stack({});", ct, name, ct, site));
+                self.locals
+                    .insert(key(v.name.span), (format!("(*{})", name), ty.clone()));
+                if v.capture.is_some() {
+                    self.unsupported(v.name.span, "a status beside a variable-size record");
+                    continue;
+                }
+                if let Some(init) = &v.init {
+                    let cur = self.tmp("cur");
+                    let b = self.build(&cur, init, &ty);
+                    self.line(&format!(
+                        "{{ uint8_t *{} = (uint8_t *){}; {}}}",
+                        cur, name, b
+                    ));
+                }
+                continue;
+            }
             if on_stack(&ty) {
                 // The array the function returns starts in its caller's storage.
                 let init = if self.result_local == Some(key(v.name.span))
@@ -1435,6 +1491,10 @@ impl<'p, 'a> Gen<'p, 'a> {
             let a = self.site();
             return format!("zr_pool_new(zr_stack({}))", a);
         }
+        if self.vs_elems(ty) {
+            let a = self.site();
+            return format!("((zr_rvec){{zr_stack({}), 0, 0}})", a);
+        }
         match layout(ty) {
             Some(Layout::Cur) => {
                 let (a, b) = (self.site(), self.site());
@@ -1484,7 +1544,7 @@ impl<'p, 'a> Gen<'p, 'a> {
         let params: Vec<Ty> = fact.params.iter().map(|t| self.sb(t)).collect();
         let mut cargs = vec![format!("&{}", place)];
         for (a, p) in args.iter().zip(&params) {
-            cargs.push(self.expr(&a.expr, p));
+            cargs.push(self.arg_code(&a.expr, p));
         }
         let fails = self.prog.classes[c].ctors[i].can_fail;
         let fname = if self.prog.classes[c].type_params.is_empty() {
@@ -1509,6 +1569,12 @@ impl<'p, 'a> Gen<'p, 'a> {
     /// filled in place, text is built in place (DESIGN §3.3, §4.11).
     fn store_into(&mut self, place: &str, ty: &Ty, init: &Expr) -> String {
         let fresh = std::mem::take(&mut self.fresh_dst);
+        if let Ty::Array(el, _) = ty
+            && self.vs(el)
+        {
+            let el = (**el).clone();
+            return self.rvec_store(place, init, &el);
+        }
         // A map, set or pool starts empty on its data stack; `[]` is all that makes one.
         if matches!(ty, Ty::Map(..) | Ty::Set(_) | Ty::Pool(_)) {
             if matches!(&init.kind, E::ArrayLit(items) if items.is_empty()) {
@@ -1781,6 +1847,12 @@ impl<'p, 'a> Gen<'p, 'a> {
         }
         if let Ty::Class(..) = settle(it.unref()) {
             self.iter_for_each(label, name, iter, body);
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
+        if self.vs_elems(&it) {
+            self.rvec_for_each(label, name, iter, body);
             self.indent -= 1;
             self.line("}");
             return;
@@ -2585,6 +2657,13 @@ impl<'p, 'a> Gen<'p, 'a> {
                 if f.is_static {
                     (format!("zs{}_{}", c, i), ty)
                 } else {
+                    // A variable-size field of this record, after the ones before it.
+                    let this = Ty::Class(*c, self.cur_cargs.clone());
+                    if self.vs_class(&this)
+                        && let Some(r) = self.var_field("self", &this, &f.name, span)
+                    {
+                        return r;
+                    }
                     (format!("self->f_{}", f.name), ty)
                 }
             }
@@ -2667,6 +2746,17 @@ impl<'p, 'a> Gen<'p, 'a> {
         } else {
             format!("({}).", b)
         };
+        // A variable-size field of a record: found by walking the ones before it.
+        if self.vs_class(&deref) {
+            let ptr = if is_ref(&bty) {
+                b.clone()
+            } else {
+                format!("&({})", b)
+            };
+            if let Some(r) = self.var_field(&ptr, &deref, &name.name, span) {
+                return r;
+            }
+        }
         match &deref {
             Ty::Class(c, cargs) => {
                 let f = self.prog.classes[*c]
@@ -2965,6 +3055,9 @@ impl<'p, 'a> Gen<'p, 'a> {
                     return format!("({} = {})", c, v);
                 }
                 let (p, pt) = self.place(target);
+                if self.vs_class(&pt) {
+                    return self.vs_assign(&p, value, &pt);
+                }
                 if on_stack(&pt) {
                     return self.store_into(&p, &pt, value);
                 }
@@ -3787,7 +3880,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                     }
                 } else {
                     for (a, p) in args.iter().zip(rest) {
-                        cargs.push(self.expr(&a.expr, p));
+                        cargs.push(self.arg_code(&a.expr, p));
                     }
                 }
                 let fname = runtime_c.map_or(fname, str::to_string);
@@ -4176,6 +4269,9 @@ impl<'p, 'a> Gen<'p, 'a> {
         }
         if matches!(recv_t, Ty::Pool(_)) {
             return self.pool_method(base, m, args, ret, span);
+        }
+        if self.vs_elems(&recv_t) {
+            return self.rvec_method(base, m, args, ret, span);
         }
         let Some(el) = recv_t.elem().cloned() else {
             return ok(
@@ -4767,6 +4863,14 @@ impl<'p, 'a> Gen<'p, 'a> {
             stmts.push_str(&format!("__typeof__({}) *_arr = &({}); ", p, p));
         }
         let arr_t = self.ty(lhs).unref().clone();
+        if let Ty::Array(el, _) = &arr_t
+            && self.vs(el)
+        {
+            let el = (**el).clone();
+            let push = self.rvec_push("(*_arr)", rhs, &el, e.span);
+            stmts.push_str(&format!("(void){}; ", push));
+            return;
+        }
         let (Some(el), Some(lay)) = (arr_t.elem().cloned(), layout(&arr_t)) else {
             let u = self.unsupported(e.span, "this insertion");
             stmts.push_str(&format!("(void){}; ", u));

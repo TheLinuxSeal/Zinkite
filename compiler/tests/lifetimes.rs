@@ -659,3 +659,26 @@ void main() {
     );
     assert!(e[2].contains("refers into a temporary value"), "{}", e[2]);
 }
+
+/// V2 (REFERENCES §6): assigning a variable-size variable rebuilds it, so a view into its
+/// old value can't be used afterwards.
+#[test]
+fn rebuilding_a_record_ends_views_into_it() {
+    let e = errors(
+        r##"class Order { i32 id; u8[.*] customer; }
+
+void main() {
+    Order o = new Order(1, "alice");
+    string name = o.customer;
+    o = new Order(2, "alexander");
+    println(name);
+}
+"##,
+    );
+    assert_eq!(e.len(), 1, "{:#?}", e);
+    assert!(
+        e[0].contains("assigning `o` removes from `o` while `name` may still refer into it"),
+        "{}",
+        e[0]
+    );
+}
