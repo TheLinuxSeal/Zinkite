@@ -1335,3 +1335,21 @@ fn reference_locals_are_bound_by_their_first_assignment() {
         "temporary value",
     );
 }
+
+#[test]
+fn functions_have_no_zero_value() {
+    rejects(
+        "class Op { func(i64 => i64) f; i64 n; new(bool b) { if (b) { return #1; } f = (i64 x) => x; n = 1; } }\n",
+        "`f` has no zero value",
+    );
+    ok(
+        "class Op { func(i64 => i64) f; i64 n; new(bool b) { f = (i64 x) => x; if (b) { return #1; } n = 1; } }\n",
+    );
+    ok(
+        "class Op { func(i64 => i64)? f; i64 n; new(bool b) { if (b) { return #1; } f = null; n = 1; } }\n",
+    );
+    rejects(
+        "class Op { func(i64 => i64) f; }\nclass Holder { Op op; i64 n; new(Op o, bool b) { if (b) { return #1; } op = o; n = 1; } }\n",
+        "`op` has no zero value",
+    );
+}

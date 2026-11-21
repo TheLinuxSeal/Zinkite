@@ -54,7 +54,7 @@ struct Local {
 struct CtorField {
     name: String,
     slot: usize,
-    /// A non-nullable reference, or a value holding one: it must be assigned even on a failing exit.
+    /// A non-nullable reference or function, or a value holding one: it must be assigned even on a failing exit.
     no_zero: bool,
 }
 
@@ -4289,7 +4289,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             self.err_help(
                 span,
                 format!("{} {} no zero value, so it must be assigned even when the constructor fails", list, verb),
-                "a failing `return #code;` leaves the other fields at their zero values, but a non-nullable reference has none (DESIGN §6.2)",
+                "a failing `return #code;` leaves the other fields at their zero values, but a non-nullable reference or function has none (DESIGN §6.2)",
             );
         } else {
             self.err_help(
@@ -4321,10 +4321,10 @@ impl<'p, 'a> Checker<'p, 'a> {
         );
     }
 
-    /// A non-nullable reference, or a value holding one, which has no zero value.
+    /// A non-nullable reference or function, or a value holding one, which has no zero value.
     fn no_zero(&self, t: &Ty, seen: &mut Vec<ClassId>) -> bool {
         match t {
-            Ty::Ref(_) => true,
+            Ty::Ref(_) | Ty::Func(..) => true,
             Ty::Class(id, args) => {
                 let c = &self.prog.classes[*id];
                 if !matches!(c.kind, ClassKind::Class | ClassKind::Root) || seen.contains(id) {

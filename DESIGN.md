@@ -582,7 +582,7 @@ first.heavier(2.5);
         ...
     }
     ```
-    The exception is a field with no zero value: a non-nullable reference (`T&`, `Shape&`), or a value that contains one. It must be assigned on every path, failing ones included.
+    The exception is a field with no zero value: a non-nullable reference (`T&`, `Shape&`), a non-nullable function (`func(i64 => i64)`), which would leave nothing to call, or a value that contains one (Decided). It must be assigned on every path, failing ones included. A nullable one (`T&?`, `func(...)?`) has `null` as its zero value.
   - **A reference field is bound by its first assignment**: in a constructor, `this.next = n;` on a field that isn't assigned yet binds it, as an initializer does. Once it is assigned, `=` writes through it and `.=` rebinds it (§5.1).
   - **`this` can't be used until every field is assigned**, except to assign fields. Calling a method on it, passing it or storing it before then is a compile error, since the method could read a field that isn't set yet.
   - **Locals follow the same rule**: a local declared without an initializer can't be read until every path has assigned it.
