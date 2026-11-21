@@ -35,7 +35,7 @@ Reserved keywords:
 | Group | Keywords |
 |---|---|
 | Types | `bool` `i8` `i16` `i32` `i64` `u8` `u16` `u32` `u64` `f32` `f64` `string` `void` `func` |
-| Declarations | `package` `import` `as` `class` `interface` `enum` `implements` `static` `public` `private` `mut` (`new` is listed under Expressions) |
+| Declarations | `package` `import` `as` `class` `interface` `enum` `implements` `static` `public` `private` `mut` `extern` (`new` is listed under Expressions) |
 | Statements | `if` `else` `while` `do` `for` `break` `continue` `return` `switch` `case` `default` `yield` `var` `defer` |
 | Expressions | `new` `this` `null` `true` `false` `instanceof` |
 | Reserved, not used | `extends` `protected` `abstract` `final` `struct` `super` `try` `catch` `finally` `throw` `long` `short` `byte` `double` `char` `delete` |
@@ -119,7 +119,7 @@ cond_not  = "!" cond_not | "(" condition ")" | IDENT [ "(" IDENT ")" ] ;
 ## 2. Files
 
 ```
-file          = [ SHEBANG ] { setting_item } [ package_decl ] { import_decl } { top_item } ;
+file          = [ SHEBANG ] { setting_item } [ package_decl ] { import_decl | extern_decl } { top_item } ;
                                     (* SHEBANG: "#!" and the rest of the first line *)
 
 setting_item  = SETTING
@@ -127,6 +127,9 @@ setting_item  = SETTING
 
 package_decl  = "package" qualified_name ";" ;
 import_decl   = "import" qualified_name [ "." "*" | "as" IDENT ] ";" ;
+extern_decl   = "extern" "import" c_name ";"   (* a C header: extern import SDL3/SDL.h; *)
+              | "extern" "link" c_name ";" ;   (* a C library: extern link SDL3; *)
+c_name        = token { token } ;              (* spelled out to the ";", no quotes: stdio.h, sys/stat.h *)
 qualified_name = IDENT { "." IDENT } ;
 
 top_item      = type_decl
@@ -136,6 +139,7 @@ top_item      = type_decl
 ```
 
 - Settings are allowed only in the file that contains the entry point (DESIGN §8.2).
+- `link` after `extern` is a plain word, not a keyword. C headers and libraries are DESIGN §12.6.
 - A file with top-level fields or methods is a **script file** (DESIGN §8.6). It can't have a `package` line, and its top-level fields and methods are static members of a hidden class.
 - Otherwise the file holds one public top-level class, root, interface or enum named after the file, plus any non-public ones (DESIGN §8.4).
 
@@ -213,7 +217,8 @@ Checked after parsing:
 ## 4. Declarations
 
 ```
-modifier       = "public" | "private" | "static" | "mut" ;
+modifier       = "public" | "private" | "static" | "mut"
+               | "extern" [ "(" STRING ")" ] ;    (* a C function, with its C name: extern("glClearColor") *)
 
 type_decl      = { modifier } ( class_decl | root_decl | interface_decl | enum_decl ) ;
 

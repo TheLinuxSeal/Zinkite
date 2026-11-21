@@ -435,11 +435,24 @@ impl Parser {
             None
         };
         let mut imports = Vec::new();
-        while self.at_kw(Kw::Import) {
+        let mut externs = Vec::new();
+        loop {
             let before = self.pos;
-            match self.import() {
-                Ok(i) => imports.push(i),
-                Err(Fail) => self.sync_stmt(before),
+            if self.at_kw(Kw::Import) {
+                match self.import() {
+                    Ok(i) => imports.push(i),
+                    Err(Fail) => self.sync_stmt(before),
+                }
+            } else if self.at_kw(Kw::Extern)
+                && (self.tok_at(1) == &Tok::Kw(Kw::Import)
+                    || matches!(self.tok_at(1), Tok::Ident(n) if n == "link"))
+            {
+                match self.extern_item() {
+                    Ok(i) => externs.push(i),
+                    Err(Fail) => self.sync_stmt(before),
+                }
+            } else {
+                break;
             }
         }
         let mut items = Vec::new();
@@ -454,6 +467,7 @@ impl Parser {
             settings,
             package,
             imports,
+            externs,
             items,
         }
     }
@@ -484,6 +498,48 @@ impl Parser {
                 span: self.span(),
             },
         }
+    }
+
+    /// `extern import SDL3/SDL.h;` or `extern link SDL3;`: the path or name is spelled
+    /// out from its tokens, up to the `;`.
+    fn extern_item(&mut self) -> PResult<ExternItem> {
+        let start = self.bump().span; // `extern`
+        let kind = if self.eat_kw(Kw::Import) {
+            ExternKind::Import
+        } else {
+            self.bump(); // `link`
+            ExternKind::Link
+        };
+        let mut text = String::new();
+        while !matches!(self.tok(), Tok::P(P::Semi) | Tok::Eof) {
+            let t = self.bump();
+            match &t.tok {
+                Tok::Ident(n) => text.push_str(n),
+                Tok::Kw(k) => text.push_str(k.as_str()),
+                Tok::P(p) => text.push_str(p.as_str()),
+                Tok::Int { value, .. } => text.push_str(&value.to_string()),
+                _ => {
+                    let what = if kind == ExternKind::Import {
+                        "a header's path, such as `stdio.h` or `SDL3/SDL.h`"
+                    } else {
+                        "a library's name, such as `m` or `SDL3`"
+                    };
+                    self.error(t.span, format!("expected {}", what));
+                    return Err(Fail);
+                }
+            }
+        }
+        if text.is_empty() {
+            let span = self.span();
+            self.error(span, "expected a header or library name before `;`");
+            return Err(Fail);
+        }
+        self.expect(P::Semi, "`;` after the name")?;
+        Ok(ExternItem {
+            kind,
+            text,
+            span: self.since(start),
+        })
     }
 
     fn import(&mut self) -> PResult<Import> {
@@ -561,6 +617,25 @@ impl Parser {
                 Tok::Kw(Kw::Private) => Modifier::Private,
                 Tok::Kw(Kw::Static) => Modifier::Static,
                 Tok::Kw(Kw::Mut) => Modifier::Mut,
+                Tok::Kw(Kw::Extern) => {
+                    self.bump();
+                    let mut cname = None;
+                    if self.at(P::LParen) {
+                        self.bump();
+                        if let Tok::Str(pieces) = self.tok().clone()
+                            && let [crate::token::StrPiece::Text(t)] = &pieces[..]
+                        {
+                            cname = Some(t.clone());
+                            self.bump();
+                        } else {
+                            let span = self.span();
+                            self.error(span, "expected the C function's name as a string: `extern(\"glClearColor\")`");
+                        }
+                        let _ = self.expect(P::RParen, "`)` after the C name");
+                    }
+                    mods.push(Modifier::Extern(cname));
+                    continue;
+                }
                 Tok::Kw(k @ (Kw::Protected | Kw::Abstract | Kw::Final)) => {
                     let k = *k;
                     let span = self.bump().span;
@@ -840,7 +915,12 @@ impl Parser {
         let name = self.ident("a name for the field or method")?;
         if self.at(P::LParen) {
             let params = self.params()?;
-            let body = if with_body {
+            let is_extern = modifiers.iter().any(|m| matches!(m, Modifier::Extern(_)));
+            let body = if is_extern {
+                // A C function: declared here, defined in C (DESIGN §12.6).
+                self.expect(P::Semi, "`;` after the C function's parameters")?;
+                None
+            } else if with_body {
                 Some(self.block()?)
             } else {
                 if self.at(P::LBrace) {
@@ -2124,6 +2204,11 @@ impl Parser {
             Tok::Underscore => {
                 self.bump();
                 ExprKind::Discard
+            }
+            // `extern.errno()`: the C side's namespace.
+            Tok::Kw(Kw::Extern) => {
+                self.bump();
+                ExprKind::Ident("extern".into())
             }
             Tok::Kw(Kw::This) => {
                 self.bump();

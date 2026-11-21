@@ -614,3 +614,27 @@ fn truncated_input_never_panics() {
         }
     }
 }
+
+/// `extern import` and `extern link` spell their names out from the tokens (DESIGN §12.6).
+#[test]
+fn extern_items() {
+    let file = SourceFile::new(
+        "t.zn",
+        "extern import SDL3/SDL.h;\nextern import sys/stat.h;\nextern link SDL3;\nvoid main() {}\n",
+    );
+    let (ast, diags) = zink::parse(&file);
+    assert!(diags.is_empty(), "{:?}", diags);
+    let names: Vec<(zink::ast::ExternKind, String)> = ast
+        .externs
+        .iter()
+        .map(|e| (e.kind, e.text.clone()))
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            (zink::ast::ExternKind::Import, "SDL3/SDL.h".to_string()),
+            (zink::ast::ExternKind::Import, "sys/stat.h".to_string()),
+            (zink::ast::ExternKind::Link, "SDL3".to_string()),
+        ]
+    );
+}

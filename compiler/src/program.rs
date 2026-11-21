@@ -1,6 +1,8 @@
 //! Every declaration in a program, collected from its files, and the
 //! resolution of written types to semantic ones (DESIGN §8.4–§8.5, §10).
 
+use std::collections::HashMap;
+
 use crate::ast::{self, Member, Modifier, TopItem, TypeDeclKind};
 use crate::diag::{Diagnostic, Severity};
 use crate::source::Span;
@@ -41,6 +43,8 @@ pub struct MethodInfo<'a> {
     pub decl: &'a ast::MethodDecl,
     /// The body writes a nonzero status somewhere (`return #...`).
     pub can_fail: bool,
+    /// A C function declared with `extern`: its C name (DESIGN §12.6).
+    pub c_name: Option<String>,
 }
 
 pub struct CtorInfo<'a> {
@@ -75,6 +79,10 @@ pub struct FileInfo<'a> {
     pub is_script: bool,
     /// `zink.*` packages it imports that the checker doesn't model.
     pub unmodelled: Vec<String>,
+    /// What its `extern import`s declare, and the libraries its `extern link`s name
+    /// (DESIGN §12.6).
+    pub c: Option<std::rc::Rc<crate::cheader::CScope>>,
+    pub links: Vec<String>,
 }
 
 pub struct Program<'a> {
@@ -181,6 +189,7 @@ impl<'a> Program<'a> {
         };
         // Pass 1: every type declaration, with its name, kind and type parameters' names.
         let mut decls: Vec<(ClassId, &'a ast::TypeDecl)> = Vec::new();
+        let mut c_cache: HashMap<Vec<String>, std::rc::Rc<crate::cheader::CScope>> = HashMap::new();
         for (fi, f) in files.iter().enumerate() {
             let package = f.package.as_ref().map(|p| p.text()).unwrap_or_default();
             let mut unmodelled: Vec<String> = Vec::new();
@@ -229,12 +238,52 @@ impl<'a> Program<'a> {
             let is_script = items
                 .iter()
                 .any(|i| matches!(i, TopItem::Field(_) | TopItem::Method(_)));
+            // C headers: read once for each list of them.
+            let headers: Vec<String> = f
+                .externs
+                .iter()
+                .filter(|e| e.kind == ast::ExternKind::Import)
+                .map(|e| e.text.clone())
+                .collect();
+            let links: Vec<String> = f
+                .externs
+                .iter()
+                .filter(|e| e.kind == ast::ExternKind::Link)
+                .map(|e| e.text.clone())
+                .collect();
+            let c = if headers.is_empty() {
+                None
+            } else if let Some(s) = c_cache.get(&headers) {
+                Some(s.clone())
+            } else {
+                match crate::cheader::read(&headers) {
+                    Ok(s) => {
+                        let s = std::rc::Rc::new(s);
+                        c_cache.insert(headers.clone(), s.clone());
+                        Some(s)
+                    }
+                    Err(msg) => {
+                        let span = f
+                            .externs
+                            .iter()
+                            .find(|e| e.kind == ast::ExternKind::Import)
+                            .map_or(Span::default(), |e| e.span);
+                        prog.diags.push((
+                            fi,
+                            Diagnostic::error(span, format!("can't read the C headers: {}", msg)),
+                        ));
+                        None
+                    }
+                }
+            };
             prog.files.push(FileInfo {
                 ast: f,
                 package: package.clone(),
                 script: None,
                 is_script,
                 unmodelled,
+                c,
+                links,
             });
             for item in items {
                 match item {
@@ -590,6 +639,10 @@ impl<'a> Program<'a> {
             );
         }
         let is_private = m.modifiers.contains(&Modifier::Private);
+        let c_name = m.modifiers.iter().find_map(|md| match md {
+            Modifier::Extern(n) => Some(n.clone().unwrap_or_else(|| m.name.name.clone())),
+            _ => None,
+        });
         self.classes[id].methods.push(MethodInfo {
             name: m.name.name.clone(),
             type_params: mtps,
@@ -600,6 +653,7 @@ impl<'a> Program<'a> {
             is_private,
             decl: m,
             can_fail,
+            c_name,
         });
     }
 
@@ -830,6 +884,15 @@ impl<'a> Program<'a> {
             return match self.find_class(scope.file, name) {
                 Lookup::Found(id) => self.class_type(id, args, t.span, under_ref, diags),
                 Lookup::Unmodelled => Ty::Unknown,
+                // A C struct type from an `extern import`, used through pointers.
+                Lookup::NotFound
+                    if self.files[scope.file]
+                        .c
+                        .as_ref()
+                        .is_some_and(|c| c.handles.contains(name)) =>
+                {
+                    Ty::CHandle(name.to_string())
+                }
                 Lookup::NotFound => {
                     diags.push(Diagnostic::error(
                         t.span,
@@ -901,6 +964,7 @@ impl<'a> Program<'a> {
     pub fn show(&self, t: &Ty) -> String {
         match t {
             Ty::Prim(p) => p.name().to_string(),
+            Ty::CHandle(n) => n.clone(),
             Ty::Void => "void".into(),
             Ty::Null => "null".into(),
             Ty::IntLit { is_char: true, .. } => "a character literal".into(),

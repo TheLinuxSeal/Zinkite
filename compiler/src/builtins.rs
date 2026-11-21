@@ -24,6 +24,8 @@ pub enum Origin {
     Ctor(ClassId, usize),
     /// A call through a `func` value.
     Value,
+    /// A C function from an `extern import`ed header, by its C name (DESIGN §12.6).
+    Extern(String),
 }
 
 /// One callable signature: a method, function or constructor.

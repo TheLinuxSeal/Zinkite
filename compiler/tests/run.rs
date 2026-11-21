@@ -1607,3 +1607,76 @@ void main() { println("${grow(1, 3)}"); }
             .contains("instantiates generic code with ever larger type arguments")
     }));
 }
+
+/// Whether clang is installed, which reading C headers needs (DESIGN §12.6).
+fn has_clang() -> bool {
+    Command::new("clang")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Calling C (DESIGN §12.6): functions from six headers called as they are, `const char *`
+/// as text, macro constants, `FILE` handles compared with `null`, `extern.errno()`, an
+/// explicit `extern` for what a header can't say, and `extern link m`.
+#[test]
+fn calling_c() {
+    if !has_clang() {
+        eprintln!("skipped: no clang to read C headers");
+        return;
+    }
+    prints(
+        r#"extern import stdio.h;
+extern import math.h;
+extern import string.h;
+extern import stdlib.h;
+extern import ctype.h;
+extern import unistd.h;
+extern link m;
+
+// write's buffer is a `const void *`, which the header can't say is bytes: declared here.
+extern("write") i64 writeBytes(i32 fd, u8[:] data, u64 n);
+
+void main() {
+    f64 r = sqrt(2.0);
+    println("sqrt ${r.fixed(6)} pow ${pow(2.0, 10.0)} strlen ${strlen("zinkite")} atoi ${atoi("-42")}");
+    println("toupper ${(u8) toupper('q')} abs ${abs(-3)} EOF ${EOF} SEEK_END ${SEEK_END} pid ${getpid() > 0}");
+
+    string path = "/tmp/zink-c-calling-test.txt";
+    FILE f = fopen(path, "w");
+    if (f == null) {
+        println("can't open ${path}");
+        return;
+    }
+    fputs("line one\n", f);
+    fputs("line two\n", f);
+    i32 closed = fclose(f);
+    FILE g = fopen(path, "r");
+    u8[..>] back = [];
+    i32 c = fgetc(g);
+    while (c != EOF) {
+        back +> (u8) c;
+        c = fgetc(g);
+    }
+    @_ = fclose(g);
+    print("closed ${closed}, read back:\n${back}");
+
+    FILE missing = fopen("/nonexistent/dir/x", "r");
+    u8 why = extern.errno();
+    println("missing null ${missing == null} errno ${why} ${status.message(why)}");
+    u8[..>] msg = [];
+    msg.append("to stderr through write(2)\n");
+    i64 n = writeBytes(2, msg, (u64) msg.len);
+    println("wrote ${n} bytes, removed ${remove(path)}");
+}
+"#,
+        r#"sqrt 1.414214 pow 1024.0 strlen 7 atoi -42
+toupper 81 abs 3 EOF -1 SEEK_END 2 pid true
+closed 0, read back:
+line one
+line two
+missing null true errno 2 No such file or directory
+wrote 27 bytes, removed 0
+"#,
+    );
+}

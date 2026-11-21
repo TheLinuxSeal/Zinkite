@@ -40,7 +40,23 @@ pub struct File {
     pub settings: Vec<SettingItem>,
     pub package: Option<QualName>,
     pub imports: Vec<Import>,
+    /// `extern import stdio.h;` and `extern link m;` (DESIGN §12.6).
+    pub externs: Vec<ExternItem>,
     pub items: Vec<TopItem>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExternItem {
+    pub kind: ExternKind,
+    /// The header's path or the library's name, as written: `SDL3/SDL.h`, `m`.
+    pub text: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternKind {
+    Import,
+    Link,
 }
 
 /// An `#if` block, holding items of one kind.
@@ -91,12 +107,14 @@ pub enum TopItem {
 
 // ---------------------------------------------------------------- declarations
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Modifier {
     Public,
     Private,
     Static,
     Mut,
+    /// A C function, with its C name when that differs: `extern("glClearColor")`.
+    Extern(Option<String>),
 }
 
 #[derive(Clone, Debug, PartialEq)]

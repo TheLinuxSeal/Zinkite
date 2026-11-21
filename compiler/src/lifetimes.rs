@@ -2192,7 +2192,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
     fn name_var(&self, span: Span) -> Option<Var> {
         match self.an.facts.names.get(&key(span))? {
             NameRes::Local(d) => self.var_of.get(d).copied(),
-            NameRes::Field(..) => None,
+            NameRes::Field(..) | NameRes::CConst(_) => None,
         }
     }
 
@@ -2485,6 +2485,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 }
                 None => Val::none(),
             },
+            Some(NameRes::CConst(_)) => Val::none(),
             Some(NameRes::Field(c, i)) => {
                 let f = &self.an.prog.classes[*c].fields[*i];
                 if f.is_static {
@@ -2707,6 +2708,13 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
         };
         match &fact.origin {
             Origin::Builtin => self.builtin(e, &fact.name, recv, &recv_ty, args, &fact.params),
+            // A C function gives back numbers or handles, which hold no references.
+            Origin::Extern(_) => {
+                for a in args {
+                    self.expr(&a.expr);
+                }
+                Val::none()
+            }
             Origin::Value => {
                 let mut r = R::Empty;
                 for a in args {

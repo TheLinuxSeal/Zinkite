@@ -1381,6 +1381,36 @@ There is no allocator, no counting and no collector. With dead-code elimination 
 - **Debug info** comes from the C compiler's `-g`, with `#line` directives pointing debuggers and messages at the `.zn` source.
 - **A direct machine-code backend** stays possible later, over the same typed IR, if depending on a C compiler ever becomes a problem.
 
+### 12.6 Calling C (Decided)
+```
+extern import stdio.h;                         // a C header, as #include <stdio.h>
+extern import SDL3/SDL.h;
+extern link SDL3;                              // linked as -lSDL3
+
+extern("write") i64 writeBytes(i32 fd, u8[:] data, u64 n);   // what the header can't say
+
+FILE f = fopen("out.txt", "w");                // C functions are called like any other
+if (f == null) { return #extern.errno(); }     // and fail as C does: errno is the status
+fputs("hello\n", f);
+fclose(f);
+writeBytes(1, msg, (u64) msg.len);
+```
+
+- **`extern import` reads a C header**, named as in `#include <...>`, without quotes. Its functions are called like Zinkite functions, and its integer macros (`EOF`, `SEEK_SET`) and enum constants are names, wherever the C signature has one clear meaning:
+  - numbers and `_Bool`, as the Zinkite type of the same size and signedness (`int` is `i32`, `size_t` is `u64`, `double` is `f64`, a C enum is `i32`);
+  - `const char *` as `string`, copied with a NUL onto the scratch stack for the call (`STDLIB.md` §10.6);
+  - a pointer to a C struct as a **handle** (below).
+- **The rest needs an explicit declaration**: any other pointer, which could be one value, an array or something C keeps; function pointers; structs by value; and variable arguments, as `printf`'s. Calling such a function is an error that says why and suggests the declaration.
+- **An explicit declaration** is `extern` on a body-less static function, with the C name in parentheses when it differs from the Zinkite one, as the bindings' namespaces need (`STDLIB.md` §10.6). What may cross:
+  - parameters: numbers, `bool`, `string` (copied with a NUL), slices of numbers, which pass their pointer only, so a length is its own parameter, writable views (`T[:]&`), which C may write through, and handles;
+  - results: numbers, `bool`, handles and `void`.
+- **Handles**: a C struct used through pointers in an imported header, as `FILE` or `SDL_Window`, is a type of its own. It is a value that can be stored, compared, set to and compared with `null`, and passed back to C, but never looked into, so no raw pointer reaches Zinkite code (`STDLIB.md` §10.6).
+- **C failures are C's**: a C function never fails by itself, and returns what C returns. `extern.errno()` reads `errno` as a status, since Zinkite's status codes follow errno's (§7.7).
+- **Zinkite names win**: a C function with the name of a Zinkite function or built-in, such as `abs`, is reached through an explicit declaration under another name.
+- **Reading headers needs clang**, which lists what a header declares; the program itself is then built with whichever C compiler §14.2 finds, which includes the headers as written.
+- **The C side isn't checked.** A declaration that gets a pointer's meaning wrong, or C that keeps a pointer past the call, can break the reference rules. Explicit declarations belong in library and binding packages, which wrap them in checked Zinkite APIs (`STDLIB.md` §10.6).
+- **Zinkite's output and C's `stdio` are buffered separately**, so text printed by both can come out of order. Open: share one buffer, or flush Zinkite's before a C call (§17).
+
 ---
 
 ## 13. Embedding in other programs (Open)
@@ -1583,7 +1613,7 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 - **Standard library**: the open questions in `STDLIB.md` §11.
 
 **Graphics** (needed by the `vendor.*` packages, `STDLIB.md` §10.6)
-- **Calling C**: declaring C functions and linking against C libraries. With the C backend a call is an ordinary C call; what's open is how a declaration is written and which types may cross. The runtime needs this too (§12.2).
+- **Calling C** is decided (§12.6). Still open: passing function pointers (callbacks) and structs by value, C strings C returns, and how Zinkite's output buffer and C's `stdio` share the terminal.
 - **C layout for classes**: a way to fix a class's field order, alignment and padding to C's, and to GLSL's `std140` and `std430` rules for uniform and storage buffers, so a slice of it can be uploaded as it is.
 - **Vector and matrix types with arithmetic**, since there is no operator overloading: built-in types such as `f32x4`, or GLSL-like `vec3` and `mat4`, as Odin and Zig have. Otherwise `pos.add(vel.mul(dt))` is the only spelling.
 - **Embedding a file at compile time**, such as a SPIR-V shader, into the binary.

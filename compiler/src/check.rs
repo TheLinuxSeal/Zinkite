@@ -98,6 +98,8 @@ pub enum NameRes {
     Local((u32, u32)),
     /// `classes[c].fields[i]`, an instance field or a static.
     Field(ClassId, usize),
+    /// An integer constant from a C header: a macro or an enum constant.
+    CConst(i128),
 }
 
 pub struct CallFact {
@@ -535,6 +537,10 @@ impl<'p, 'a> Checker<'p, 'a> {
                 for (p, ty) in m.decl.params.iter().zip(&m.params) {
                     self.type_rules(ty, p.ty.span);
                 }
+                if m.c_name.is_some() {
+                    self.extern_decl(c, m);
+                    continue;
+                }
                 let Some(body) = &m.decl.body else { continue };
                 let mut tps = ctps.clone();
                 tps.extend(m.type_params.iter().cloned());
@@ -897,6 +903,8 @@ impl<'p, 'a> Checker<'p, 'a> {
                 Nullable(f) => self.rank(f, t),
                 _ => self.rank(from, t),
             },
+            // A C handle can be null, as the pointer it is.
+            (Null, CHandle(_)) => Some(Rank::Exact),
             (Null, _) => None,
             (Ref(f), Ref(t)) => self.ref_rank(f, t),
             (_, Ref(t)) => self.ref_rank(from, t),
@@ -2640,12 +2648,20 @@ impl<'p, 'a> Checker<'p, 'a> {
         match name {
             "status" => return Ty::Namespace("status"),
             "math" => return Ty::Namespace("math"),
+            "extern" => return Ty::Namespace("extern"),
             // `File` handles; `zink.io` isn't modelled yet.
             "stdin" | "stdout" | "stderr" | "env" => return Ty::Unknown,
             _ => {}
         }
         if self.unmodelled() && builtins::LIBRARY_NAMESPACES.contains(&name) {
             return Ty::Unknown;
+        }
+        if let Some(v) = self.c_scope().and_then(|c| c.consts.get(name).copied()) {
+            self.facts.names.insert(key(span), NameRes::CConst(v));
+            return Ty::IntLit {
+                value: Some(v),
+                is_char: false,
+            };
         }
         if self.function_exists(name) {
             self.err_help(
@@ -2657,6 +2673,42 @@ impl<'p, 'a> Checker<'p, 'a> {
             self.err(span, format!("unknown name `{}`", name));
         }
         Ty::Unknown
+    }
+
+    /// An explicit `extern` declaration: a static function whose parameters and result
+    /// are types that cross into C (DESIGN §12.6).
+    fn extern_decl(&mut self, c: &crate::program::ClassInfo, m: &MethodInfo) {
+        if !m.is_static {
+            self.err_help(
+                m.decl.name.span,
+                "a C function is `static`",
+                "write `static extern ...` in a class; top-level functions are static already",
+            );
+        }
+        if !m.type_params.is_empty() || !c.type_params.is_empty() {
+            self.err(m.decl.name.span, "a C function can't be generic");
+        }
+        for (p, ty) in m.decl.params.iter().zip(&m.params) {
+            if !crate::cheader::crosses_as_param(ty) {
+                self.err_help(
+                    p.ty.span,
+                    format!("{} can't cross into C", self.show(ty)),
+                    "numbers, `bool`, `string` (copied with a NUL), slices of numbers (their pointer) and C handles can (DESIGN §12.6)",
+                );
+            }
+        }
+        if !crate::cheader::crosses_as_result(&m.ret) {
+            self.err_help(
+                m.decl.name.span,
+                format!("a C function can't return {}", self.show(&m.ret)),
+                "numbers, `bool`, C handles and `void` can come back (DESIGN §12.6)",
+            );
+        }
+    }
+
+    /// What the current file's `extern import`s declare.
+    fn c_scope(&self) -> Option<std::rc::Rc<crate::cheader::CScope>> {
+        self.prog.files[self.file].c.clone()
     }
 
     fn function_exists(&self, name: &str) -> bool {
@@ -3726,6 +3778,8 @@ impl<'p, 'a> Checker<'p, 'a> {
         // References compare with null before they're dereferenced.
         match (a, b) {
             (Null, Nullable(_)) | (Nullable(_), Null) if !ordering => return Ok(()),
+            (Null, CHandle(_)) | (CHandle(_), Null) if !ordering => return Ok(()),
+            (CHandle(x), CHandle(y)) if !ordering && x == y => return Ok(()),
             (Null, Ref(_)) | (Ref(_), Null) if !ordering => {
                 return Err("this reference can't be null; only `T&?` can".into());
             }
@@ -4137,6 +4191,20 @@ impl<'p, 'a> Checker<'p, 'a> {
         if !g.is_empty() {
             return self.resolve_call(name, g, None, args, span, consumed);
         }
+        if let Some(f) = self.c_scope().and_then(|c| c.funcs.get(name).cloned()) {
+            if let Some(why) = &f.why_not {
+                self.type_args(args);
+                self.err_help(
+                    name_span,
+                    format!("`{}` can't be called as its C header declares it: {}", name, why),
+                    "declare it with `extern` and Zinkite types that say what crosses, as `extern i64 write(i32 fd, u8[:] data, u64 n);` (DESIGN §12.6)",
+                );
+                return Ty::Unknown;
+            }
+            let mut sig = Sig::new(name, f.params.clone(), f.ret.clone());
+            sig.origin = Origin::Extern(name.to_string());
+            return self.resolve_call(name, vec![sig], None, args, span, consumed);
+        }
         self.type_args(args);
         if !self.unmodelled() {
             self.err(name_span, format!("unknown function `{}`", name));
@@ -4289,10 +4357,12 @@ impl<'p, 'a> Checker<'p, 'a> {
                 }
             },
             Ty::Namespace(ns) => {
-                let sigs = if *ns == "status" {
-                    builtins::status_fn(n)
-                } else {
-                    builtins::math_fn(n)
+                let sigs = match *ns {
+                    "status" => builtins::status_fn(n),
+                    // `extern.errno()`: C's `errno`, as a status (DESIGN §12.6).
+                    "extern" if n == "errno" => vec![Sig::new("errno", vec![], Ty::u8())],
+                    "extern" => Vec::new(),
+                    _ => builtins::math_fn(n),
                 };
                 if sigs.is_empty() {
                     self.type_args(args);

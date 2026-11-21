@@ -103,7 +103,7 @@ every number type including `i128` and `u128` (as `__int128`),
 references, strings and interpolation, every array kind, slices (except of cursor,
 chunked and reversed arrays on data stacks, which are undecided), every statement
 form, casts and the integer rules, generics, lambdas and function values, hash
-maps and sets, and for-each over arrays, maps, sets and text iterators. Bugs stop the
+maps and sets, calling C, and for-each over arrays, maps, sets and text iterators. Bugs stop the
 program with the file and line, and exit status 1. `examples/linebuf.zn` and
 `examples/wordfreq.zn` run.
 
@@ -131,6 +131,16 @@ class gets a struct per instantiation, named before its fields so a type like
 `Node<K>` can refer to itself. In an instantiation, a type parameter bounded by an
 interface is a known class, so its methods are called directly. Instantiation that
 grows its type arguments without end is rejected.
+
+Calling C (DESIGN §12.6): `extern import stdio.h;` runs clang over the header
+(`src/cheader.rs`), which lists its functions, typedefs, enum constants and macros.
+Functions whose signatures have one clear meaning are called directly: numbers,
+`const char *` as text copied with a NUL onto the scratch stack, and pointers to C
+structs as handles. The generated C includes the header, so the C compiler checks
+every call. An explicit `extern` declaration gets a prototype bound to the C symbol
+by an asm label, so it can't clash with the header's own. `extern link m;` reaches
+the driver through a comment at the top of the C. The headers are read again on
+every run, about 25 ms each; caching that is still to do.
 
 Not yet: interfaces (calls through an interface reference), a capturing lambda
 passed to a function of the program's own (which needs that function specialized per lambda), `filter`, `map`

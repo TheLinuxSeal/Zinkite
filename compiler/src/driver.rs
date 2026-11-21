@@ -7,6 +7,18 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// How the generated C names a library to link, one line each at its top (DESIGN §12.6).
+pub const LINK_MARK: &str = "/* zink-link: ";
+
+/// The libraries the generated C asks for.
+fn links(c: &str) -> Vec<String> {
+    c.lines()
+        .take_while(|l| l.starts_with(LINK_MARK))
+        .filter_map(|l| l.strip_prefix(LINK_MARK)?.strip_suffix(" */"))
+        .map(|l| format!("-l{}", l))
+        .collect()
+}
+
 /// The C compiler: `$CC`, then `clang`, `gcc`, and `cc` as a last resort (DESIGN §14.2).
 /// Clang comes first: its code was as fast as gcc's or faster, and it compiles faster
 /// at `-O0`, which `zink run` uses.
@@ -48,6 +60,7 @@ pub fn compile(c: &str, out: &Path, optimize: bool) -> Result<(), String> {
         .arg("-o")
         .arg(out)
         .arg(&src)
+        .args(links(c))
         .arg("-lm")
         .output();
     let _ = std::fs::remove_file(&src);

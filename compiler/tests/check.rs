@@ -1647,3 +1647,52 @@ fn returned_references() {
         "`i` refers to something that can't be changed here",
     );
 }
+
+fn has_clang() -> bool {
+    std::process::Command::new("clang")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+#[test]
+fn calling_c_checks() {
+    if !has_clang() {
+        eprintln!("skipped: no clang to read C headers");
+        return;
+    }
+    // A header that isn't there.
+    rejects(
+        "extern import nope/missing.h;\nvoid main() {}\n",
+        "can't read the C headers: 'nope/missing.h' file not found",
+    );
+    // What the header can't say gets an error that suggests a declaration.
+    rejects(
+        "extern import stdio.h;\nvoid main() { printf(\"x\"); }\n",
+        "`printf` can't be called as its C header declares it: it takes a variable number of arguments",
+    );
+    rejects(
+        "extern import string.h;\nvoid main() { u8[..>] b = []; memset(b, 0, 4); }\n",
+        "`memset` can't be called as its C header declares it: it returns a `void *`",
+    );
+    // Handles compare with null; C constants are literals of the type they're used as.
+    ok(
+        "extern import stdio.h;\nvoid main() { FILE f = fopen(\"x\", \"r\"); bool none = f == null; i64 e = EOF; u8 seek = SEEK_SET; }\n",
+    );
+    // Explicit declarations: static, with types that cross.
+    rejects(
+        "class K { extern i32 abs(i32 x); }\nvoid main() {}\n",
+        "a C function is `static`",
+    );
+    rejects(
+        "class Row { i64 n; }\nextern i32 f(Row r);\nvoid main() {}\n",
+        "Row can't cross into C",
+    );
+    rejects(
+        "extern string g();\nvoid main() {}\n",
+        "a C function can't return string",
+    );
+    ok(
+        "extern(\"write\") i64 writeBytes(i32 fd, u8[:] data, u64 n);\nextern(\"read\") i64 readInto(i32 fd, u8[:]& buf, u64 n);\nvoid main() {}\n",
+    );
+}

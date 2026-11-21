@@ -82,6 +82,15 @@ static ZR_UNUSED void *zr_scratch_alloc(size_t sz) {
     return d;
 }
 
+/* Text for C, which reads it up to a NUL: copied with one onto the scratch stack, for
+ * the call (DESIGN §12.6). */
+static ZR_UNUSED const char *zr_cstr(zr_slice s) {
+    char *d = (char *)zr_scratch_alloc((size_t)s.n + 1);
+    memcpy(d, s.p, (size_t)s.n);
+    d[s.n] = 0;
+    return d;
+}
+
 /* A copy of a temporary on the scratch stack, so a slice of it lasts to the end of its
  * statement. */
 static ZR_UNUSED void *zr_scratch_copy(const void *p, size_t sz) {

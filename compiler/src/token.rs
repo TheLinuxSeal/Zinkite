@@ -148,6 +148,7 @@ keywords! {
     Package => "package", Import => "import", As => "as", Class => "class",
     Interface => "interface", Enum => "enum", Implements => "implements",
     Static => "static", Public => "public", Private => "private", Mut => "mut",
+    Extern => "extern",
     // Statements
     If => "if", Else => "else", While => "while", Do => "do", For => "for",
     Break => "break", Continue => "continue", Return => "return", Switch => "switch",

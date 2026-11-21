@@ -46,6 +46,9 @@ pub enum Ty {
     TypeName(Box<Ty>),
     /// A static-only namespace: `status`, `math`.
     Namespace(&'static str),
+    /// An opaque C struct reached through a pointer, as `FILE *` (DESIGN §12.6): a
+    /// value that can be compared, set to `null` and passed back to C, never looked into.
+    CHandle(String),
     /// From a library the checker doesn't model yet, or after an error. Never reported.
     Unknown,
 }
