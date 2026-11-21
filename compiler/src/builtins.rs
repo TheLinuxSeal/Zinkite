@@ -13,9 +13,23 @@ pub enum Need {
     Radix(Ty),
 }
 
+/// Where a signature comes from, so later passes know what a call called.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Origin {
+    /// Built in: the method is known by its name and its receiver's type.
+    Builtin,
+    /// `classes[c].methods[i]`
+    Method(ClassId, usize),
+    /// `classes[c].ctors[i]`
+    Ctor(ClassId, usize),
+    /// A call through a `func` value.
+    Value,
+}
+
 /// One callable signature: a method, function or constructor.
 #[derive(Clone, Debug)]
 pub struct Sig {
+    pub origin: Origin,
     pub name: String,
     pub params: Vec<Ty>,
     pub ret: Ty,
@@ -28,6 +42,7 @@ pub struct Sig {
 impl Sig {
     pub fn new(name: &str, params: Vec<Ty>, ret: Ty) -> Sig {
         Sig {
+            origin: Origin::Builtin,
             name: name.to_string(),
             params,
             ret,

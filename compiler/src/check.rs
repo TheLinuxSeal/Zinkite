@@ -12,13 +12,13 @@ use crate::ast::{
     self, AssignOp, BinOp, CaseLabel, Expr, ExprKind as E, LambdaBody, LocalType, Name, PostfixOp,
     Stmt, StmtKind as S, StrPart, SwitchBody, Target, UnaryOp,
 };
-use crate::builtins::{self, Need, NumCaps, SeqKind, Sig};
+use crate::builtins::{self, Need, NumCaps, Origin, SeqKind, Sig};
 use crate::diag::{Diagnostic, Severity};
 use crate::flow::Flow;
 use crate::program::{
     ClassKind, FieldInfo, Lookup, MethodInfo, Program, Scope, active, starts_empty,
 };
-use crate::source::Span;
+use crate::source::{SourceFile, Span};
 use crate::token::Prim;
 use crate::types::*;
 
@@ -30,21 +30,64 @@ pub enum Rank {
     Other,
 }
 
-/// Type-checks a whole program. Returns each diagnostic with the index of its file.
-pub fn check(files: &[ast::File]) -> Vec<(usize, Diagnostic)> {
+/// Type-checks a whole program, then checks roots and lifetimes if it has no type
+/// errors. Returns each diagnostic with the index of its file.
+pub fn check(files: &[ast::File], sources: &[SourceFile]) -> Vec<(usize, Diagnostic)> {
     let mut prog = Program::collect(files);
-    let diags = {
+    let (diags, facts) = {
         let mut c = Checker::new(&prog);
         c.check_all();
-        c.diags
+        (c.diags, c.facts)
     };
     let mut all = std::mem::take(&mut prog.diags);
     all.extend(diags);
+    if !all.iter().any(|d| d.1.severity == Severity::Error) {
+        all.extend(crate::lifetimes::check(&prog, &facts, sources));
+    }
     all
+}
+
+/// What the checker worked out, for the passes after it: every expression's type, what
+/// each name refers to, which declaration each call chose, and which lambdas capture.
+#[derive(Default)]
+pub struct Facts {
+    pub types: HashMap<(u32, u32), Ty>,
+    /// By the span of an identifier expression.
+    pub names: HashMap<(u32, u32), NameRes>,
+    /// Each local and parameter's type, by the span of its name where it's declared.
+    pub locals: HashMap<(u32, u32), Ty>,
+    /// By the span of a call, `new` or `this.new` expression.
+    pub calls: HashMap<(u32, u32), CallFact>,
+    /// Lambdas that capture a variable or `this`, by span.
+    pub capturing: HashSet<(u32, u32)>,
+    /// Assignments `r = x` that bind a reference not yet bound, rather than write through it.
+    pub binds: HashSet<(u32, u32)>,
+}
+
+pub enum NameRes {
+    /// A local or parameter, by the span of its declared name.
+    Local((u32, u32)),
+    /// `classes[c].fields[i]`, an instance field or a static.
+    Field(ClassId, usize),
+}
+
+pub struct CallFact {
+    pub origin: Origin,
+    pub name: String,
+    /// The chosen declaration's parameter types, with type arguments filled in.
+    pub params: Vec<Ty>,
+    /// A free function called with method syntax: the receiver is the first argument.
+    pub recv_arg: bool,
+}
+
+pub fn key(s: Span) -> (u32, u32) {
+    (s.start, s.end)
 }
 
 struct Local {
     name: String,
+    /// Where its name is declared.
+    decl: Span,
     ty: Ty,
     /// Declared without a value, so definite assignment tracks it (DESIGN §6.2).
     slot: Option<usize>,
@@ -153,8 +196,13 @@ struct Checker<'p, 'a> {
     ctor_fields: Vec<CtorField>,
     /// Set while typing the target of a plain assignment, so the write isn't taken for a read.
     writing: bool,
-    /// The type each expression got, by span, for the read-only checks.
-    types: HashMap<(u32, u32), Ty>,
+    /// What later passes need; `facts.types` also serves the read-only checks.
+    pub facts: Facts,
+    /// Enclosing lambdas: the index of each one's `FnCtx`, and whether it captures.
+    lambdas: Vec<(usize, bool)>,
+    /// Set just before typing the value that initializes a named local or static, where
+    /// a root may be created (DESIGN §6.6).
+    root_new_ok: bool,
     /// Whether the last call chosen is a `mut` method.
     last_call_mut: bool,
 }
@@ -198,7 +246,9 @@ impl<'p, 'a> Checker<'p, 'a> {
             yield_flows: Vec::new(),
             ctor_fields: Vec::new(),
             writing: false,
-            types: HashMap::new(),
+            facts: Facts::default(),
+            lambdas: Vec::new(),
+            root_new_ok: false,
             last_call_mut: false,
         }
     }
@@ -254,8 +304,10 @@ impl<'p, 'a> Checker<'p, 'a> {
             );
         }
         let id = self.locals.len();
+        self.facts.locals.insert(key(name.span), ty.clone());
         self.locals.push(Local {
             name: name.name.clone(),
+            decl: name.span,
             ty,
             slot: None,
             param: false,
@@ -409,7 +461,9 @@ impl<'p, 'a> Checker<'p, 'a> {
                         f.is_static,
                         ctps.clone(),
                     );
+                    self.root_new_ok = f.is_static && matches!(init.kind, E::New { .. });
                     let t = self.expr(init, Some(&f.ty));
+                    self.root_new_ok = false;
                     self.expect(&t, &f.ty, init);
                     self.end();
                 }
@@ -431,6 +485,9 @@ impl<'p, 'a> Checker<'p, 'a> {
                 }
                 for (p, ty) in d.params.iter().zip(&ctor.params) {
                     self.type_rules(ty, p.ty.span);
+                    if self.is_root_value(ty) {
+                        self.root_by_value(p.ty.span, ty, "passed");
+                    }
                     self.declare_param(&p.name, ty.clone());
                 }
                 self.block(&d.body);
@@ -454,6 +511,16 @@ impl<'p, 'a> Checker<'p, 'a> {
                 } else {
                     FnKind::Method
                 };
+                for (p, ty) in m.decl.params.iter().zip(&m.params) {
+                    if self.is_root_value(ty) {
+                        self.root_by_value(p.ty.span, ty, "passed");
+                    }
+                }
+                if self.is_root_value(&m.ret)
+                    && let ast::ReturnType::Type(t) = &m.decl.ret
+                {
+                    self.root_by_value(t.span, &m.ret, "returned");
+                }
                 if m.is_mut && m.is_static {
                     self.err_help(
                         m.decl.name.span,
@@ -1524,6 +1591,10 @@ impl<'p, 'a> Checker<'p, 'a> {
         };
         for v in &d.decls {
             let consumed = v.capture.is_some();
+            self.root_new_ok = v
+                .init
+                .as_ref()
+                .is_some_and(|i| matches!(i.kind, E::New { .. }));
             let ty = match (&declared, &d.ty, &v.init) {
                 (Some(want), _, Some(init)) => {
                     let t = self.expr_c(init, Some(want), consumed);
@@ -1554,6 +1625,13 @@ impl<'p, 'a> Checker<'p, 'a> {
                     Ty::Unknown
                 }
             };
+            self.root_new_ok = false;
+            if let Some(init) = &v.init
+                && self.is_root_value(&ty)
+                && !matches!(init.kind, E::New { .. })
+            {
+                self.root_copy(init.span, &ty);
+            }
             let is_view = matches!(ty, Ty::View(_));
             let is_ref = is_ref_ty(&ty);
             let id = self.declare(&v.name, ty);
@@ -2181,7 +2259,7 @@ impl<'p, 'a> Checker<'p, 'a> {
     /// Types an expression. `consumed` says its status is read, so dropping it draws no warning.
     fn expr_c(&mut self, e: &Expr, want: Option<&Ty>, consumed: bool) -> Ty {
         let t = self.expr_kind(e, want, consumed);
-        self.types.insert((e.span.start, e.span.end), t.clone());
+        self.facts.types.insert(key(e.span), t.clone());
         t
     }
 
@@ -2245,7 +2323,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                 }
                 Ty::Tuple(out)
             }
-            E::Lambda { params, body } => self.lambda(params, body),
+            E::Lambda { params, body } => self.lambda(params, body, e.span),
             E::Assign {
                 op,
                 target,
@@ -2457,6 +2535,9 @@ impl<'p, 'a> Checker<'p, 'a> {
     fn ident(&mut self, name: &str, span: Span) -> Ty {
         let writing = std::mem::take(&mut self.writing);
         if let Some(id) = self.lookup_local(name) {
+            self.facts
+                .names
+                .insert(key(span), NameRes::Local(key(self.locals[id].decl)));
             if self.locals[id].depth < self.fns.len() && !writing {
                 self.note_capture(id, span);
             }
@@ -2525,8 +2606,13 @@ impl<'p, 'a> Checker<'p, 'a> {
     fn field_type(&mut self, name: &str, span: Span) -> Option<Ty> {
         let prog = self.prog;
         if let Some(cls) = self.class
-            && let Some(f) = prog.classes[cls].fields.iter().find(|f| f.name == name)
+            && let Some(i) = prog.classes[cls].fields.iter().position(|f| f.name == name)
         {
+            let f = &prog.classes[cls].fields[i];
+            self.facts.names.insert(key(span), NameRes::Field(cls, i));
+            if !f.is_static {
+                self.note_this_capture();
+            }
             if !f.is_static && self.fn_static() {
                 let fname = self.fns.last().map(|f| f.name.clone()).unwrap_or_default();
                 self.err(
@@ -2540,14 +2626,51 @@ impl<'p, 'a> Checker<'p, 'a> {
             return Some(f.ty.clone());
         }
         if let Some(script) = prog.files[self.file].script
-            && let Some(f) = prog.classes[script].fields.iter().find(|f| f.name == name)
+            && let Some(i) = prog.classes[script]
+                .fields
+                .iter()
+                .position(|f| f.name == name)
         {
-            return Some(f.ty.clone());
+            self.facts
+                .names
+                .insert(key(span), NameRes::Field(script, i));
+            return Some(prog.classes[script].fields[i].ty.clone());
         }
         None
     }
 
+    /// A root's value: a record of where each part lives, which can't be copied (DESIGN §6.6).
+    fn is_root_value(&self, t: &Ty) -> bool {
+        matches!(t, Ty::Class(id, _) if self.prog.classes[*id].kind == ClassKind::Root)
+    }
+
+    fn root_copy(&mut self, span: Span, t: &Ty) {
+        let name = self.show(t);
+        self.err_help(
+            span,
+            format!("`{}` is a root, which can't be copied", name),
+            format!("refer to it instead: `{}& r = ...;` (DESIGN §6.6)", name),
+        );
+    }
+
+    fn root_by_value(&mut self, span: Span, t: &Ty, how: &str) {
+        let name = self.show(t);
+        self.err_help(
+            span,
+            format!("`{}` is a root, so it can't be {} by value", name, how),
+            format!("use a reference, `{}&` (DESIGN §6.6)", name),
+        );
+    }
+
+    /// A lambda uses `this`: every enclosing lambda captures it.
+    fn note_this_capture(&mut self) {
+        for l in &mut self.lambdas {
+            l.1 = true;
+        }
+    }
+
     fn this_ty(&mut self, span: Span) -> Ty {
+        self.note_this_capture();
         match self.class {
             Some(c) if !self.fn_static() && self.prog.classes[c].kind != ClassKind::Script => {
                 Ty::Ref(Box::new(self.self_type(c)))
@@ -2741,7 +2864,7 @@ impl<'p, 'a> Checker<'p, 'a> {
         }
     }
 
-    fn lambda(&mut self, params: &[ast::Param], body: &LambdaBody) -> Ty {
+    fn lambda(&mut self, params: &[ast::Param], body: &LambdaBody, lambda_span: Span) -> Ty {
         let ptys: Vec<Ty> = params.iter().map(|p| self.resolve(&p.ty)).collect();
         let tps = self.tparams();
         let is_static = self.fn_static();
@@ -2751,6 +2874,7 @@ impl<'p, 'a> Checker<'p, 'a> {
         let outer_loops = std::mem::take(&mut self.flow_loops);
         let outer_yields = std::mem::take(&mut self.yield_flows);
         self.begin(FnKind::Lambda, "lambda", Ty::Unknown, is_static, tps);
+        self.lambdas.push((self.fns.len() - 1, false));
         for (p, t) in params.iter().zip(&ptys) {
             self.declare_param(&p.name, t.clone());
         }
@@ -2780,6 +2904,9 @@ impl<'p, 'a> Checker<'p, 'a> {
             }
         };
         self.end();
+        if let Some((_, true)) = self.lambdas.pop() {
+            self.facts.capturing.insert(key(lambda_span));
+        }
         self.flow = outer_flow;
         self.flow_loops = outer_loops;
         self.yield_flows = outer_yields;
@@ -2826,6 +2953,10 @@ impl<'p, 'a> Checker<'p, 'a> {
                 target.span,
                 "only a variable, a field or an element can be assigned",
             );
+        }
+        if op == AssignOp::Assign && self.is_root_value(tt.unref()) {
+            let t = tt.unref().clone();
+            self.root_copy(value.span, &t);
         }
         if let E::Member { expr, name } = &target.kind
             && name.name == "key"
@@ -2887,6 +3018,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                         self.check_rebind(target, value);
                     }
                     self.flow.assign(s);
+                    self.facts.binds.insert(key(span));
                     return tt;
                 }
                 self.need_writable(target, "can't assign to this");
@@ -3799,6 +3931,14 @@ impl<'p, 'a> Checker<'p, 'a> {
         let map = self.class_subst(id, cargs);
         ms.iter()
             .map(|m| Sig {
+                origin: Origin::Method(
+                    id,
+                    self.prog.classes[id]
+                        .methods
+                        .iter()
+                        .position(|x| std::ptr::eq(x, *m))
+                        .unwrap_or(0),
+                ),
                 name: m.name.clone(),
                 params: m.params.iter().map(|p| p.subst(&map)).collect(),
                 ret: m.ret.subst(&map),
@@ -3906,7 +4046,8 @@ impl<'p, 'a> Checker<'p, 'a> {
     ) -> Ty {
         match t.unref() {
             Ty::Func(ps, r) => {
-                let sig = Sig::new(name, ps.clone(), (**r).clone());
+                let mut sig = Sig::new(name, ps.clone(), (**r).clone());
+                sig.origin = Origin::Value;
                 self.resolve_call(name, vec![sig], None, args, span, consumed)
             }
             Ty::Unknown => {
@@ -4279,16 +4420,26 @@ impl<'p, 'a> Checker<'p, 'a> {
                 let sigs: Vec<Sig> = c
                     .ctors
                     .iter()
-                    .map(|k| {
+                    .enumerate()
+                    .map(|(i, k)| {
                         let mut s = Sig::new(
                             &format!("new {}", c.name),
                             k.params.iter().map(|p| p.subst(&map)).collect(),
                             Ty::Void,
                         );
                         s.can_fail = k.can_fail;
+                        s.origin = Origin::Ctor(*id, i);
                         s
                     })
                     .collect();
+                // A root lives only in a named local or static (DESIGN §6.6).
+                if c.kind == ClassKind::Root && !std::mem::take(&mut self.root_new_ok) {
+                    self.err_help(
+                        span,
+                        format!("`{}` is a root, so it can't be a temporary", c.name),
+                        format!("create it as a named local or static: `{} x = new {}(...);` (DESIGN §6.6)", c.name, c.name),
+                    );
+                }
                 self.resolve_call(&format!("new {}", c.name), sigs, None, args, span, consumed);
                 ty
             }
@@ -4335,9 +4486,11 @@ impl<'p, 'a> Checker<'p, 'a> {
         let sigs: Vec<Sig> = c
             .ctors
             .iter()
-            .map(|k| {
+            .enumerate()
+            .map(|(i, k)| {
                 let mut s = Sig::new("this.new", k.params.clone(), Ty::Void);
                 s.can_fail = k.can_fail;
+                s.origin = Origin::Ctor(cls, i);
                 s
             })
             .collect();
@@ -4682,6 +4835,15 @@ impl<'p, 'a> Checker<'p, 'a> {
         }
         self.note_status(Some(chosen.can_fail), consumed, span, &chosen.name);
         self.last_call_mut = chosen.is_mut;
+        self.facts.calls.insert(
+            key(span),
+            CallFact {
+                origin: chosen.origin.clone(),
+                name: chosen.name.clone(),
+                params: chosen.params.clone(),
+                recv_arg: has_recv,
+            },
+        );
         chosen.ret
     }
 
@@ -4769,6 +4931,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             E::Member { expr, .. } => self.read_only(expr),
             E::Index { expr, .. } | E::Slice { expr, .. } => {
                 if let Some(Ty::Slice(el)) = self
+                    .facts
                     .types
                     .get(&(expr.span.start, expr.span.end))
                     .map(|t| t.unref())
@@ -4818,6 +4981,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             E::Member { expr, .. } => self.read_only_returned(expr),
             E::Index { expr, .. } | E::Slice { expr, .. } => {
                 if let Some(Ty::Slice(_)) = self
+                    .facts
                     .types
                     .get(&(expr.span.start, expr.span.end))
                     .map(|t| t.unref())
@@ -4933,6 +5097,12 @@ impl<'p, 'a> Checker<'p, 'a> {
 
     /// A lambda reads local `id`, which it captures.
     fn note_capture(&mut self, id: usize, span: Span) {
+        let depth = self.locals[id].depth;
+        for l in &mut self.lambdas {
+            if l.0 >= depth {
+                l.1 = true;
+            }
+        }
         let l = &mut self.locals[id];
         l.captured = true;
         if l.reassigned && !l.final_reported {
@@ -5063,6 +5233,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             map.push((tp.name.clone(), ty));
         }
         Ok(Sig {
+            origin: c.origin.clone(),
             name: c.name.clone(),
             params: c.params.iter().map(|p| p.subst(&map)).collect(),
             ret: c.ret.subst(&map),

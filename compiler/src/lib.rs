@@ -6,6 +6,7 @@ pub mod check;
 pub mod diag;
 pub mod flow;
 pub mod lexer;
+pub mod lifetimes;
 pub mod parser;
 pub mod program;
 pub mod sexpr;
@@ -38,7 +39,7 @@ pub fn check(files: &[SourceFile]) -> Vec<Vec<Diagnostic>> {
         asts.push(tree);
     }
     if parsed {
-        for (fi, d) in check::check(&asts) {
+        for (fi, d) in check::check(&asts, files) {
             per_file[fi].push(d);
         }
     }

@@ -61,15 +61,27 @@ Done:
   never assigned after they're initialized. A reference bound to something the
   code can't change can't be written through.
 
+- roots and lifetimes (`REFERENCES.md`), after type checking: rule S (no
+  reference outlives what it points into), with a summary inferred for every
+  function; rule R (no removal from an array while a reference into it is still
+  used, including removals by called functions, for-each loops and `defer`);
+  references into removable arrays kept only in locals and parameters; no
+  recursive call while a growable local is in scope; and no stored lambda that
+  captures. A root can't be copied, passed or returned by value, or be a
+  temporary (DESIGN §6.6).
+
 Not yet:
-- roots and lifetimes (`REFERENCES.md`): rules S and R, and copying roots;
+- rules V (variable-size values) and L (links) of `REFERENCES.md`, and rule G's
+  check that nothing grows an array while a value is built in it;
 - the lint for unused array capabilities (DESIGN §4.3).
 
 The standard library isn't written yet. The checker models `zink.lang`
 (output, `status`, `min`, `max` and the rest), `math`, and the methods on
 numbers, strings, arrays, `hashmap`, `hashset` and `pool`. Names from the other
 `zink.*` packages, such as `File` and `Args`, aren't checked, and a file that
-imports one gets a warning saying so.
+imports one gets a warning saying so. For the lifetime rules, a call into one of
+those packages is taken to return something rooted at everything it was given,
+and to remove from nothing.
 
 ## Layout
 
@@ -87,6 +99,8 @@ imports one gets a warning saying so.
 | `src/builtins.rs` | signatures of the built-in functions and methods |
 | `src/check.rs` | the type checker |
 | `src/flow.rs` | the state definite assignment tracks: what is assigned on every path, and on some |
+| `src/lifetimes.rs` | roots and lifetimes: rules S and R, function summaries, recursion |
 | `src/main.rs` | the `zink` command |
 | `tests/parse.rs` | parser tests |
 | `tests/check.rs` | type checker tests |
+| `tests/lifetimes.rs` | lifetime tests, from `REFERENCES.md` §10 |

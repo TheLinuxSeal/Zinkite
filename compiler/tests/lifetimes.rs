@@ -1,0 +1,411 @@
+//! Roots and lifetimes: the accepted and rejected programs of REFERENCES.md §10,
+//! and the rules for roots (DESIGN §6.6).
+
+use zink::diag::{Severity, render};
+use zink::source::SourceFile;
+
+fn errors(text: &str) -> Vec<String> {
+    let file = SourceFile::new("test.zn", text);
+    let out = zink::check(std::slice::from_ref(&file));
+    out[0]
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .map(|d| {
+            format!(
+                "{}{}",
+                d.message,
+                d.help
+                    .as_ref()
+                    .map_or(String::new(), |h| format!(" | {}", h))
+            )
+        })
+        .collect()
+}
+
+#[track_caller]
+fn ok(text: &str) {
+    let file = SourceFile::new("test.zn", text);
+    let out = zink::check(std::slice::from_ref(&file));
+    if !out[0].is_empty() {
+        let shown: String = out[0].iter().map(|d| render(&file, d)).collect();
+        panic!("expected no diagnostics, got:\n{}", shown);
+    }
+}
+
+#[track_caller]
+fn rejects(text: &str, needle: &str) {
+    let errs = errors(text);
+    assert!(
+        errs.iter().any(|e| e.contains(needle)),
+        "expected an error containing {:?}, got {:#?}",
+        needle,
+        errs
+    );
+}
+
+fn main_with(defs: &str, body: &str) -> String {
+    format!("{}\nvoid main() {{\n{}\n}}\n", defs, body)
+}
+
+const SHAPES: &str = "interface Shape { f64 area(); }\nclass Circle implements Shape { f64 r; f64 area() { return r; } }\nclass Item { i64 n; }";
+
+// ---------------------------------------------------------------- rule S (REFERENCES §3, §4)
+
+#[test]
+fn stored_references_must_not_outlive_their_roots() {
+    // §10 test 1: an array of references declared after what it points into.
+    ok(&main_with(
+        SHAPES,
+        "Circle[..>] circles = [];\nShape&[..>] shapes = [];\nshapes.push(circles.push(new Circle(1.0)));",
+    ));
+    rejects(
+        &main_with(
+            SHAPES,
+            "Shape&[..>] early = [];\nCircle[..>] rects = [];\nearly.push(rects.push(new Circle(1.0)));",
+        ),
+        "a reference into `rects` can't be stored in `early`: `rects` is declared after it",
+    );
+    // §3.5: a variable's roots are everything stored into it, even if never used again.
+    rejects(
+        &main_with(
+            "",
+            "u8[..>] outer = [];\nstring w = outer;\n{\n  u8[..>] inner = [];\n  w = inner;\n}",
+        ),
+        "`inner` is in an inner block, so it is released first",
+    );
+}
+
+#[test]
+fn call_results_are_rooted_at_their_arguments() {
+    // §10 test 2: `longest` may return either argument.
+    let longest = "string longest(string a, string b) { return a.len >= b.len ? a : b; }";
+    rejects(
+        &main_with(
+            longest,
+            "u8[..>] outer = [];\nstring w = outer;\n{\n  u8[..>] inner = [];\n  inner.append(\"inner text\");\n  w = longest(outer, inner);\n}",
+        ),
+        "a reference into `inner` can't be stored in `w`",
+    );
+    ok(&main_with(
+        longest,
+        "u8[..>] outer = [];\nu8[..>] other = [];\nstring w = outer;\n{\n  w = longest(outer, other);\n}",
+    ));
+    // §10 test 7: a recursive function rooted at its argument and at a literal.
+    let pick = "string pick(string s, i64 n) { if (n == 0) { return s; } if (n == 1) { return \"lit\"; } return pick(s, n - 1); }";
+    rejects(
+        &main_with(
+            pick,
+            "u8[..>] outer = [];\nstring w = outer;\n{\n  u8[..>] inner = [];\n  w = pick(inner, 2);\n}",
+        ),
+        "a reference into `inner`",
+    );
+    ok(&main_with(
+        pick,
+        "u8[..>] outer = [];\nstring w = outer;\n{\n  w = pick(\"x\", 2);\n}",
+    ));
+}
+
+#[test]
+fn returned_references_are_rooted_in_the_caller() {
+    // §10 test 3.
+    rejects(
+        "string f() { u8[..>] b = []; return b; }\n",
+        "this returns a reference into `b`, which is released when the function returns",
+    );
+    rejects(
+        "class Item { i64 n; }\nItem& f(Item it) { Item c = it; return c; }\n",
+        "this returns a reference into `c`",
+    );
+    rejects(
+        "class Item { i64 n; }\nItem& f(Item it) { return it; }\n",
+        "can't return a reference to this: `it` is a plain parameter",
+    );
+    ok(
+        "class Item { i64 n; }\nstring g(string s) { return s[1:]; }\nItem& h(Item[..>]& items) { return items[0]; }\n",
+    );
+}
+
+#[test]
+fn statics_hold_references_only_to_statics() {
+    // §10 test 5.
+    rejects(
+        "string saved = \"\";\nvoid main() { u8[..>] b = []; saved = b; }\n",
+        "can't be stored in a static",
+    );
+    ok("string saved = \"\";\nvoid main() { saved = \"x\"; }\n");
+}
+
+#[test]
+fn summaries_record_stores_between_arguments() {
+    // §10 test 6: `register` stores its second argument into its first.
+    let register = format!(
+        "{}\nvoid register(Shape&[..>]& all, Circle& c) {{ all.push(c); }}",
+        SHAPES
+    );
+    rejects(
+        &main_with(
+            &register,
+            "Shape&[..>] all = [];\nCircle[..>] cs = [];\ncs +> new Circle(1.0);\nregister(all, cs[0]);",
+        ),
+        "`register(...)` stores a reference from one argument into another, and a reference into `cs` can't be stored in `all`",
+    );
+    ok(&main_with(
+        &register,
+        "Circle[..>] cs = [];\nShape&[..>] all = [];\ncs +> new Circle(1.0);\nregister(all, cs[0]);",
+    ));
+}
+
+#[test]
+fn temporaries_cant_be_kept() {
+    // §3.3: interpolated text is a temporary.
+    rejects(
+        &main_with("", "i64 n = 1;\nstring s = \"${n} items\";"),
+        "this text is a temporary, built only for this statement",
+    );
+    ok(&main_with(
+        "",
+        "i64 n = 1;\nu8[.] s = \"${n} items\";\nprintln(\"${n} items\");",
+    ));
+    rejects(
+        &main_with("", "string w = \"abc\".toUpper();"),
+        "this refers into a temporary value",
+    );
+    ok(&main_with("", "u8[.] w = \"abc\".toUpper();"));
+}
+
+#[test]
+fn stored_lambdas_cant_capture() {
+    // §10 test 29, DESIGN §9.3.
+    rejects(
+        &main_with("", "i64 k = 1;\nfunc(i64 => i64) f = (i64 a) => a + k;"),
+        "a lambda that captures variables can't be stored",
+    );
+    ok(&main_with(
+        "",
+        "i64 k = 1;\ni64[..>] xs = [];\nvar ys = xs.filter((i64 v) => v > k);\nfunc(i64 => i64) f = (i64 a) => a + 1;",
+    ));
+}
+
+// ---------------------------------------------------------------- rule R (REFERENCES §5)
+
+#[test]
+fn removals_while_a_reference_is_still_used() {
+    // §10 test 8.
+    let stack = "i32[..~] stack = [];\nstack +> 1 +> 2 +> 3;\ni32& top = stack[^1];\n";
+    rejects(
+        &main_with(
+            "",
+            &format!("{}@_ = stack ->;\nprintln(\"${{top}}\");", stack),
+        ),
+        "`->` removes from `stack` while `top` may still refer into it",
+    );
+    rejects(
+        &main_with(
+            "",
+            &format!("{}@_ = stack ->;\nprintln(\"${{top}}\");", stack),
+        ),
+        "declared on line 5",
+    );
+    ok(&main_with(
+        "",
+        &format!("{}println(\"${{top}}\");\n@_ = stack ->;", stack),
+    ));
+    // Binding it again after the removal is fine.
+    ok(&main_with(
+        "",
+        &format!(
+            "{}println(\"${{top}}\");\n@_ = stack ->;\ntop .= stack[^1];\nprintln(\"${{top}}\");",
+            stack
+        ),
+    ));
+    // In a loop, the next pass's use counts.
+    rejects(
+        &main_with(
+            "",
+            &format!(
+                "{}for (var i = 0; i < 2; i++) {{\n  println(\"${{top}}\");\n  @_ = stack ->;\n}}",
+                stack
+            ),
+        ),
+        "while `top` may still refer into it",
+    );
+}
+
+#[test]
+fn removals_by_called_functions() {
+    // §10 test 9: `trim` removes from its argument.
+    let trim = "void trim(i32[..~]& xs) { while (xs.len > 10) { @_ = xs ->; } }";
+    rejects(
+        &main_with(
+            trim,
+            "i32[..~] nums = [];\nnums +> 1;\ni32& r = nums[0];\ntrim(nums);\nprintln(\"${r}\");",
+        ),
+        "`trim(...)` removes from `nums` while `r` may still refer into it",
+    );
+    ok(&main_with(
+        trim,
+        "i32[..~] nums = [];\nnums +> 1;\ni32& r = nums[0];\nprintln(\"${r}\");\ntrim(nums);",
+    ));
+}
+
+#[test]
+fn references_into_removable_arrays_stay_in_locals() {
+    // §10 test 10.
+    let holder = "class Item { i64 n; }\nclass Holder { Item& it; }";
+    rejects(
+        &main_with(
+            holder,
+            "Item[..~] items = [];\nitems +> new Item(1);\nHolder h = new Holder(items[0]);",
+        ),
+        "a reference into `items`, which can remove elements, can be kept only in a local variable or a parameter",
+    );
+    rejects(
+        &main_with(
+            holder,
+            "Item[..~] items = [];\nItem&[..>] refs = [];\nitems +> new Item(1);\nrefs.push(items[0]);",
+        ),
+        "can be kept only in a local variable",
+    );
+    ok(&main_with(
+        holder,
+        "Item[..>] items = [];\nItem&[..>] refs = [];\nitems +> new Item(1);\nrefs.push(items[0]);\nHolder h = new Holder(items[0]);",
+    ));
+    // §10 test 11: `clear()` on a grow-only array while a field holds a reference into it.
+    rejects(
+        &main_with(
+            holder,
+            "Item[..>] items = [];\nitems +> new Item(1);\nHolder h = new Holder(items[0]);\nitems.clear();\nprintln(\"${h.it.n}\");",
+        ),
+        "removes from `items` while `h` may still refer into it",
+    );
+}
+
+#[test]
+fn capped_arrays_and_pools_are_exempt() {
+    // §10 test 12.
+    ok(&main_with(
+        "",
+        "i32[..~16] small = [];\n@_ = small +> 1;\ni32& r = small[0];\n@_ = small ->;\nprintln(\"${r}\");",
+    ));
+}
+
+#[test]
+fn for_each_keeps_a_position() {
+    // §10 test 28, and by value (REFERENCES §9).
+    rejects(
+        &main_with("", "i64[..~] xs = [];\nfor (i64& x : xs) { @_ = xs ->; }"),
+        "removes from `xs` inside a for-each over it",
+    );
+    rejects(
+        &main_with("", "i64[..~] xs = [];\nfor (i64 x : xs) { xs.clear(); }"),
+        "inside a for-each over it",
+    );
+    ok(&main_with(
+        "",
+        "i64[..~] xs = [];\nfor (i64 x : xs) { }\nxs.clear();",
+    ));
+    // An iterator keeps a view of its text.
+    rejects(
+        &main_with(
+            "",
+            "u8[..~] text = [];\nfor (string l : text.lines()) { text.clear(); }",
+        ),
+        "inside a for-each over it",
+    );
+}
+
+#[test]
+fn deferred_statements_run_at_the_end_of_their_block() {
+    // §10 test 30.
+    rejects(
+        &main_with(
+            "class Item { i64 n; }",
+            "Item[..~] items = [];\nitems +> new Item(1);\nItem& r = items[0];\ndefer println(\"${r.n}\");\n@_ = items ->;",
+        ),
+        "while `r` may still refer into it",
+    );
+}
+
+#[test]
+fn repeat_loops_bind_after_the_call() {
+    // REFERENCES §9: the call may remove from what the previous pass's value viewed.
+    let next = "string next(u8[..~]& buf) { buf.clear(); return #1 buf; }";
+    ok(&main_with(
+        next,
+        "u8[..~] buf = [];\nwhile (string line : next(buf)) { println(line); }",
+    ));
+    rejects(
+        &main_with(
+            next,
+            "u8[..~] buf = [];\nstring[..>] lines = [];\nwhile (string line : next(buf)) { lines +> line; }",
+        ),
+        "a reference into `buf`, which can remove elements",
+    );
+}
+
+#[test]
+fn parts_of_a_root_are_separate() {
+    // REFERENCES §8.2: a removal from one part doesn't touch references into another.
+    let r = "root R { i64[..~] a; i64[..~] b; }";
+    ok(&main_with(
+        r,
+        "R r = new R();\nr.a +> 1;\nr.b +> 2;\ni64& x = r.a[0];\n@_ = r.b ->;\nprintln(\"${x}\");",
+    ));
+    rejects(
+        &main_with(
+            r,
+            "R r = new R();\nr.a +> 1;\ni64& x = r.a[0];\n@_ = r.a ->;\nprintln(\"${x}\");",
+        ),
+        "removes from `r.a` while `x` may still refer into it",
+    );
+}
+
+// ---------------------------------------------------------------- roots (DESIGN §6.6) and recursion (REFERENCES §8.4)
+
+#[test]
+fn roots_are_never_copied() {
+    let p = "root P { i64[..>] a; }";
+    ok(&main_with(p, "P p = new P();\nvar q = new P();\nP& r = p;"));
+    rejects(
+        &main_with(p, "P p = new P();\nP q = p;"),
+        "`P` is a root, which can't be copied",
+    );
+    rejects(
+        &main_with(p, "P p = new P();\nP q = new P();\nq = p;"),
+        "can't be copied",
+    );
+    rejects(
+        &format!("{}\nvoid f(P p) {{ }}\n", p),
+        "`P` is a root, so it can't be passed by value",
+    );
+    rejects(
+        &format!("{}\nP make() {{ P p = new P(); return p; }}\n", p),
+        "can't be returned by value",
+    );
+    rejects(
+        &format!("{}\nvoid f(P& p) {{ }}\nvoid main() {{ f(new P()); }}\n", p),
+        "`P` is a root, so it can't be a temporary",
+    );
+    ok(&format!("{}\nP shared = new P();\nvoid main() {{ }}\n", p));
+}
+
+#[test]
+fn no_growable_local_during_a_recursive_call() {
+    // §10 test 25, with a tree instead of directories.
+    let node = "class Node { i64 v; Node&? left; }";
+    ok(&format!(
+        "{}\nvoid walk(Node& n, i64[..>]& out) {{ out +> n.v; Node&? l = n.left; if (l != null) {{ walk(l, out); }} }}\n",
+        node
+    ));
+    rejects(
+        &format!(
+            "{}\nvoid walkEach(Node& n, i64[..>]& out) {{ i64[..>] mine = []; Node&? l = n.left; if (l != null) {{ walkEach(l, mine); }} out.pushAll(mine); }}\n",
+            node
+        ),
+        "`mine` is growable and in scope during this call, which can recurse back into `walkEach`",
+    );
+    rejects(
+        "i64 count(i64[..>] xs, i64 n) { if (n == 0) { return xs.len; } return count(xs, n - 1); }\n",
+        "a growable value can't be passed by value into a recursive cycle",
+    );
+}
