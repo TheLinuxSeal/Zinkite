@@ -1,0 +1,224 @@
+package zink.io;
+
+// Paths (STDLIB §4.5). They are bytes, as on Linux. Everything but cwd and chdir is
+// lexical and never touches the file system; base, dir, ext and stem give views into p.
+public class path {
+    private static extern("zr_fs_read_into") u8 cReadInto(string path, u8[..>]& buf, i32 what);
+    private static extern("zr_fs_chdir") u8 cChdir(string path);
+
+    // p without trailing slashes, but "/" stays "/".
+    private static string trimmed(string p) {
+        i64 end = p.len;
+        while (end > 1 && p[end - 1] == '/') {
+            end--;
+        }
+        return p[0:end];
+    }
+
+    // "a/b"; an absolute b replaces a.
+    public static u8[.] join(string a, string b) {
+        u8[..>] out = [];
+        if (a.len == 0 || isAbsolute(b)) {
+            out.append(b);
+            return out;
+        }
+        out.append(a);
+        if (b.len > 0) {
+            if (a[a.len - 1] != '/') {
+                out +> '/';
+            }
+            out.append(b);
+        }
+        return out;
+    }
+
+    // Without ".", "..", repeated and trailing slashes: "a/./b/../c/" gives "a/c",
+    // "a/../.." gives "..", "/.." gives "/", and "" gives ".".
+    public static u8[.] normalize(string p) {
+        bool abs = isAbsolute(p);
+        string[..~] kept = [];
+        i64 ups = 0;
+        i64 i = 0;
+        while (i < p.len) {
+            while (i < p.len && p[i] == '/') {
+                i++;
+            }
+            i64 start = i;
+            while (i < p.len && p[i] != '/') {
+                i++;
+            }
+            string part = p[start:i];
+            if (part.len == 0 || part == ".") {
+                continue;
+            }
+            if (part == "..") {
+                if (kept.len > 0) {
+                    @_ = kept ->;
+                } else if (!abs) {
+                    ups++;
+                }
+            } else {
+                kept +> part;
+            }
+        }
+        u8[..>] out = [];
+        if (abs) {
+            out +> '/';
+        }
+        for (i64 k = 0; k < ups; k++) {
+            if (k > 0) {
+                out +> '/';
+            }
+            out.append("..");
+        }
+        for (string part : kept) {
+            if (out.len > 0 && out[out.len - 1] != '/') {
+                out +> '/';
+            }
+            out.append(part);
+        }
+        if (out.len == 0) {
+            out +> '.';
+        }
+        return out;
+    }
+
+    // Joined to the working directory, then normalized.
+    public static u8[.] absolute(string p) {
+        if (isAbsolute(p)) {
+            return normalize(p);
+        }
+        u8[..>] here = [];
+        u8 err = cReadInto("", here, 1);
+        if (err != 0) {
+            return #err here;
+        }
+        u8[.] joined = join(here, p);
+        return normalize(joined);
+    }
+
+    // The way from `from` to `to`, lexically: relative("a/b", "a/c/d") gives "../c/d".
+    // INVALID when one is absolute and the other isn't, or when the way would have to
+    // climb out of a ".." that `from` starts with.
+    public static u8[.] relative(string from, string to) {
+        u8[.] f = normalize(from);
+        u8[.] t = normalize(to);
+        u8[..>] out = [];
+        if (isAbsolute(f) != isAbsolute(t)) {
+            return #status.INVALID out;
+        }
+        string[..~] fp = [];
+        string[..~] tp = [];
+        parts(f, fp);
+        parts(t, tp);
+        i64 same = 0;
+        while (same < fp.len && same < tp.len && fp[same] == tp[same]) {
+            same++;
+        }
+        for (i64 k = same; k < fp.len; k++) {
+            if (fp[k] == "..") {
+                return #status.INVALID out;
+            }
+        }
+        for (i64 k = same; k < fp.len; k++) {
+            if (out.len > 0) {
+                out +> '/';
+            }
+            out.append("..");
+        }
+        for (i64 k = same; k < tp.len; k++) {
+            if (out.len > 0) {
+                out +> '/';
+            }
+            out.append(tp[k]);
+        }
+        if (out.len == 0) {
+            out +> '.';
+        }
+        return out;
+    }
+
+    // Follows symbolic links to the real path (realpath). NOT_FOUND.
+    public static u8[.] resolve(string p) {
+        u8[..>] out = [];
+        u8 err = cReadInto(p, out, 2);
+        return #err out;
+    }
+
+    // The parts of a normalized path, as views into it: none for "." and "/".
+    private static void parts(string p, string[..~]& out) {
+        i64 i = 0;
+        while (i < p.len) {
+            while (i < p.len && p[i] == '/') {
+                i++;
+            }
+            i64 start = i;
+            while (i < p.len && p[i] != '/') {
+                i++;
+            }
+            string part = p[start:i];
+            if (part.len > 0 && part != ".") {
+                out +> part;
+            }
+        }
+    }
+
+    // "dir/file.txt" gives "file.txt"; "a/" gives "a"; "/" gives "/".
+    public static string base(string p) {
+        string t = trimmed(p);
+        if (t == "/") {
+            return t;
+        }
+        i64 slash @none = t.rfind("/");
+        if (none) {
+            return t;
+        }
+        return t[slash + 1:];
+    }
+
+    // "dir/file.txt" gives "dir"; "file.txt" gives "."; "/file" gives "/".
+    public static string dir(string p) {
+        string t = trimmed(p);
+        i64 slash @none = t.rfind("/");
+        if (none) {
+            return ".";
+        }
+        if (slash == 0) {
+            return "/";
+        }
+        return trimmed(t[0:slash]);
+    }
+
+    // "file.tar.gz" gives ".gz"; ".bashrc" and "file" give "".
+    public static string ext(string p) {
+        string b = base(p);
+        i64 dot @none = b.rfind(".");
+        if (none || dot == 0) {
+            return "";
+        }
+        return b[dot:];
+    }
+
+    // "file.tar.gz" gives "file.tar".
+    public static string stem(string p) {
+        string b = base(p);
+        string e = ext(p);
+        return b[0:b.len - e.len];
+    }
+
+    public static bool isAbsolute(string p) {
+        return p.len > 0 && p[0] == '/';
+    }
+
+    // Appends the working directory to buf.
+    public static void cwd(u8[..>]& buf) {
+        u8 err = cReadInto("", buf, 1);
+        return #err;
+    }
+
+    // NOT_FOUND, NOT_DIRECTORY, PERMISSION.
+    public static void chdir(string p) {
+        u8 err = cChdir(p);
+        return #err;
+    }
+}

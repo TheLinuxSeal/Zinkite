@@ -1,0 +1,434 @@
+package zink.cli;
+
+// One declared flag, option, positional or rest (kind 0, 1, 2, 3).
+class Spec {
+    u8 letter;
+    string name;
+    string meta;
+    string help;
+    u8 kind;
+}
+
+// What was found on the command line: whose it is, and its value ("" for a flag).
+class Found {
+    i64 spec;
+    string value;
+}
+
+// The values of one option, or the rest, in the order given (STDLIB §6.1). Loop over it
+// with `while (string v : it.next())`; for-each comes with Iterator (DESIGN §17).
+public class ArgIterator {
+    private Found[:] found;
+    private i64 spec;
+    private i64 at;
+
+    new(Found[:] found, i64 spec) {
+        this.found = found;
+        this.spec = spec;
+        this.at = 0;
+    }
+
+    // The next value: END after the last.
+    public mut string next() {
+        while (at < found.len) {
+            Found& f = found[at];
+            at++;
+            if (f.spec == spec) {
+                return f.value;
+            }
+        }
+        return #status.END "";
+    }
+}
+
+// Command-line arguments (STDLIB §6.1). Options are declared, then parsed; values are
+// views into the arguments, so nothing is copied and an Args can't outlive them.
+public class Args {
+    private string program;
+    private string about;
+    // Adds --version when set.
+    public string version = "";
+    private bool wantHelp = false;
+    private bool wantVersion = false;
+    // What was wrong, for error().
+    private u8[..~200] problem = [];
+    private Spec[..~64] specs = [];
+    private Found[..>] found = [];
+
+    public new(string program, string about) {
+        this.program = program;
+        this.about = about;
+    }
+
+    // ---- declaring
+
+    // A flag; letter 0 for none.
+    public mut void flag(u8 letter, string name, string help) {
+        add(letter, name, "", help, 0);
+    }
+
+    // An option with a value, named meta in the help.
+    public mut void option(u8 letter, string name, string meta, string help) {
+        add(letter, name, meta, help, 1);
+    }
+
+    // An optional positional argument, filled in the order they are declared.
+    public mut void positional(string name, string help) {
+        add(0, name, "", help, 2);
+    }
+
+    // Any number more, after the positionals: [files...].
+    public mut void rest(string name, string help) {
+        add(0, name, "", help, 3);
+    }
+
+    private mut void add(u8 letter, string name, string meta, string help, u8 kind) {
+        u8 full = @specs.push(new Spec(letter, name, meta, help, kind));
+        if (full) {
+            fail("zink.cli: an Args holds at most 64 options");
+        }
+    }
+
+    // ---- parsing
+
+    // INVALID for a usage error, which error() describes.
+    public mut void parse(string[:] args) {
+        found.clear();
+        problem.clear();
+        wantHelp = false;
+        wantVersion = false;
+        bool options = true;
+        i64 next = 0;
+        for (i64 i = 0; i < args.len; i++) {
+            string a = args[i];
+            if (options && a == "--") {
+                options = false;
+            } else if (options && a.len > 2 && a.startsWith("--")) {
+                string body = a[2:];
+                string name = body;
+                string value = "";
+                bool attached = false;
+                i64 eq @noEq = body.find("=");
+                if (!noEq) {
+                    name = body[0:eq];
+                    value = body[eq + 1:];
+                    attached = true;
+                }
+                if (name == "help") {
+                    wantHelp = true;
+                } else if (name == "version" && version.len > 0) {
+                    wantVersion = true;
+                } else {
+                    i64 k = find(name, 0);
+                    if (k < 0) {
+                        say("unknown option --", name);
+                        return #status.INVALID;
+                    }
+                    if (specs[k].kind == 0) {
+                        if (attached) {
+                            say("this takes no value: --", name);
+                            return #status.INVALID;
+                        }
+                        found +> new Found(k, "");
+                    } else {
+                        if (!attached) {
+                            if (i + 1 >= args.len) {
+                                say("this needs a value: --", name);
+                                return #status.INVALID;
+                            }
+                            i++;
+                            value = args[i];
+                        }
+                        found +> new Found(k, value);
+                    }
+                }
+            } else if (options && a.len > 1 && a[0] == '-') {
+                // Letters, combined: -nr, or an option's value attached: -k3.
+                for (i64 j = 1; j < a.len; j++) {
+                    u8 letter = a[j];
+                    if (letter == 'h') {
+                        wantHelp = true;
+                        continue;
+                    }
+                    i64 k = find("", letter);
+                    if (k < 0) {
+                        say("unknown option -", a[j:j + 1]);
+                        return #status.INVALID;
+                    }
+                    if (specs[k].kind == 0) {
+                        found +> new Found(k, "");
+                        continue;
+                    }
+                    if (j + 1 < a.len) {
+                        found +> new Found(k, a[j + 1:]);
+                    } else {
+                        if (i + 1 >= args.len) {
+                            say("this needs a value: -", a[j:j + 1]);
+                            return #status.INVALID;
+                        }
+                        i++;
+                        found +> new Found(k, args[i]);
+                    }
+                    break;
+                }
+            } else {
+                i64 k = slot(next);
+                if (k < 0) {
+                    say("an extra argument: ", a);
+                    return #status.INVALID;
+                }
+                if (specs[k].kind == 2) {
+                    next = k + 1;
+                } else {
+                    next = k;
+                }
+                found +> new Found(k, a);
+            }
+        }
+    }
+
+    // --help and --version print and exit 0; a usage error exits 2.
+    public mut void parseOrExit(string[:] args) {
+        u8 err = @parse(args);
+        if (wantHelp) {
+            printHelp();
+            exit(0);
+        }
+        if (wantVersion) {
+            println("${program} ${version}");
+            exit(0);
+        }
+        if (err != 0) {
+            usageError(problem);
+        }
+    }
+
+    // Prints "program: message" and the usage line on stderr, then exits 2.
+    public void usageError(string message) {
+        errprintln("${program}: ${message}");
+        printUsage(true);
+        exit(2);
+    }
+
+    // What was wrong, after parse failed.
+    public string error() {
+        return problem;
+    }
+
+    // ---- reading
+
+    public bool has(string name) {
+        return count(name) > 0;
+    }
+
+    // How many times it was given: -vvv gives 3.
+    public i64 count(string name) {
+        i64 k = need(name);
+        i64 n = 0;
+        for (Found& f : found) {
+            if (f.spec == k) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    // The last value given, or the fallback when it wasn't.
+    public string get(string name, string fallback) {
+        i64 k = need(name);
+        string v = fallback;
+        for (Found& f : found) {
+            if (f.spec == k) {
+                v = f.value;
+            }
+        }
+        return v;
+    }
+
+    // INVALID, RANGE: a value that doesn't parse gives 0.
+    public i64 getI64(string name, i64 fallback) {
+        if (!has(name)) {
+            return fallback;
+        }
+        i64 v @err = i64.parse(get(name, ""));
+        return #err v;
+    }
+
+    // INVALID.
+    public f64 getF64(string name, f64 fallback) {
+        if (!has(name)) {
+            return fallback;
+        }
+        f64 v @err = f64.parse(get(name, ""));
+        return #err v;
+    }
+
+    // Every value of an option given more than once: -I a -I b.
+    public ArgIterator getAll(string name) {
+        return new ArgIterator(found, need(name));
+    }
+
+    // The arguments after the positionals, for the rest() declared.
+    public ArgIterator restValues() {
+        i64 k = -1;
+        for (i64 i = 0; i < specs.len; i++) {
+            if (specs[i].kind == 3) {
+                k = i;
+            }
+        }
+        return new ArgIterator(found, k);
+    }
+
+    // ---- inside
+
+    private static string PRINTABLE = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+
+    // An option's letter as text: a view into PRINTABLE.
+    private static string letterText(u8 b) {
+        if (b < 32 || b > 126) {
+            return "?";
+        }
+        i64 i = (i64) b - 32;
+        return PRINTABLE[i:i + 1];
+    }
+
+    // The spec with this long name, or this letter: -1 when there's none.
+    private i64 find(string name, u8 letter) {
+        for (i64 k = 0; k < specs.len; k++) {
+            Spec& s = specs[k];
+            if (s.kind <= 1 && ((letter != 0 && s.letter == letter) || (name.len > 0 && s.name == name))) {
+                return k;
+            }
+        }
+        return -1;
+    }
+
+    // Asking for an option that was never declared is a bug, which a typo is.
+    private i64 need(string name) {
+        for (i64 k = 0; k < specs.len; k++) {
+            if (specs[k].name == name) {
+                return k;
+            }
+        }
+        fail("zink.cli: no option is named ${name}");
+        return -1;
+    }
+
+    // The positional or rest spec an argument goes to, from spec `from` on.
+    private i64 slot(i64 from) {
+        for (i64 k = from; k < specs.len; k++) {
+            if (specs[k].kind >= 2) {
+                return k;
+            }
+        }
+        return -1;
+    }
+
+    private mut void say(string what, string arg) {
+        problem.clear();
+        put(what);
+        put(arg);
+    }
+
+    private mut void put(string s) {
+        for (u8 b : s) {
+            @_ = problem +> b;
+        }
+    }
+
+    private void printUsage(bool toErr) {
+        if (toErr) {
+            errprint("usage: ${program}");
+        } else {
+            print("usage: ${program}");
+        }
+        for (Spec& s : specs) {
+            if (toErr) {
+                errprint(" ");
+            } else {
+                print(" ");
+            }
+            if (toErr) {
+                usagePart(s, true);
+            } else {
+                usagePart(s, false);
+            }
+        }
+        if (toErr) {
+            errprintln("");
+        } else {
+            println("");
+        }
+    }
+
+    private void usagePart(Spec s, bool toErr) {
+        string open = s.kind <= 1 && s.letter != 0 ? "[-" : s.kind <= 1 ? "[--" : "[";
+        string name = s.letter != 0 && s.kind <= 1 ? letterText(s.letter) : s.name;
+        string meta = s.kind == 1 ? " " : "";
+        string dots = s.kind == 3 ? "..." : "";
+        if (toErr) {
+            errprint("${open}${name}${meta}${s.meta}${dots}]");
+        } else {
+            print("${open}${name}${meta}${s.meta}${dots}]");
+        }
+    }
+
+    // The left column of the help: "-k, --column N", "    --top N", "file".
+    private i64 leftWidth(Spec s) {
+        if (s.kind >= 2) {
+            return s.name.len + (s.kind == 3 ? 3 : 0);
+        }
+        return 6 + s.name.len + (s.kind == 1 ? 1 + s.meta.len : 0);
+    }
+
+    private void printLeft(Spec s, i64 width) {
+        i64 w = leftWidth(s);
+        if (s.kind >= 2) {
+            print("  ${s.name}${s.kind == 3 ? "..." : ""}");
+        } else if (s.letter != 0) {
+            print("  -${letterText(s.letter)}, --${s.name}");
+        } else {
+            print("      --${s.name}");
+        }
+        if (s.kind == 1) {
+            print(" ${s.meta}");
+        }
+        print(" ".repeat(width - w + 4));
+    }
+
+    private void printHelp() {
+        printUsage(false);
+        if (about.len > 0) {
+            println("");
+            println(about);
+        }
+        println("");
+        i64 width = 10;
+        for (Spec& s : specs) {
+            width = max(width, leftWidth(s));
+        }
+        if (version.len > 0) {
+            width = max(width, 13);
+        }
+        for (Spec& s : specs) {
+            if (s.kind <= 1) {
+                printLeft(s, width);
+                println(s.help);
+            }
+        }
+        print("  -h, --help");
+        print(" ".repeat(width - 10 + 4));
+        println("show this help and exit");
+        if (version.len > 0) {
+            print("      --version");
+            print(" ".repeat(width - 13 + 4));
+            println("show the version and exit");
+        }
+        for (Spec& s : specs) {
+            if (s.kind >= 2) {
+                printLeft(s, width);
+                println(s.help);
+            }
+        }
+    }
+}

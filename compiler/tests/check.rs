@@ -1700,3 +1700,64 @@ fn calling_c_checks() {
         "extern(\"write\") i64 writeBytes(i32 fd, u8[:] data, u64 n);\nextern(\"read\") i64 readInto(i32 fd, u8[:]& buf, u64 n);\nvoid main() {}\n",
     );
 }
+
+/// `zink.*` packages and the runtime's `zr_` functions belong to the standard library.
+#[test]
+fn the_library_reserves_its_names() {
+    let e = errors("package zink.mine;\n\npublic class X { i64 a; }\n");
+    assert_eq!(
+        e,
+        vec!["`zink.*` is reserved for the standard library (DESIGN §8.4)"]
+    );
+    let e = errors(
+        "class C {\n    static extern(\"zr_io_open\") i64 sneak(string p, i32 how);\n}\nvoid main() {}\n",
+    );
+    assert_eq!(
+        e,
+        vec![
+            "`zr_` functions are the runtime's, which only the standard library calls | declare the C function under its own name (DESIGN §12.7)"
+        ]
+    );
+    // The library's own packages check, with nothing reported against the program.
+    assert!(diags("import zink.io.*;\nimport zink.cli.*;\nvoid main() {}\n").is_empty());
+}
+
+/// A member with no visibility written is package-private (DESIGN §6.1), and a default
+/// constructor is as visible as the fields it sets.
+#[test]
+fn package_private_members() {
+    let lib = SourceFile::new(
+        "Shapes.zn",
+        "package shapes;\n\npublic class Box {\n    public i64 w;\n    i64 h;\n    public i64 area() { return w * h; }\n    i64 secret() { return h; }\n    public static Box square(i64 s) { return new Box(s, s); }\n}\n",
+    );
+    let user = SourceFile::new(
+        "main.zn",
+        "import shapes.*;\n\nvoid main() {\n    Box b = Box.square(3);\n    println(\"${b.w} ${b.area()}\");\n    println(\"${b.h} ${b.secret()}\");\n    Box c = new Box(1, 2);\n}\n",
+    );
+    let out = zink::check(&[lib, user]);
+    assert!(
+        out[0].is_empty(),
+        "{:?}",
+        out[0].iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+    let msgs: Vec<&str> = out[1].iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(
+        msgs,
+        vec![
+            "`h` is package-private to `shapes`",
+            "`secret` is package-private to `shapes`",
+            "`Box`'s implicit constructor, which sets its package-private fields, can't be used here",
+        ]
+    );
+    // The library keeps its handles to itself.
+    let e = errors(
+        "import zink.io.*;\n\nvoid main() {\n    File f = new File(5);\n    File g = File.adopt(5);\n}\n",
+    );
+    assert_eq!(
+        e,
+        vec![
+            "`File`'s implicit constructor, which sets its private fields, can't be used here | a class that keeps its fields to itself is made by its own static functions, such as `File.open` (DESIGN §6.1)",
+            "`adopt` is package-private to `zink.io`",
+        ]
+    );
+}

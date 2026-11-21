@@ -1,0 +1,14 @@
+package zink.io;
+
+// What fs.stat and fs.lstat say about a path (STDLIB §4.4). `modified` is in nanoseconds
+// since the Unix epoch, until zink.time's Timestamp is written.
+public class Stat {
+    public i64 size;
+    public i64 modified;
+    public u32 mode;
+    public u32 uid;
+    public u32 gid;
+    public bool isDir;
+    public bool isFile;
+    public bool isLink;
+}

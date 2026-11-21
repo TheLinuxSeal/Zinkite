@@ -12,6 +12,11 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/random.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <dirent.h>
+#include <sys/uio.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -661,6 +666,13 @@ static ZR_UNUSED void zr_w_utf8(zr_sink s, uint32_t c) {
 }
 
 /* Text built on the scratch stack, for a temporary (DESIGN §4.11). */
+/* A function's array result, kept as a temporary: copied to the scratch stack, where it
+ * lasts to the end of the statement, since the callee's next call reuses its data stack. */
+static ZR_UNUSED zr_vec zr_vec_scratch(zr_vec v, size_t sz) {
+    zr_vec c = {zr_scratch_copy(v.p, (size_t)v.n * sz), v.n};
+    return c;
+}
+
 static ZR_UNUSED zr_vec zr_scratch_begin(void) { zr_sm(); zr_vec v = {zr_scratch_top, 0}; return v; }
 static ZR_UNUSED zr_slice zr_scratch_end(zr_vec v) { zr_scratch_top = (char *)v.p + v.n; zr_slice s = {v.p, v.n}; return s; }
 
@@ -948,59 +960,578 @@ static ZR_UNUSED zr_res_f64 zr_parse_f64(zr_slice s) {
     return r;
 }
 
-/* ------------------------------------------------------------ input (STDLIB §4.1) */
-
-static uint8_t zr_ibuf[1 << 16];
-static size_t zr_ipos, zr_ilen;
-
-/* 0 and a byte, END at the end of input, or the error's number. */
-static uint8_t zr_getc(int fd, uint8_t *out) {
-    (void)fd;
-    if (zr_ipos == zr_ilen) {
-        ssize_t r;
-        do { r = read(0, zr_ibuf, sizeof zr_ibuf); } while (r < 0 && errno == EINTR);
-        if (r < 0) return (uint8_t)(errno < 192 ? errno : 5);
-        if (r == 0) return 194;
-        zr_ipos = 0;
-        zr_ilen = (size_t)r;
+/* compareNatural (STDLIB §3.3): runs of ASCII digits compare by value, everything else
+ * byte by byte, as `ls -v` does; equal numbers written differently fall back to bytes. */
+static ZR_UNUSED int32_t zr_cmp_natural(zr_slice a, zr_slice b) {
+    const uint8_t *x = (const uint8_t *)a.p, *y = (const uint8_t *)b.p;
+    int64_t i = 0, j = 0;
+    while (i < a.n && j < b.n) {
+        if (x[i] >= '0' && x[i] <= '9' && y[j] >= '0' && y[j] <= '9') {
+            int64_t si = i, sj = j;
+            while (si < a.n && x[si] == '0') si++;
+            while (sj < b.n && y[sj] == '0') sj++;
+            int64_t ei = si, ej = sj;
+            while (ei < a.n && x[ei] >= '0' && x[ei] <= '9') ei++;
+            while (ej < b.n && y[ej] >= '0' && y[ej] <= '9') ej++;
+            if (ei - si != ej - sj) return ei - si < ej - sj ? -1 : 1;
+            for (int64_t k = 0; k < ei - si; k++)
+                if (x[si + k] != y[sj + k]) return x[si + k] < y[sj + k] ? -1 : 1;
+            /* The same number: on past it, and decide by bytes only at the end. */
+            i = ei;
+            j = ej;
+            continue;
+        }
+        if (x[i] != y[j]) return x[i] < y[j] ? -1 : 1;
+        i++;
+        j++;
     }
-    *out = zr_ibuf[zr_ipos++];
+    if (i < a.n || j < b.n) return i < a.n ? 1 : -1;
+    return zr_cmp(a, b) < 0 ? -1 : zr_cmp(a, b) > 0 ? 1 : 0;
+}
+
+/* How long the number at the start of s is, for parsePrefix (STDLIB §2.4): an optional
+ * sign and digits, and for a float, a fraction and an exponent. 0 when there's none. */
+static ZR_UNUSED int64_t zr_num_prefix(zr_slice s, int32_t is_float) {
+    const uint8_t *p = (const uint8_t *)s.p;
+    int64_t i = 0, n = s.n, digits = 0;
+    if (i < n && (p[i] == '+' || p[i] == '-')) i++;
+    while (i < n && p[i] >= '0' && p[i] <= '9') { i++; digits++; }
+    if (is_float && i < n && p[i] == '.') {
+        int64_t at = i++;
+        int64_t frac = 0;
+        while (i < n && p[i] >= '0' && p[i] <= '9') { i++; frac++; }
+        if (!frac && !digits) i = at;
+        digits += frac;
+    }
+    if (!digits) return 0;
+    if (is_float && i < n && (p[i] == 'e' || p[i] == 'E')) {
+        int64_t at = i++;
+        if (i < n && (p[i] == '+' || p[i] == '-')) i++;
+        int64_t ex = 0;
+        while (i < n && p[i] >= '0' && p[i] <= '9') { i++; ex++; }
+        if (!ex) i = at;
+    }
+    return i;
+}
+
+/* ------------------------------------------------------------ input and files (STDLIB §4) */
+
+/* The status for the errno a failed call left: Zinkite's codes follow errno's (DESIGN §7.7). */
+static uint8_t zr_errno(void) { return (uint8_t)(errno > 0 && errno < 192 ? errno : 5); }
+
+/* Per file descriptor: an input buffer, made on its first read and freed when it's closed,
+ * and for a File or a Dir, a generation that each close bumps, so a copy of a closed one
+ * can't reach whatever reuses its descriptor (DESIGN §6.4). A Dir keeps its DIR here. */
+typedef struct { uint8_t *b; size_t pos, len; uint32_t gen; uint8_t open; DIR *dir; } zr_inbuf;
+static zr_inbuf *zr_ins;
+static int zr_nins;
+
+static zr_inbuf *zr_in_entry(int fd) {
+    if (fd >= zr_nins) {
+        int n = fd + 16;
+        zr_inbuf *t = (zr_inbuf *)realloc(zr_ins, (size_t)n * sizeof *t);
+        if (!t) zr_fail("zink runtime", 0, "out of memory for an input buffer");
+        memset(t + zr_nins, 0, (size_t)(n - zr_nins) * sizeof *t);
+        zr_ins = t;
+        zr_nins = n;
+    }
+    return &zr_ins[fd];
+}
+
+static zr_inbuf *zr_in(int fd) {
+    zr_inbuf *in = zr_in_entry(fd);
+    if (!in->b && !(in->b = (uint8_t *)malloc(1 << 16))) zr_fail("zink runtime", 0, "out of memory for an input buffer");
+    return in;
+}
+
+/* A File's handle: its generation, then its descriptor. */
+static int64_t zr_io_handle(int fd) {
+    zr_inbuf *e = zr_in_entry(fd);
+    e->open = 1;
+    return ((int64_t)e->gen << 32) | (int64_t)fd;
+}
+
+/* The descriptor a handle names, or -1 when that File was closed. */
+static int zr_io_fd(int64_t h) {
+    if (h < 0) return -1;
+    int fd = (int)(h & 0xffffffff);
+    if (fd >= zr_nins || !zr_ins[fd].open || zr_ins[fd].gen != (uint32_t)(h >> 32)) return -1;
+    return fd;
+}
+
+/* 0 and a byte, END at the end of input, or the error's status. */
+static uint8_t zr_getc(int fd, uint8_t *out) {
+    zr_inbuf *in = zr_in(fd);
+    if (in->pos == in->len) {
+        ssize_t r;
+        do { r = read(fd, in->b, 1 << 16); } while (r < 0 && errno == EINTR);
+        if (r < 0) return zr_errno();
+        if (r == 0) return 194;
+        in->pos = 0;
+        in->len = (size_t)r;
+    }
+    *out = in->b[in->pos++];
     return 0;
 }
 
 /* Appends everything left on the input to `v`. */
 static ZR_UNUSED uint8_t zr_read_all(int fd, zr_vec *v) {
+    zr_inbuf *in = zr_in(fd);
+    if (in->pos < in->len) {
+        memcpy((char *)v->p + v->n, in->b + in->pos, in->len - in->pos);
+        v->n += (int64_t)(in->len - in->pos);
+        in->pos = in->len;
+    }
     for (;;) {
-        if (zr_ipos < zr_ilen) {
-            memcpy((char *)v->p + v->n, zr_ibuf + zr_ipos, zr_ilen - zr_ipos);
-            v->n += (int64_t)(zr_ilen - zr_ipos);
-            zr_ipos = zr_ilen;
-        }
         ssize_t r;
         do { r = read(fd, (char *)v->p + v->n, 1 << 20); } while (r < 0 && errno == EINTR);
-        if (r < 0) return (uint8_t)(errno < 192 ? errno : 5);
+        if (r < 0) return zr_errno();
         if (r == 0) return 0;
         v->n += r;
     }
 }
 
-/* Clears `v`, reads one line into it, and views it without its line break: END when
- * nothing is left (STDLIB §4.1). */
-static ZR_UNUSED uint8_t zr_next_line(int fd, zr_vec *v, zr_slice *out) {
-    v->n = 0;
+/* Appends one line to `v`, without its \n or \r\n: END when nothing was left, though a
+ * last line with no newline is kept (STDLIB §4.1). */
+static ZR_UNUSED uint8_t zr_read_line(int fd, zr_vec *v) {
+    int64_t start = v->n;
     uint8_t b;
     uint8_t s = zr_getc(fd, &b);
-    if (s) { out->p = v->p; out->n = 0; return s; }
+    if (s) return s;
     while (b != '\n') {
         ((uint8_t *)v->p)[v->n++] = b;
         s = zr_getc(fd, &b);
         if (s == 194) break;
         if (s) return s;
     }
-    if (v->n > 0 && ((uint8_t *)v->p)[v->n - 1] == '\r') v->n--;
-    out->p = v->p;
-    out->n = v->n;
+    if (v->n > start && ((uint8_t *)v->p)[v->n - 1] == '\r') v->n--;
     return 0;
+}
+
+/* Clears `v`, reads one line into it, and views it: END when nothing is left. */
+static ZR_UNUSED uint8_t zr_next_line(int fd, zr_vec *v, zr_slice *out) {
+    v->n = 0;
+    uint8_t s = zr_read_line(fd, v);
+    out->p = v->p;
+    out->n = s ? 0 : v->n;
+    return s;
+}
+
+/* zink.io's C layer: File (STDLIB §4.1). Paths come as slices and are copied with a
+ * NUL onto the scratch stack, released before returning. */
+
+/* Opens for File.open (0), create (1), append (2), createNew (3) or update (4): the
+ * File's handle, or -1 with errno set. */
+static ZR_UNUSED int64_t zr_io_open(zr_slice path, int32_t how) {
+    static const int flags[] = {
+        O_RDONLY, O_WRONLY | O_CREAT | O_TRUNC, O_WRONLY | O_CREAT | O_APPEND,
+        O_WRONLY | O_CREAT | O_EXCL, O_RDWR,
+    };
+    if (how < 0 || how > 4) { errno = EINVAL; return -1; }
+    int64_t m = zr_sm();
+    const char *p = zr_cstr(path);
+    int fd;
+    do { fd = open(p, flags[how] | O_CLOEXEC, 0666); } while (fd < 0 && errno == EINTR);
+    zr_sr(m);
+    return fd < 0 ? -1 : zr_io_handle(fd);
+}
+
+/* BAD_HANDLE (EBADF) for a File already closed. */
+static ZR_UNUSED uint8_t zr_io_close(int64_t h) {
+    int fd = zr_io_fd(h);
+    if (fd < 0) return 9;
+    zr_inbuf *e = &zr_ins[fd];
+    free(e->b);
+    e->b = NULL;
+    e->pos = e->len = 0;
+    e->open = 0;
+    e->gen++;
+    return close(fd) < 0 && errno != EINTR ? zr_errno() : 0;
+}
+
+static uint8_t zr_write_fd(int fd, zr_slice s);
+
+/* Writes all of `s`: 0, or the error's status. */
+static ZR_UNUSED uint8_t zr_io_write(int64_t h, zr_slice s) {
+    int fd = zr_io_fd(h);
+    return fd < 0 ? 9 : zr_write_fd(fd, s);
+}
+
+/* File.println: the text and its newline in one writev, then whatever a short write left. */
+static ZR_UNUSED uint8_t zr_io_write_line(int64_t h, zr_slice s) {
+    int fd = zr_io_fd(h);
+    if (fd < 0) return 9;
+    struct iovec v[2] = {{(void *)s.p, (size_t)s.n}, {(void *)"\n", 1}};
+    ssize_t r;
+    do { r = writev(fd, v, 2); } while (r < 0 && errno == EINTR);
+    if (r < 0) return zr_errno();
+    if (r == s.n + 1) return 0;
+    if (r < s.n) {
+        zr_slice rest = {(uint8_t *)s.p + r, s.n - r};
+        uint8_t e = zr_write_fd(fd, rest);
+        if (e) return e;
+    }
+    zr_slice nl = {(void *)"\n", 1};
+    return zr_write_fd(fd, nl);
+}
+
+static uint8_t zr_write_fd(int fd, zr_slice s) {
+    const char *p = (const char *)s.p;
+    size_t n = (size_t)s.n;
+    while (n > 0) {
+        ssize_t w = write(fd, p, n);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return zr_errno();
+        }
+        p += w;
+        n -= (size_t)w;
+    }
+    return 0;
+}
+
+/* Appends up to `max` bytes to `v`: how many, 0 at the end, or -1 with errno set. */
+static ZR_UNUSED int64_t zr_io_read(int64_t h, zr_vec *v, int64_t max) {
+    int fd = zr_io_fd(h);
+    if (fd < 0) { errno = EBADF; return -1; }
+    if (max <= 0) return 0;
+    zr_inbuf *in = zr_in(fd);
+    if (in->pos < in->len) {
+        size_t k = in->len - in->pos;
+        if ((int64_t)k > max) k = (size_t)max;
+        memcpy((char *)v->p + v->n, in->b + in->pos, k);
+        in->pos += k;
+        v->n += (int64_t)k;
+        return (int64_t)k;
+    }
+    ssize_t r;
+    do { r = read(fd, (char *)v->p + v->n, (size_t)max); } while (r < 0 && errno == EINTR);
+    if (r < 0) return -1;
+    v->n += r;
+    return r;
+}
+
+/* For File.readLine and File.readAll. */
+static ZR_UNUSED uint8_t zr_io_read_line(int64_t h, zr_vec *v) {
+    int fd = zr_io_fd(h);
+    return fd < 0 ? 9 : zr_read_line(fd, v);
+}
+
+static ZR_UNUSED uint8_t zr_io_read_all(int64_t h, zr_vec *v) {
+    int fd = zr_io_fd(h);
+    return fd < 0 ? 9 : zr_read_all(fd, v);
+}
+
+/* About a File: 0 its size, 1 whether it's a terminal, 2 its position; -1 with errno set. */
+static ZR_UNUSED int64_t zr_io_info(int64_t h, int32_t what) {
+    int fd = zr_io_fd(h);
+    if (fd < 0) { errno = EBADF; return -1; }
+    struct stat st;
+    switch (what) {
+        case 0: return fstat(fd, &st) < 0 ? -1 : (int64_t)st.st_size;
+        case 1: return isatty(fd);
+        default: {
+            off_t at = lseek(fd, 0, SEEK_CUR);
+            if (at < 0) return -1;
+            /* Bytes read ahead into the buffer haven't been read by the program yet. */
+            if (fd < zr_nins) at -= (off_t)(zr_ins[fd].len - zr_ins[fd].pos);
+            return (int64_t)at;
+        }
+    }
+}
+
+static ZR_UNUSED uint8_t zr_io_seek(int64_t h, int64_t pos) {
+    int fd = zr_io_fd(h);
+    if (fd < 0) return 9;
+    zr_ins[fd].pos = zr_ins[fd].len = 0;
+    return lseek(fd, (off_t)pos, SEEK_SET) < 0 ? zr_errno() : 0;
+}
+
+static ZR_UNUSED uint8_t zr_io_sync(int64_t h) {
+    int fd = zr_io_fd(h);
+    if (fd < 0) return 9;
+    return fsync(fd) < 0 ? zr_errno() : 0;
+}
+
+/* File.readAll(path, buf): open, read to the end, close. */
+static ZR_UNUSED uint8_t zr_io_read_path(zr_slice path, zr_vec *v) {
+    int64_t h = zr_io_open(path, 0);
+    if (h < 0) return zr_errno();
+    uint8_t s = zr_io_read_all(h, v);
+    uint8_t c = zr_io_close(h);
+    return s ? s : c;
+}
+
+/* File.writeAll: a temporary file next to the target, renamed over it, so another process
+ * sees the old contents or the new, never half. A symbolic link is followed, and the old
+ * file's permissions are kept. File.appendAll (append = 1) adds to the end instead. */
+static ZR_UNUSED uint8_t zr_io_write_path(zr_slice path, zr_slice data, int32_t append) {
+    if (append) {
+        int64_t h = zr_io_open(path, 2);
+        if (h < 0) return zr_errno();
+        uint8_t s = zr_io_write(h, data);
+        uint8_t c = zr_io_close(h);
+        return s ? s : c;
+    }
+    int64_t m = zr_sm();
+    const char *p = zr_cstr(path);
+    char *real = realpath(p, NULL);
+    const char *target = real ? real : p;
+    struct stat st;
+    int existed = stat(target, &st) == 0;
+    static uint64_t serial;
+    size_t tn = strlen(target) + 64;
+    char *tmp = (char *)zr_scratch_alloc(tn);
+    snprintf(tmp, tn, "%s.zink-%ld-%llu.tmp", target, (long)getpid(), (unsigned long long)++serial);
+    uint8_t s = 0;
+    int fd;
+    do { fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666); } while (fd < 0 && errno == EINTR);
+    if (fd < 0) s = zr_errno();
+    if (!s) s = zr_write_fd(fd, data);
+    if (!s && existed && fchmod(fd, st.st_mode & 07777) < 0) s = zr_errno();
+    if (fd >= 0 && close(fd) < 0 && !s) s = zr_errno();
+    if (!s && rename(tmp, target) < 0) s = zr_errno();
+    if (s && fd >= 0) unlink(tmp);
+    free(real);
+    zr_sr(m);
+    return s;
+}
+
+/* zink.io's C layer: fs (STDLIB §4.4). */
+
+/* What stat or lstat says, into out: size, modified (seconds, nanoseconds), mode, uid,
+ * gid, and the kind: 1 a directory, 2 a file, 3 a link, 0 anything else. */
+static ZR_UNUSED uint8_t zr_fs_stat(zr_slice path, int32_t follow, zr_slice out) {
+    int64_t m = zr_sm();
+    struct stat st;
+    int r = follow ? stat(zr_cstr(path), &st) : lstat(zr_cstr(path), &st);
+    zr_sr(m);
+    if (r < 0) return zr_errno();
+    int64_t *o = (int64_t *)out.p;
+    if (out.n < 7) return 22;
+    o[0] = (int64_t)st.st_size;
+    o[1] = (int64_t)st.st_mtim.tv_sec;
+    o[2] = (int64_t)st.st_mtim.tv_nsec;
+    o[3] = (int64_t)(st.st_mode & 07777);
+    o[4] = (int64_t)st.st_uid;
+    o[5] = (int64_t)st.st_gid;
+    o[6] = S_ISDIR(st.st_mode) ? 1 : S_ISREG(st.st_mode) ? 2 : S_ISLNK(st.st_mode) ? 3 : 0;
+    return 0;
+}
+
+/* One file system call on one or two paths: 0 remove, 1 rename, 2 mkdir, 3 chmod,
+ * 4 symlink (a is the target), 5 exists. 0, or the error's status; for exists, 0 or 1. */
+static ZR_UNUSED uint8_t zr_fs_op(int32_t op, zr_slice a, zr_slice b, int64_t mode) {
+    int64_t m = zr_sm();
+    const char *pa = zr_cstr(a);
+    const char *pb = op == 1 || op == 4 ? zr_cstr(b) : NULL;
+    int r;
+    switch (op) {
+        case 0: r = remove(pa); break;
+        case 1: r = rename(pa, pb); break;
+        case 2: r = mkdir(pa, (mode_t)mode); break;
+        case 3: r = chmod(pa, (mode_t)mode); break;
+        case 4: r = symlink(pa, pb); break;
+        default: {
+            struct stat st;
+            r = stat(pa, &st) == 0;
+            zr_sr(m);
+            return (uint8_t)r;
+        }
+    }
+    uint8_t s = r < 0 ? zr_errno() : 0;
+    zr_sr(m);
+    return s;
+}
+
+/* Appends a link's target, or the working directory (`what` 1), to v. */
+static ZR_UNUSED uint8_t zr_fs_read_into(zr_slice path, zr_vec *v, int32_t what) {
+    int64_t m = zr_sm();
+    char *dst = (char *)v->p + v->n;
+    ssize_t r;
+    if (what == 1) {
+        r = getcwd(dst, 1 << 20) ? (ssize_t)strlen(dst) : -1;
+    } else if (what == 2) {
+        char *real = realpath(zr_cstr(path), NULL);
+        r = -1;
+        if (real) {
+            r = (ssize_t)strlen(real);
+            memcpy(dst, real, (size_t)r);
+            free(real);
+        }
+    } else {
+        r = readlink(zr_cstr(path), dst, 1 << 20);
+    }
+    zr_sr(m);
+    if (r < 0) return zr_errno();
+    v->n += r;
+    return 0;
+}
+
+/* fs.copy: the contents and the mode, with copy_file_range where the kernel can, and read
+ * and write where it can't. IS_DIRECTORY for a directory. */
+static ZR_UNUSED uint8_t zr_fs_copy(zr_slice from, zr_slice to) {
+    int64_t m = zr_sm();
+    const char *pf = zr_cstr(from), *pt = zr_cstr(to);
+    uint8_t s = 0;
+    int in, out = -1;
+    struct stat st;
+    do { in = open(pf, O_RDONLY | O_CLOEXEC); } while (in < 0 && errno == EINTR);
+    if (in < 0 || fstat(in, &st) < 0) s = zr_errno();
+    else if (S_ISDIR(st.st_mode)) s = 21;
+    if (!s) {
+        do { out = open(pt, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, st.st_mode & 07777); } while (out < 0 && errno == EINTR);
+        if (out < 0) s = zr_errno();
+    }
+    int plain = 0;
+#ifndef SYS_copy_file_range
+    plain = 1;
+#endif
+    while (!s) {
+        ssize_t r;
+        if (!plain) {
+#ifdef SYS_copy_file_range
+            r = (ssize_t)syscall(SYS_copy_file_range, in, NULL, out, NULL, (size_t)1 << 30, 0u);
+#else
+            r = -1;
+#endif
+            /* Not across these file systems, or not this kernel: copy it by hand. The offsets
+             * moved with what was copied, so read and write go on from there. */
+            if (r < 0 && (errno == EXDEV || errno == ENOSYS || errno == EINVAL || errno == EOPNOTSUPP)) {
+                plain = 1;
+                continue;
+            }
+        } else {
+            static char buf[1 << 16];
+            r = read(in, buf, sizeof buf);
+            if (r > 0) {
+                zr_slice piece = {buf, r};
+                s = zr_write_fd(out, piece);
+            }
+        }
+        if (r < 0 && errno == EINTR) continue;
+        if (r < 0) s = zr_errno();
+        if (r <= 0) break;
+    }
+    if (!s && fchmod(out, st.st_mode & 07777) < 0) s = zr_errno();
+    if (out >= 0 && close(out) < 0 && !s) s = zr_errno();
+    if (in >= 0) close(in);
+    zr_sr(m);
+    return s;
+}
+
+/* fs.tempFile and fs.tempDir: a new name in $TMPDIR, or /tmp, made of random hex from
+ * getrandom and created exclusively, appended to `path`. A File's handle (mode 0600), or 0
+ * for a directory (mode 0700); -1 and errno when it can't be made. */
+static ZR_UNUSED int64_t zr_fs_temp(zr_vec *path, int32_t dir) {
+    const char *base = getenv("TMPDIR");
+    if (!base || !*base) base = "/tmp";
+    size_t bn = strlen(base);
+    while (bn > 1 && base[bn - 1] == '/') bn--;
+    if (bn > 4000) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    char name[4096];
+    for (int tries = 0; tries < 100; tries++) {
+        uint8_t r[8];
+        if (getrandom(r, sizeof r, 0) != (ssize_t)sizeof r) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        size_t n = bn;
+        memcpy(name, base, bn);
+        if (!(bn == 1 && base[0] == '/')) name[n++] = '/';
+        memcpy(name + n, "zink-", 5);
+        n += 5;
+        for (int i = 0; i < 8; i++) {
+            name[n++] = "0123456789abcdef"[r[i] >> 4];
+            name[n++] = "0123456789abcdef"[r[i] & 15];
+        }
+        name[n] = 0;
+        int64_t h = 0;
+        if (dir) {
+            if (mkdir(name, 0700) < 0) {
+                if (errno == EEXIST) continue;
+                return -1;
+            }
+        } else {
+            int fd;
+            do { fd = open(name, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600); } while (fd < 0 && errno == EINTR);
+            if (fd < 0) {
+                if (errno == EEXIST) continue;
+                return -1;
+            }
+            h = zr_io_handle(fd);
+        }
+        memcpy((char *)path->p + path->n, name, n);
+        path->n += (int64_t)n;
+        return h;
+    }
+    errno = EEXIST;
+    return -1;
+}
+
+/* zink.io's C layer: Dir (STDLIB §4.2). Its handle names the directory's descriptor, with
+ * a generation, as a File's does. -1 and errno when it can't be opened. */
+static ZR_UNUSED int64_t zr_dir_open(zr_slice path) {
+    int64_t m = zr_sm();
+    DIR *d = opendir(zr_cstr(path));
+    int e = errno;
+    zr_sr(m);
+    if (!d) {
+        errno = e;
+        return -1;
+    }
+    int fd = dirfd(d);
+    zr_in_entry(fd)->dir = d;
+    return zr_io_handle(fd);
+}
+
+/* The next entry but . and ..: its name appended to `names`, and in out[0..3) whether it's
+ * a directory, whether it's a link, and its size, from one fstatat. END after the last. */
+static ZR_UNUSED uint8_t zr_dir_next(int64_t h, zr_vec *names, zr_slice out) {
+    int fd = zr_io_fd(h);
+    if (fd < 0 || !zr_ins[fd].dir) return 9;
+    DIR *d = zr_ins[fd].dir;
+    struct dirent *e;
+    do {
+        errno = 0;
+        e = readdir(d);
+        if (!e) return errno ? zr_errno() : 194;
+    } while (e->d_name[0] == '.' && (!e->d_name[1] || (e->d_name[1] == '.' && !e->d_name[2])));
+    size_t len = strlen(e->d_name);
+    memcpy((char *)names->p + names->n, e->d_name, len);
+    names->n += (int64_t)len;
+    struct stat st;
+    int have = fstatat(fd, e->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0;
+    int kind = e->d_type;
+    if (kind == DT_UNKNOWN && have)
+        kind = S_ISDIR(st.st_mode) ? DT_DIR : S_ISLNK(st.st_mode) ? DT_LNK : DT_REG;
+    int64_t *o = (int64_t *)out.p;
+    o[0] = kind == DT_DIR;
+    o[1] = kind == DT_LNK;
+    o[2] = have ? (int64_t)st.st_size : 0;
+    return 0;
+}
+
+/* BAD_HANDLE when it was already closed. */
+static ZR_UNUSED uint8_t zr_dir_close(int64_t h) {
+    int fd = zr_io_fd(h);
+    if (fd < 0 || !zr_ins[fd].dir) return 9;
+    zr_inbuf *e = &zr_ins[fd];
+    DIR *d = e->dir;
+    e->dir = NULL;
+    e->open = 0;
+    e->gen++;
+    return closedir(d) < 0 ? zr_errno() : 0;
+}
+
+static ZR_UNUSED uint8_t zr_fs_chdir(zr_slice path) {
+    int64_t m = zr_sm();
+    int r = chdir(zr_cstr(path));
+    zr_sr(m);
+    return r < 0 ? zr_errno() : 0;
 }
 
 /* ------------------------------------------------------------ the program's start */

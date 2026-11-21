@@ -2688,8 +2688,19 @@ impl<'p, 'a> Checker<'p, 'a> {
         if !m.type_params.is_empty() || !c.type_params.is_empty() {
             self.err(m.decl.name.span, "a C function can't be generic");
         }
+        // The runtime's own C, the library's C layer, also takes growable arrays, as the
+        // header that points at them (DESIGN §12.7). Only the library may call it.
+        let runtime = m.c_name.as_deref().is_some_and(|n| n.starts_with("zr_"));
+        if runtime && !crate::stdlib::reserved(&self.prog.files[self.file].package) {
+            self.err_help(
+                m.decl.name.span,
+                "`zr_` functions are the runtime's, which only the standard library calls",
+                "declare the C function under its own name (DESIGN §12.7)",
+            );
+        }
         for (p, ty) in m.decl.params.iter().zip(&m.params) {
-            if !crate::cheader::crosses_as_param(ty) {
+            let array = runtime && matches!(ty, Ty::Ref(a) if matches!(**a, Ty::Array(..)));
+            if !crate::cheader::crosses_as_param(ty) && !array {
                 self.err_help(
                     p.ty.span,
                     format!("{} can't cross into C", self.show(ty)),
@@ -2959,13 +2970,38 @@ impl<'p, 'a> Checker<'p, 'a> {
         }
     }
 
-    fn check_private_field(&mut self, owner: ClassId, f: &FieldInfo, span: Span) {
-        if f.is_private && self.class != Some(owner) {
-            let msg = format!(
-                "`{}` is private to `{}`",
-                f.name, self.prog.classes[owner].name
-            );
+    /// Whether a member of `owner` can be used here (DESIGN §6.1): a private one in
+    /// `owner`'s own methods, a package-private one in its package, a public one anywhere.
+    fn visible(&self, owner: ClassId, is_private: bool, is_public: bool) -> bool {
+        if is_private {
+            self.class == Some(owner)
+        } else {
+            is_public || self.prog.classes[owner].package == self.prog.files[self.file].package
+        }
+    }
+
+    /// Why a member of `owner` can't be used here.
+    fn hidden(&mut self, owner: ClassId, name: &str, is_private: bool, span: Span) {
+        let c = &self.prog.classes[owner];
+        if is_private {
+            let msg = format!("`{}` is private to `{}`", name, c.name);
             self.err(span, msg);
+        } else if crate::stdlib::reserved(&c.package) {
+            let msg = format!("`{}` is package-private to `{}`", name, c.package);
+            self.err(span, msg);
+        } else {
+            let msg = format!("`{}` is package-private to `{}`", name, c.package);
+            self.err_help(
+                span,
+                msg,
+                "mark it `public` to use it from another package (DESIGN §6.1)",
+            );
+        }
+    }
+
+    fn check_private_field(&mut self, owner: ClassId, f: &FieldInfo, span: Span) {
+        if !self.visible(owner, f.is_private, f.is_public) {
+            self.hidden(owner, &f.name, f.is_private, span);
         }
     }
 
@@ -4473,12 +4509,13 @@ impl<'p, 'a> Checker<'p, 'a> {
     }
 
     fn check_private_methods(&mut self, owner: ClassId, ms: &[&MethodInfo], span: Span) {
-        if self.class != Some(owner) && ms.iter().all(|m| m.is_private) {
-            let msg = format!(
-                "`{}` is private to `{}`",
-                ms[0].name, self.prog.classes[owner].name
-            );
-            self.err(span, msg);
+        if !ms.is_empty()
+            && ms
+                .iter()
+                .all(|m| !self.visible(owner, m.is_private, m.is_public))
+        {
+            let private = ms.iter().all(|m| m.is_private);
+            self.hidden(owner, &ms[0].name, private, span);
         }
     }
 
@@ -4595,10 +4632,41 @@ impl<'p, 'a> Checker<'p, 'a> {
                     _ => {}
                 }
                 let map = self.class_subst(*id, cargs);
+                // Only the constructors visible here; a default one is as visible as the
+                // fields it sets, so `new File(5)` can't forge a private handle.
+                if !c.ctors.is_empty()
+                    && c.ctors
+                        .iter()
+                        .all(|k| !self.visible(*id, k.is_private, k.is_public))
+                {
+                    let private = c.ctors.iter().all(|k| k.is_private);
+                    let what = if c.ctors.iter().any(|k| k.decl.is_none()) {
+                        format!(
+                            "`{}`'s implicit constructor, which sets its {} fields,",
+                            c.name,
+                            if private {
+                                "private"
+                            } else {
+                                "package-private"
+                            }
+                        )
+                    } else {
+                        format!("`{}`'s constructor", c.name)
+                    };
+                    let msg = format!("{} can't be used here", what);
+                    self.type_args(args);
+                    self.err_help(
+                        span,
+                        msg,
+                        "a class that keeps its fields to itself is made by its own static functions, such as `File.open` (DESIGN §6.1)",
+                    );
+                    return ty;
+                }
                 let sigs: Vec<Sig> = c
                     .ctors
                     .iter()
                     .enumerate()
+                    .filter(|(_, k)| self.visible(*id, k.is_private, k.is_public))
                     .map(|(i, k)| {
                         let mut s = Sig::new(
                             &format!("new {}", c.name),

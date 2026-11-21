@@ -55,6 +55,8 @@ Done:
   `return`s;
 - declarations: interfaces and `implements ordered`, overloads that differ only
   in `&`, hashable keys, and the field rules for classes and roots;
+- visibility (DESIGN §6.1): private members, package-private ones (nothing
+  written), and a default constructor as visible as the fields it sets;
 - definite assignment (DESIGN §6.2): every field assigned on every path through
   a constructor, judged by the worst case, with failing exits, `this.new`, the
   fields that have no zero value, and no use of `this` before then; and no local
@@ -82,13 +84,14 @@ Not yet:
   check that nothing grows an array while a value is built in it;
 - the lint for unused array capabilities (DESIGN §4.3).
 
-The standard library isn't written yet. The checker models `zink.lang`
-(output, `status`, `min`, `max` and the rest), `math`, and the methods on
-numbers, strings, arrays, `hashmap`, `hashset` and `pool`. Names from the other
-`zink.*` packages, such as `File` and `Args`, aren't checked, and a file that
-imports one gets a warning saying so. For the lifetime rules, a call into one of
-those packages is taken to return something rooted at everything it was given,
-and to remove from nothing.
+The checker models `zink.lang` (output, `status`, `min`, `max` and the rest),
+`math`, and the methods on numbers, strings, arrays, `hashmap`, `hashset` and
+`pool`. `zink.io` and `zink.cli` are written in Zinkite (below) and checked like
+the program's own files. Names from the `zink.*` packages that aren't written
+yet, such as `zink.json`, aren't checked, and a file that imports one gets a
+warning saying so. For the lifetime rules, a call into one of those packages is
+taken to return something rooted at everything it was given, and to remove from
+nothing.
 
 ## The C backend
 
@@ -104,8 +107,15 @@ references, strings and interpolation, every array kind, slices (except of curso
 chunked and reversed arrays on data stacks, which are undecided), every statement
 form, casts and the integer rules, generics, lambdas and function values, hash
 maps and sets, calling C, and for-each over arrays, maps, sets and text iterators. Bugs stop the
-program with the file and line, and exit status 1. `examples/linebuf.zn` and
-`examples/wordfreq.zn` run.
+program with the file and line, and exit status 1. Six of the eight examples run:
+`csvsort`, `dirwalk`, `linebuf`, `sortlines`, `stats` and `wordfreq`. `cachesim`
+needs pools, and `jsonfmt` needs `zink.json`.
+
+A function's array result is built on the callee's own data stack. One that goes
+straight into a variable is copied from there; one used as a temporary, as in
+`path.relative(path.absolute(a), path.absolute(b))`, is copied to the scratch
+stack first, so it lasts to the end of its statement. Building it in the caller's
+storage, as DESIGN §3.3 says, would save that copy.
 
 Lambdas (DESIGN §9.3): one passed to a built-in, such as a comparator, key or
 predicate, is inlined where the built-in uses it, its parameters pointing at the
@@ -144,11 +154,35 @@ cache directory, keyed by the headers' names and the clang binary, and kept whil
 every file clang read is unchanged; a cached read checks those files' sizes and times
 and starts no process.
 
+The standard library (DESIGN §12.7) is Zinkite in `lib/zink/`, built into the
+`zink` binary (`src/stdlib.rs`) and added to a program when one of its files
+imports a package, as further files with spans of their own. Its C layer is the
+runtime's `zr_` functions, declared as `extern`s that take Zinkite's
+representations as they are. Written so far:
+- `zink.io`: `File` (open, create, append, createNew, update; read, readLine,
+  nextLine, readAll; write, print, println; seek, position, size, isTerminal,
+  sync, close; readAll, writeAll and appendAll of whole files, writeAll by a
+  temporary file and a rename), `Dir` and `DirEntry`, `Stat`, `fs` (exists,
+  stat, lstat, remove, removeAll, rename, move, copy, mkdir, mkdirAll, chmod,
+  symlink, readLink, tempFile, tempDir) and `path` (join, base, dir, ext, stem,
+  isAbsolute, normalize, absolute, relative, resolve, cwd, chdir);
+- `zink.cli`: `Args`, with the `--help` it generates, and `ArgIterator` for
+  `getAll` and `restValues`.
+
+Where they differ from STDLIB: `Stat.modified` is nanoseconds as an `i64` until
+`zink.time` is written; an `ArgIterator` is looped over with
+`while (string v : it.next())` until `Iterator` is; file writes aren't buffered,
+so `flush` has nothing to do (`println` is one `writev`); and `fs.move` of a
+directory across file systems still fails with `CROSS_DEVICE`. `fs.walk` and
+`ansi` aren't written yet. A bug the library finds, such as asking `Args` for an
+option that was never declared, is reported at the library's line, not the
+caller's.
+
 Not yet: interfaces (calls through an interface reference), a capturing lambda
 passed to a function of the program's own (which needs that function specialized per lambda), `filter`, `map`
 and the other methods that build a new array, iterators in variables, comparing
-class values, and the library packages that aren't written yet (`zink.io`,
-`zink.cli` and the others). Of `stdin`, only `readAll` and `nextLine` work so far.
+class values, and the library packages that aren't written yet (`zink.json`,
+`zink.time` and the others). Of `stdin`, only `readAll` and `nextLine` work so far.
 Using any of the rest is a clear error, not wrong code.
 
 Arrays on data stacks, by layout:
@@ -213,7 +247,11 @@ stops the program, as a cast that doesn't fit does (DESIGN §9.1).
 | `src/flow.rs` | the state definite assignment tracks: what is assigned on every path, and on some |
 | `src/lifetimes.rs` | roots and lifetimes: rules S and R, function summaries, recursion |
 | `src/codegen.rs` | the C backend |
+| `src/codegen/` | its parts for lambdas, hash maps, sorting and generics |
+| `src/cheader.rs` | reading C headers with clang, and caching what it finds |
 | `src/driver.rs` | compiling the C, the cache, and running the result |
+| `src/stdlib.rs` | the standard library's files, built into `zink`, and which a program needs |
+| `lib/zink/` | the standard library, in Zinkite: `io/` and `cli/` so far |
 | `runtime/zink_rt.h` | the runtime: data stacks, output, failures, checked arithmetic, text |
 | `src/main.rs` | the `zink` command |
 | `tests/parse.rs` | parser tests |

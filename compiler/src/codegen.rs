@@ -97,6 +97,9 @@ struct Gen<'p, 'a> {
     switches: Vec<SwitchCtx>,
     pending_label: Option<String>,
     used_scratch: bool,
+    /// The call about to be generated has its array result copied into a variable at once,
+    /// so it needn't be kept on the scratch stack (see `call`).
+    direct_result: bool,
     /// The type of the value the last `with_status` evaluated.
     last_status_ret: Ty,
     /// Function-pointer typedefs, by signature, and their text.
@@ -252,6 +255,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             switches: Vec::new(),
             pending_label: None,
             used_scratch: false,
+            direct_result: false,
             last_status_ret: Ty::Void,
             fn_types: HashMap::new(),
             fn_typedefs: String::new(),
@@ -279,6 +283,55 @@ impl<'p, 'a> Gen<'p, 'a> {
         "0".into()
     }
 
+    /// `T.parse(s, base)` as C: a result struct of T and the status.
+    fn parse_code(&mut self, p: Prim, s: &str, base: &str, span: Span) -> String {
+        let code = if p.is_float() {
+            format!(
+                "({{ zr_res_f64 _r = zr_parse_f64({}); {}; }})",
+                s,
+                if p == Prim::F32 {
+                    "(zr_r_float){(float)_r.v, _r.s}"
+                } else {
+                    "_r"
+                }
+            )
+        } else if bits(p) == 128 {
+            let f = if signed(p) {
+                "zr_parse_i128"
+            } else {
+                "zr_parse_u128"
+            };
+            format!("{}({}, {})", f, s, base)
+        } else if signed(p) {
+            let (lo, hi) = min_max(p);
+            let rt = self.result_ty(&Ty::Prim(p), span);
+            format!(
+                "({{ zr_res_i64 _r = zr_parse_i64({}, {}); if (!_r.s && (_r.v < {} || _r.v > {})) {{ _r.v = 0; _r.s = 34; }} ({}){{({})_r.v, _r.s}}; }})",
+                s,
+                base,
+                lo,
+                hi,
+                rt,
+                prim_c(p)
+            )
+        } else {
+            let (_, hi) = min_max(p);
+            let rt = self.result_ty(&Ty::Prim(p), span);
+            format!(
+                "({{ zr_res_u64 _r = zr_parse_u64({}, {}); if (!_r.s && _r.v > {}) {{ _r.v = 0; _r.s = 34; }} ({}){{({})_r.v, _r.s}}; }})",
+                s,
+                base,
+                hi,
+                rt,
+                prim_c(p)
+            )
+        };
+        if p == Prim::F32 {
+            self.result_ty(&Ty::Prim(Prim::F32), span);
+        }
+        code
+    }
+
     /// An argument as it crosses into C (DESIGN §12.6): text C reads as NUL-terminated
     /// is copied onto the scratch stack with the NUL; any other slice passes its pointer.
     fn c_arg(&mut self, v: String, ty: &Ty, nul: bool) -> String {
@@ -296,6 +349,10 @@ impl<'p, 'a> Gen<'p, 'a> {
     /// function's own name, through an asm label, so a header that declares it
     /// differently doesn't clash.
     fn extern_proto(&mut self, id: ClassId, i: usize, m: &MethodInfo, cname: &str) {
+        // The runtime's own functions are declared by the runtime.
+        if cname.starts_with("zr_") {
+            return;
+        }
         let span = m.decl.name.span;
         let mut ps = Vec::new();
         for (d, t) in m.decl.params.iter().zip(&m.params) {
@@ -1099,9 +1156,37 @@ impl<'p, 'a> Gen<'p, 'a> {
             if on_stack(&ty) {
                 let init = self.stack_init(&ty);
                 self.line(&format!("{} {} = {};", ct, name, init));
-                if let Some(init) = &v.init {
-                    let code = self.store_into(&name, &ty, init);
-                    self.line(&format!("{};", code));
+                match (&v.init, &v.capture) {
+                    (Some(init), Some(Name::Ident(c))) => match (&ty, layout(&ty)) {
+                        // A failing call's array comes with its status, then is copied in
+                        // as store_into copies a slice: `u8[.] p @err = path.resolve(x);`.
+                        (Ty::Array(el, _), Some(Layout::Vec)) => {
+                            let el = (**el).clone();
+                            let (cn, _) = self.new_local(c);
+                            self.direct_result = matches!(strip_paren(init).kind, E::Call { .. });
+                            let (val, st) =
+                                self.with_status(init, &Ty::Slice(Box::new(el.clone())));
+                            let sz = self.elem_size(&el, init.span);
+                            self.line(&format!("uint8_t {};", cn));
+                            self.line(&format!(
+                                "({{ {} zr_slice _s = {}; {} = {}; memmove({n}.p, _s.p, (size_t)_s.n * {}); {n}.n = _s.n; }});",
+                                st.0,
+                                val,
+                                cn,
+                                st.1,
+                                sz,
+                                n = name
+                            ));
+                        }
+                        _ => {
+                            self.unsupported(init.span, "a status with this kind of array");
+                        }
+                    },
+                    (Some(init), _) => {
+                        let code = self.store_into(&name, &ty, init);
+                        self.line(&format!("{};", code));
+                    }
+                    (None, _) => {}
                 }
                 continue;
             }
@@ -1317,7 +1402,9 @@ impl<'p, 'a> Gen<'p, 'a> {
                     );
                 }
                 _ => {
+                    self.direct_result = matches!(strip_paren(init).kind, E::Call { .. });
                     let src = self.expr(init, &Ty::Slice(Box::new(el.clone())));
+                    self.direct_result = false;
                     let sz = self.elem_size(&el, init.span);
                     return format!(
                         "({{ zr_slice _s = {}; memmove({}.p, _s.p, (size_t)_s.n * {}); {}.n = _s.n; }})",
@@ -3380,6 +3467,8 @@ impl<'p, 'a> Gen<'p, 'a> {
     }
 
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[ast::Arg]) -> CallOut {
+        // Taken first, so the calls in the arguments don't see it.
+        let direct = std::mem::take(&mut self.direct_result);
         let ret = settle(&self.ty(e));
         // `stdin.readAll(buf)` and `stdin.nextLine(buf)`: the first of the library (STDLIB §4.1),
         // known by name until the checker models `File`.
@@ -3476,7 +3565,13 @@ impl<'p, 'a> Gen<'p, 'a> {
                 } else if !is_static {
                     cargs.push("self".into());
                 }
-                if m.c_name.is_some() {
+                let runtime_c = m.c_name.as_deref().filter(|n| n.starts_with("zr_"));
+                if runtime_c.is_some() {
+                    // The runtime's own C takes Zinkite's representations as they are.
+                    for (a, p) in args.iter().zip(rest) {
+                        cargs.push(self.expr(&a.expr, p));
+                    }
+                } else if m.c_name.is_some() {
                     // An explicit `extern`: each argument as its declaration says it
                     // crosses; `string` copied with a NUL, a slice as its pointer.
                     for (k, (a, p)) in args.iter().zip(rest).enumerate() {
@@ -3493,15 +3588,38 @@ impl<'p, 'a> Gen<'p, 'a> {
                         cargs.push(self.expr(&a.expr, p));
                     }
                 }
-                let code = format!("{}({})", fname, cargs.join(", "));
+                let fname = runtime_c.map_or(fname, str::to_string);
+                let mut code = format!("{}({})", fname, cargs.join(", "));
                 let r = if map.is_empty() {
                     self.sb(&m.ret)
                 } else {
                     m.ret.subst(&map)
                 };
+                let r = settle(&r);
+                // A returned array points into the callee's data stack, which its next call
+                // reuses. Unless it goes straight into a variable, it is copied to the
+                // scratch stack, where a temporary lasts to the end of its statement:
+                // `path.relative(path.absolute(a), path.absolute(b))` (DESIGN §3.3).
+                if !direct
+                    && m.c_name.is_none()
+                    && layout(&r) == Some(Layout::Vec)
+                    && let Ty::Array(el, _) = &r
+                {
+                    let sz = self.elem_size(&el.clone(), e.span);
+                    self.used_scratch = true;
+                    code = if fails {
+                        format!(
+                            "({{ __typeof__({c}) _rv = {c}; _rv.v = zr_vec_scratch(_rv.v, {sz}); _rv; }})",
+                            c = code,
+                            sz = sz
+                        )
+                    } else {
+                        format!("zr_vec_scratch({}, {})", code, sz)
+                    };
+                }
                 CallOut {
                     code,
-                    ret: settle(&r),
+                    ret: r,
                     fails,
                 }
             }
@@ -3659,51 +3777,27 @@ impl<'p, 'a> Gen<'p, 'a> {
                             "10".into()
                         };
                         let p = *prim;
-                        let code = if p.is_float() {
-                            format!(
-                                "({{ zr_res_f64 _r = zr_parse_f64({}); {}; }})",
-                                s,
-                                if p == Prim::F32 {
-                                    "(zr_r_float){(float)_r.v, _r.s}"
-                                } else {
-                                    "_r"
-                                }
-                            )
-                        } else if bits(p) == 128 {
-                            let f = if signed(p) {
-                                "zr_parse_i128"
-                            } else {
-                                "zr_parse_u128"
-                            };
-                            format!("{}({}, {})", f, s, base)
-                        } else if signed(p) {
-                            let (lo, hi) = min_max(p);
-                            let rt = self.result_ty(&Ty::Prim(p), span);
-                            format!(
-                                "({{ zr_res_i64 _r = zr_parse_i64({}, {}); if (!_r.s && (_r.v < {} || _r.v > {})) {{ _r.v = 0; _r.s = 34; }} ({}){{({})_r.v, _r.s}}; }})",
-                                s,
-                                base,
-                                lo,
-                                hi,
-                                rt,
-                                prim_c(p)
-                            )
-                        } else {
-                            let (_, hi) = min_max(p);
-                            let rt = self.result_ty(&Ty::Prim(p), span);
-                            format!(
-                                "({{ zr_res_u64 _r = zr_parse_u64({}, {}); if (!_r.s && _r.v > {}) {{ _r.v = 0; _r.s = 34; }} ({}){{({})_r.v, _r.s}}; }})",
-                                s,
-                                base,
-                                hi,
-                                rt,
-                                prim_c(p)
-                            )
-                        };
-                        if p == Prim::F32 {
-                            self.result_ty(&Ty::Prim(Prim::F32), span);
-                        }
+                        let code = self.parse_code(p, &s, &base, span);
                         fail(code, Ty::Prim(p))
+                    }
+                    // The number at the start of s, and the rest of s (STDLIB §2.4).
+                    "parsePrefix" => {
+                        let s = arg(self, 0);
+                        let p = *prim;
+                        let tt = Ty::Tuple(vec![Ty::Prim(p), Ty::string()]);
+                        let rt = self.result_ty(&tt, span);
+                        let q = self.parse_code(p, "((zr_slice){_ps.p, _k})", "10", span);
+                        fail(
+                            format!(
+                                "({{ zr_slice _ps = {}; int64_t _k = zr_num_prefix(_ps, {}); {} _r = {{0}}; if (_k == 0) {{ _r.s = 22; }} else {{ __typeof__({}) _q = {}; _r.v.a0 = _q.v; _r.s = _q.s; }} _r.v.a1 = (zr_slice){{(uint8_t *)_ps.p + _k, _ps.n - _k}}; _r; }})",
+                                s,
+                                i32::from(p.is_float()),
+                                rt,
+                                q,
+                                q
+                            ),
+                            tt,
+                        )
                     }
                     // A checked conversion that reports RANGE, and gives 0, where a cast
                     // would stop the program (STDLIB §2).
@@ -3928,6 +4022,10 @@ impl<'p, 'a> Gen<'p, 'a> {
                     "rfind" => fail(format!("zr_rfind({}, {})", s, a0), Ty::i64()),
                     "count" => ok(format!("zr_count({}, {})", s, a0), Ty::i64()),
                     "compareTo" => ok(format!("zr_cmp({}, {})", s, a0), Ty::Prim(Prim::I32)),
+                    "compareNatural" => ok(
+                        format!("zr_cmp_natural({}, {})", s, a0),
+                        Ty::Prim(Prim::I32),
+                    ),
                     "splitFirst" | "splitLast" => {
                         let tt = Ty::Tuple(vec![Ty::string(), Ty::string()]);
                         let tc = self.cty(&tt, span);
@@ -4301,6 +4399,33 @@ impl<'p, 'a> Gen<'p, 'a> {
                 ok(
                     format!("({{ {} {} {} {} }})", ptr, setup, body, finish),
                     Ty::Void,
+                )
+            }
+            // Puts at k what a sort would, nothing larger before and nothing smaller
+            // after, and gives a reference to it (STDLIB §7.1).
+            "selectNth" | "selectNthBy" => {
+                let order = match args.get(1) {
+                    None => Order::Natural,
+                    Some(f) if m == "selectNthBy" => {
+                        let (_, kt) = self.fn_sig(&f.expr);
+                        Order::Key(&f.expr, kt)
+                    }
+                    Some(f) => Order::Less(&f.expr),
+                };
+                let k = arg(self, 0);
+                let (setup, item, value, finish) = self.reorder_view(&arr, &len);
+                let body = self.select_code(&item, &value, &k, &order, &el, span, &loc);
+                let at = if value.is_empty() {
+                    "_d[_kk]".to_string()
+                } else {
+                    format!("{}[_d[_kk]]", value)
+                };
+                ok(
+                    format!(
+                        "({{ {} {} {} {} *_res = &{}; {} _res; }})",
+                        ptr, setup, body, ec, at, finish
+                    ),
+                    Ty::Ref(Box::new(el.clone())),
                 )
             }
             "isSorted" | "isSortedBy" => {

@@ -725,6 +725,7 @@ pub fn slice_receiver(name: &str, first_param_is_string: bool) -> bool {
             | "splitFirst"
             | "splitLast"
             | "compareTo"
+            | "compareNatural"
             | "trimPrefix"
             | "trimSuffix"
             | "equalsIgnoreCase"

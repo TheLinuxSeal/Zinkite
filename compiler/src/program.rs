@@ -28,6 +28,8 @@ pub struct FieldInfo<'a> {
     pub ty: Ty,
     pub is_static: bool,
     pub is_private: bool,
+    /// Neither: package-private (DESIGN §6.1).
+    pub is_public: bool,
     pub init: Option<&'a ast::Expr>,
     pub span: Span,
 }
@@ -40,6 +42,7 @@ pub struct MethodInfo<'a> {
     pub is_static: bool,
     pub is_mut: bool,
     pub is_private: bool,
+    pub is_public: bool,
     pub decl: &'a ast::MethodDecl,
     /// The body writes a nonzero status somewhere (`return #...`).
     pub can_fail: bool,
@@ -52,6 +55,9 @@ pub struct CtorInfo<'a> {
     /// `None` for a default constructor (DESIGN §6.2).
     pub decl: Option<&'a ast::CtorDecl>,
     pub can_fail: bool,
+    /// A default constructor is as visible as the least visible field it sets.
+    pub is_private: bool,
+    pub is_public: bool,
 }
 
 pub struct ClassInfo<'a> {
@@ -205,6 +211,7 @@ impl<'a> Program<'a> {
                 };
                 if pkg.starts_with("zink.")
                     && !MODELLED_PACKAGES.contains(&pkg.as_str())
+                    && !crate::stdlib::has_package(&pkg)
                     && !unmodelled.contains(&pkg)
                 {
                     first_span.get_or_insert(imp.span);
@@ -506,6 +513,8 @@ impl<'a> Program<'a> {
                                 params,
                                 decl: Some(ctor),
                                 can_fail,
+                                is_private: ctor.modifiers.contains(&Modifier::Private),
+                                is_public: ctor.modifiers.contains(&Modifier::Public),
                             });
                         }
                         Member::If(_) => {}
@@ -514,16 +523,20 @@ impl<'a> Program<'a> {
                 if self.classes[id].ctors.is_empty() {
                     // The default constructor: every field without an initializer that isn't
                     // an editable array, a hashmap, a hashset or a pool (DESIGN §6.2).
-                    let params = self.classes[id]
+                    let set: Vec<&FieldInfo> = self.classes[id]
                         .fields
                         .iter()
                         .filter(|f| !f.is_static && f.init.is_none() && !starts_empty(&f.ty))
-                        .map(|f| f.ty.clone())
                         .collect();
+                    let params = set.iter().map(|f| f.ty.clone()).collect();
+                    let is_private = set.iter().any(|f| f.is_private);
+                    let is_public = set.iter().all(|f| f.is_public);
                     self.classes[id].ctors.push(CtorInfo {
                         params,
                         decl: None,
                         can_fail: false,
+                        is_private,
+                        is_public,
                     });
                 }
             }
@@ -583,11 +596,14 @@ impl<'a> Program<'a> {
                 continue;
             }
             let is_private = f.modifiers.contains(&Modifier::Private);
+            // A script's top-level fields are reached by bare name, inside its file.
+            let is_public = script || f.modifiers.contains(&Modifier::Public);
             self.classes[id].fields.push(FieldInfo {
                 name: v.name.name.clone(),
                 ty: ty.clone(),
                 is_static,
                 is_private,
+                is_public,
                 init: v.init.as_ref(),
                 span: v.name.span,
             });
@@ -639,6 +655,10 @@ impl<'a> Program<'a> {
             );
         }
         let is_private = m.modifiers.contains(&Modifier::Private);
+        // An interface's methods are as visible as the interface.
+        let is_public = script
+            || self.classes[id].kind == ClassKind::Interface
+            || m.modifiers.contains(&Modifier::Public);
         let c_name = m.modifiers.iter().find_map(|md| match md {
             Modifier::Extern(n) => Some(n.clone().unwrap_or_else(|| m.name.name.clone())),
             _ => None,
@@ -651,6 +671,7 @@ impl<'a> Program<'a> {
             is_static,
             is_mut,
             is_private,
+            is_public,
             decl: m,
             can_fail,
             c_name,
@@ -863,7 +884,7 @@ impl<'a> Program<'a> {
                 "pool" if arity(1, diags) => return Ty::Pool(Box::new(args[0].clone())),
                 "Handle" if arity(1, diags) => return Ty::Handle(Box::new(args[0].clone())),
                 "hashmap" | "hashset" | "pool" | "Handle" => return Ty::Unknown,
-                "Iterator" | "File" | "Dir" => return Ty::Unknown,
+                "Iterator" => return Ty::Unknown,
                 _ => {}
             }
             if let Some(k) = BoundKind::from_name(name) {

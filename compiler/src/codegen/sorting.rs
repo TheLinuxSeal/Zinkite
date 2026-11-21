@@ -149,6 +149,67 @@ impl<'p, 'a> Gen<'p, 'a> {
         )
     }
 
+    /// Quickselect of `_d[0.._n)` for position `k`, with a median-of-three pivot. A
+    /// budget of rounds keeps the worst case at O(n log n): when it runs out, a partial sort
+    /// of the first k + 1 finishes the job.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn select_code(
+        &mut self,
+        item: &str,
+        value: &str,
+        k: &str,
+        o: &Order,
+        el: &Ty,
+        span: Span,
+        loc: &str,
+    ) -> String {
+        let get = |x: &str| {
+            if value.is_empty() {
+                x.to_string()
+            } else {
+                format!("{}[{}]", value, x)
+            }
+        };
+        let swap = |a: &str, b: &str| {
+            format!(
+                "{{ {item} _t = _d[{a}]; _d[{a}] = _d[{b}]; _d[{b}] = _t; }}",
+                item = item,
+                a = a,
+                b = b
+            )
+        };
+        let less = |me: &mut Self, a: &str, b: &str| {
+            me.order_less(
+                o,
+                false,
+                &get(&format!("_d[{}]", a)),
+                &get(&format!("_d[{}]", b)),
+                el,
+                span,
+            )
+        };
+        let m_lo = less(self, "_mid", "_lo");
+        let h_lo = less(self, "_hi", "_lo");
+        let m_hi = less(self, "_mid", "_hi");
+        let i_hi = less(self, "_i", "_hi");
+        let rest = self.partial_sort_code(item, value, "_kk + 1", o, false, el, span);
+        format!(
+            "int64_t _kk = {k}; if (_kk < 0 || _kk >= _n) zr_fail({loc}, \"selectNth: the position is out of range\"); int64_t _lo = 0, _hi = _n - 1; int _budget = 16; for (int64_t _q = _n; _q > 1; _q >>= 1) _budget += 2; while (_lo < _hi) {{ if (--_budget < 0) {{ {{ {rest} }} break; }} int64_t _mid = _lo + (_hi - _lo) / 2; if ({m_lo}) {s_ml} if ({h_lo}) {s_hl} if ({m_hi}) {s_mh} int64_t _st = _lo; for (int64_t _i = _lo; _i < _hi; _i++) if ({i_hi}) {{ {s_is} _st++; }} {s_sh} if (_st == _kk) break; if (_kk < _st) _hi = _st - 1; else _lo = _st + 1; }}",
+            k = k,
+            loc = loc,
+            rest = rest,
+            m_lo = m_lo,
+            h_lo = h_lo,
+            m_hi = m_hi,
+            i_hi = i_hi,
+            s_ml = swap("_mid", "_lo"),
+            s_hl = swap("_hi", "_lo"),
+            s_mh = swap("_mid", "_hi"),
+            s_is = swap("_i", "_st"),
+            s_sh = swap("_st", "_hi"),
+        )
+    }
+
     /// The smallest `top` elements of `_d[0.._n)`, in order, at its start: a max-heap of
     /// the first `top` keeps the smallest seen, O(n log top), then they are sorted.
     #[allow(clippy::too_many_arguments)]

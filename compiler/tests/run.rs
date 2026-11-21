@@ -13,6 +13,11 @@ struct Run {
 
 /// Compiles and runs a program, failing the test if it doesn't compile.
 fn run(text: &str, args: &[&str]) -> Run {
+    exec(&build(text), args)
+}
+
+/// Compiles a program to an executable, failing the test if it doesn't compile.
+fn build(text: &str) -> std::path::PathBuf {
     let file = SourceFile::new("prog.zn", text);
     let (diags, c) = zink::compile_c(std::slice::from_ref(&file));
     let errors: Vec<String> = diags[0]
@@ -24,8 +29,6 @@ fn run(text: &str, args: &[&str]) -> Run {
         panic!("didn't compile:\n{}", errors.concat())
     };
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    let n = std::sync::atomic::AtomicU64::new(0);
-    let _ = &n;
     let name = format!("prog-{:x}", {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -34,7 +37,15 @@ fn run(text: &str, args: &[&str]) -> Run {
     });
     let exe = dir.join(name);
     zink::driver::compile(&c, &exe, false).unwrap_or_else(|e| panic!("{}", e));
-    let out = Command::new(&exe).args(args).output().expect("ran");
+    exe
+}
+
+fn exec(exe: &std::path::Path, args: &[&str]) -> Run {
+    let out = Command::new(exe)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("ran");
     Run {
         stdout: String::from_utf8_lossy(&out.stdout).into(),
         stderr: String::from_utf8_lossy(&out.stderr).into(),
@@ -1686,5 +1697,596 @@ line two
 missing null true errno 2 No such file or directory
 wrote 27 bytes, removed 0
 "#,
+    );
+}
+
+// ---------------------------------------------------------------- the standard library
+
+/// zink.io (STDLIB §4), written in Zinkite on the runtime's zr_io and zr_fs functions:
+/// File's reads, writes, seeks and statuses, a copy of a closed File failing even once
+/// its descriptor is reused, whole-file reads and atomic writes, fs, Dir and path.
+#[test]
+fn zink_io_files_and_directories() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("zink-io");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let r = run(
+        r##"import zink.io.*;
+
+// A path in buf, which only grows, so the views stay valid.
+string at(u8[..>]& buf, string dir, string name) {
+    i64 start = buf.len;
+    buf.append(dir);
+    buf +> '/';
+    buf.append(name);
+    return buf[start:];
+}
+
+void main(string[.] args) {
+    string dir = args[0];
+    u8[..>] names = [];
+    string a = at(names, dir, "a.txt");
+    string b = at(names, dir, "b.txt");
+    string c = at(names, dir, "c.txt");
+    string x = at(names, dir, "x");
+    string sub = at(names, dir, "x/y/z");
+    string link = at(names, dir, "l");
+    string missing = at(names, dir, "missing");
+
+    // Writing, then reading back line by line.
+    File f @_ = File.create(a);
+    f.println("first");
+    f.write("second\r\nthird");
+    println("size ${f.size()} at ${f.position()} terminal ${f.isTerminal()}");
+    f.close();
+
+    File g @_ = File.open(a);
+    u8[..~] line = [];
+    while (string l : g.nextLine(line)) {
+        println("line '${l}' ${l.len}");
+    }
+    g.seek(6);
+    u8[..>] rest = [];
+    g.readAll(rest);
+    println("after seek: ${rest.len} bytes, at ${g.position()}");
+    g.seek(0);
+    u8[..>] some = [];
+    i64 n = g.read(some, 3);
+    println("read ${n}: ${some}, at ${g.position()}");
+    i64 more = g.read(some, 100);
+    i64 none @end = g.read(some, 100);
+    println("then ${more}, then ${none} ${end == status.END}");
+
+    // A copy of a closed File fails, even once a new file has its descriptor.
+    File copy = g;
+    g.close();
+    u8 twice = @g.close();
+    File other @_ = File.open(a);
+    u8 stale = @copy.readLine(line);
+    println("closed twice ${twice == status.BAD_HANDLE}, stale copy ${stale == status.BAD_HANDLE}");
+    other.close();
+
+    // Opening fails with a status.
+    File m @notFound = File.open(missing);
+    File e @exists = File.createNew(a);
+    println("open missing ${notFound == status.NOT_FOUND}, createNew existing ${exists == status.EXISTS}");
+
+    File ap @_ = File.append(a);
+    ap.print("!");
+    ap.close();
+    u8[..>] whole = [];
+    File.readAll(a, whole);
+    println("appended: ends with ${whole[whole.len - 2:]}");
+
+    // Whole files.
+    File.writeAll(b, "one\n");
+    File.appendAll(b, "two\n");
+    File.writeAll(b, "zero\n");
+    File.appendAll(b, "one\n");
+    u8[..>] both = [];
+    File.readAll(b, both);
+    print(both);
+    u8 noFile = @File.readAll(missing, both);
+    println("readAll missing ${noFile == status.NOT_FOUND}");
+
+    // The file system.
+    println("exists ${fs.exists(b)} ${fs.exists(sub)}");
+    fs.mkdirAll(sub);
+    u8 again = @fs.mkdirAll(sub);
+    u8 onFile = @fs.mkdirAll(b);
+    u8 dup = @fs.mkdir(sub);
+    println("mkdirAll again ${again}, over a file ${onFile == status.NOT_DIRECTORY}, mkdir existing ${dup == status.EXISTS}");
+    Stat sd @_ = fs.stat(sub);
+    Stat sf @_ = fs.stat(b);
+    println("dir ${sd.isDir} ${sd.isFile}, file ${sf.size} ${sf.isFile} ${sf.modified > 1600000000000000000}");
+    fs.chmod(b, 384);
+    Stat sm @_ = fs.stat(b);
+    println("mode ${sm.mode % 512}");
+    fs.symlink("b.txt", link);
+    u8[..>] target = [];
+    fs.readLink(link, target);
+    Stat sl @_ = fs.lstat(link);
+    Stat st @_ = fs.stat(link);
+    println("link -> ${target}, lstat ${sl.isLink}, stat ${st.isLink} ${st.isFile}");
+    fs.rename(b, c);
+    u8 gone = @fs.remove(b);
+    u8 full = @fs.remove(x);
+    Stat dangling @broken = fs.stat(link);
+    println("renamed ${fs.exists(c)} ${gone == status.NOT_FOUND}, not empty ${full == status.NOT_EMPTY}, dangling ${broken == status.NOT_FOUND}");
+
+    // Listing a directory, in sorted order.
+    Dir d @_ = Dir.open(dir);
+    u8[..>] dn = [];
+    string[..~] found = [];
+    while (DirEntry en : d.next(dn)) {
+        found +> en.name;
+    }
+    found.sort();
+    for (string fname : found) {
+        print("${fname} ");
+    }
+    println("");
+    d.close();
+    u8 dclosed = @d.close();
+    Dir nd @noDir = Dir.open(missing);
+    Dir fd @notDir = Dir.open(a);
+    println("dir closed twice ${dclosed == status.BAD_HANDLE}, missing ${noDir == status.NOT_FOUND}, a file ${notDir == status.NOT_DIRECTORY}");
+
+    // Paths.
+    println("${path.base("dir/file.tar.gz")} ${path.dir("dir/file.tar.gz")} ${path.ext("dir/file.tar.gz")} ${path.stem("dir/file.tar.gz")}");
+    println("${path.base("/")} ${path.dir("/a")} ${path.dir("a")} '${path.ext(".bashrc")}' ${path.base("a/b//")} ${path.dir("a/b//c")} ${path.isAbsolute("/x")} ${path.isAbsolute("x")}");
+    path.chdir(x);
+    u8[..>] here = [];
+    path.cwd(here);
+    println("cwd ends in /x ${path.base(here) == "x"}, relative ${fs.exists("y/z")}");
+}
+"##,
+        &[dir.to_str().unwrap()],
+    );
+    assert_eq!(
+        r.stdout,
+        "size 19 at 19 terminal false
+line 'first' 5
+line 'second' 6
+line 'third' 5
+after seek: 13 bytes, at 19
+read 3: fir, at 3
+then 16, then 0 true
+closed twice true, stale copy true
+open missing true, createNew existing true
+appended: ends with d!
+zero
+one
+readAll missing true
+exists true false
+mkdirAll again 0, over a file true, mkdir existing true
+dir true false, file 9 true true
+mode 384
+link -> b.txt, lstat true, stat false true
+renamed true true, not empty true, dangling true
+a.txt c.txt l x 
+dir closed twice true, missing true, a file true
+file.tar.gz dir .gz file.tar
+/ / . '' b a/b true false
+cwd ends in /x true, relative true
+",
+        "stderr: {}",
+        r.stderr
+    );
+    assert_eq!(r.code, 0);
+}
+
+/// zink.cli's Args (STDLIB §6.1): combined and attached letters, `--name=value`, `--`,
+/// counts, repeated options, rest values, the generated help, --version, and usage errors
+/// on stderr with exit status 2.
+#[test]
+fn zink_cli_arguments() {
+    let exe = build(
+        r##"import zink.cli.*;
+
+void main(string[.] args) {
+    Args cli = new Args("tool", "Does things to files.");
+    cli.version = "1.2";
+    cli.flag('v', "verbose", "say more; twice for even more");
+    cli.flag(0, "dry-run", "change nothing");
+    cli.option('o', "out", "FILE", "write here");
+    cli.option(0, "scale", "X", "a factor");
+    cli.positional("mode", "what to do");
+    cli.rest("files", "the files");
+    cli.parseOrExit(args);
+    f64 scale @bad = cli.getF64("scale", 1.5);
+    print("v=${cli.count("verbose")} dry=${cli.has("dry-run")} out=${cli.get("out", "-")} scale=${scale}/${bad} mode=${cli.get("mode", "?")} files:");
+    ArgIterator files = cli.restValues();
+    while (string f : files.next()) {
+        print(" ${f}");
+    }
+    print(" | out:");
+    ArgIterator outs = cli.getAll("out");
+    while (string o : outs.next()) {
+        print(" ${o}");
+    }
+    println("");
+}
+"##,
+    );
+    let out = |args: &[&str]| {
+        let r = exec(&exe, args);
+        (r.stdout, r.stderr, r.code)
+    };
+    assert_eq!(
+        out(&["--help"]).0,
+        "usage: tool [-v] [--dry-run] [-o FILE] [--scale X] [mode] [files...]
+
+Does things to files.
+
+  -v, --verbose     say more; twice for even more
+      --dry-run     change nothing
+  -o, --out FILE    write here
+      --scale X     a factor
+  -h, --help        show this help and exit
+      --version     show the version and exit
+  mode              what to do
+  files...          the files
+"
+    );
+    assert_eq!(out(&["--version"]), ("tool 1.2\n".into(), "".into(), 0));
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &["-vv", "-o", "out.txt", "run", "a", "b", "c"],
+            "v=2 dry=false out=out.txt scale=1.5/0 mode=run files: a b c | out: out.txt\n",
+        ),
+        (
+            &["-o", "x", "--out=y", "-oz", "go"],
+            "v=0 dry=false out=z scale=1.5/0 mode=go files: | out: x y z\n",
+        ),
+        (
+            &["--dry-run", "--scale=2.5", "go"],
+            "v=0 dry=true out=- scale=2.5/0 mode=go files: | out:\n",
+        ),
+        (
+            &["--scale", "x", "go"],
+            "v=0 dry=false out=- scale=0.0/22 mode=go files: | out:\n",
+        ),
+        (
+            &["run", "--", "-x", "--y"],
+            "v=0 dry=false out=- scale=1.5/0 mode=run files: -x --y | out:\n",
+        ),
+        (
+            &[],
+            "v=0 dry=false out=- scale=1.5/0 mode=? files: | out:\n",
+        ),
+    ];
+    for (args, expected) in cases {
+        assert_eq!(
+            out(args),
+            (expected.to_string(), "".into(), 0),
+            "{:?}",
+            args
+        );
+    }
+    let usage = "usage: tool [-v] [--dry-run] [-o FILE] [--scale X] [mode] [files...]\n";
+    for (args, problem) in [
+        (&["-x"][..], "unknown option -x"),
+        (&["--bogus"][..], "unknown option --bogus"),
+        (&["-o"][..], "this needs a value: -o"),
+        (&["--out"][..], "this needs a value: --out"),
+        (&["--dry-run=1"][..], "this takes no value: --dry-run"),
+    ] {
+        assert_eq!(
+            out(args),
+            ("".into(), format!("tool: {}\n{}", problem, usage), 2),
+            "{:?}",
+            args
+        );
+    }
+}
+
+/// selectNth against a full sort at random positions, with many repeats and with all
+/// equal; parsePrefix; compareNatural.
+#[test]
+fn select_parse_prefix_and_natural_order() {
+    prints(
+        r##"u64 seed = 3;
+
+i64 below(i64 n) {
+    seed = seed *% 6364136223846793005 +% 1442695040888963407;
+    return (i64) ((seed >> 33) % (u64) n);
+}
+
+void main() {
+    // selectNth against a full sort, at every position, with many repeats.
+    i64 bad = 0;
+    for (i64 round = 0; round < 40; round++) {
+        i64[..~] xs = [];
+        i64 n = 1 + below(50);
+        for (i64 i = 0; i < n; i++) { xs +> below(round % 2 == 0 ? 5 : 1000); }
+        i64[..~] sorted = [];
+        for (i64 x : xs) { sorted +> x; }
+        sorted.sort();
+        i64 k = below(n);
+        i64& got = xs.selectNth(k);
+        if (got != sorted[k]) { bad++; }
+        for (i64 i = 0; i < k; i++) { if (xs[i] > got) { bad++; } }
+        for (i64 i = k + 1; i < n; i++) { if (xs[i] < got) { bad++; } }
+    }
+    i64[..~] same = [];
+    for (i64 i = 0; i < 2000; i++) { same +> 7; }
+    i64 mid = same.selectNth(1000);
+    i64[..~] ys = [5, 1, 4, 2, 3];
+    i64 top = ys.selectNth(1, (i64 a, i64 b) => a > b);
+    println("selectNth mismatches ${bad}, all-equal ${mid}, second largest ${top}");
+
+    (f64 v, string rest) @e1 = f64.parsePrefix("3.25kg");
+    (i64 n2, string r2) @e2 = i64.parsePrefix("-42px");
+    (f64 v3, string r3) @e3 = f64.parsePrefix("abc");
+    (f64 v4, string r4) @e4 = f64.parsePrefix("1e5x 2.e");
+    println("parsePrefix ${v} '${rest}' ${e1} | ${n2} '${r2}' ${e2} | ${v3} '${r3}' ${e3} | ${v4} '${r4}' ${e4}");
+
+    println("natural ${"file2".compareNatural("file10")} ${"v1.9".compareNatural("v1.10")} ${"01".compareNatural("1")} ${"a".compareNatural("a")} ${"b10".compareNatural("b9")}");
+}
+"##,
+        "selectNth mismatches 0, all-equal 7, second largest 4
+parsePrefix 3.25 'kg' 0 | -42 'px' 0 | 0.0 'abc' 22 | 100000.0 'x 2.e' 0
+natural -1 -1 -1 0 1
+",
+    );
+}
+
+/// A diagnostic in a program that imports the library still points into its own file.
+#[test]
+fn diagnostics_beside_the_library_point_into_the_program() {
+    let text = "import zink.io.*;\n\nvoid main() {\n    i64 x = \"no\";\n}\n";
+    let file = SourceFile::new("prog.zn", text);
+    let (diags, c) = zink::compile_c(std::slice::from_ref(&file));
+    assert!(c.is_none());
+    let shown: Vec<String> = diags[0].iter().map(|d| render(&file, d)).collect();
+    assert_eq!(shown.len(), 1, "{:?}", shown);
+    assert!(shown[0].contains("prog.zn:4:13"), "{}", shown[0]);
+}
+
+/// Builds one of the examples.
+fn example(name: &str) -> std::path::PathBuf {
+    let path = format!("{}/../examples/{}.zn", env!("CARGO_MANIFEST_DIR"), name);
+    let file = SourceFile::new(path.clone(), std::fs::read_to_string(&path).unwrap());
+    let (diags, c) = zink::compile_c(std::slice::from_ref(&file));
+    let Some(c) = c else {
+        panic!(
+            "{} didn't compile: {:?}",
+            name,
+            diags[0]
+                .iter()
+                .map(|d| render(&file, d))
+                .collect::<Vec<_>>()
+        )
+    };
+    let exe = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("ex-{}", name));
+    zink::driver::compile(&c, &exe, false).unwrap();
+    exe
+}
+
+/// The examples that need zink.io and zink.cli: csvsort, sortlines, stats and dirwalk.
+#[test]
+fn library_examples_run() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("zink-examples");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("tree/sub")).unwrap();
+    let put = |name: &str, text: &str| {
+        let p = dir.join(name);
+        std::fs::write(&p, text).unwrap();
+        p.to_str().unwrap().to_string()
+    };
+    let csv = put("fruit.csv", "name,qty\npear,3\napple,10\nfig,7\n");
+    let lines = put(
+        "lines.txt",
+        "file10\nfile2\napple\n3 pears\n10 figs\nfile2\nBanana\n",
+    );
+    let nums = put("nums.txt", "4\n8\n15\n16\n23\n42\n8\n");
+    put("tree/a", "abc");
+    put("tree/sub/b", "hello");
+    let tree = dir.join("tree");
+    let tree = tree.to_str().unwrap();
+
+    let check = |exe: &std::path::Path, args: &[&str], expected: &str| {
+        let r = exec(exe, args);
+        assert_eq!(r.stdout, expected, "{:?}: {}", args, r.stderr);
+        assert_eq!(r.code, 0, "{:?}: {}", args, r.stderr);
+    };
+    let csvsort = example("csvsort");
+    check(&csvsort, &[&csv], "apple,10\nfig,7\nname,qty\npear,3\n");
+    check(
+        &csvsort,
+        &["-n", "-k", "2", &csv],
+        "name,qty\npear,3\nfig,7\napple,10\n",
+    );
+
+    let sortlines = example("sortlines");
+    let sorted = |args: &[&str]| {
+        let mut a = args.to_vec();
+        a.push(&lines);
+        exec(&sortlines, &a).stdout.replace('\n', "|")
+    };
+    assert_eq!(
+        sorted(&[]),
+        "10 figs|3 pears|Banana|apple|file10|file2|file2|"
+    );
+    assert_eq!(
+        sorted(&["-n"]),
+        "file10|file2|apple|file2|Banana|3 pears|10 figs|"
+    );
+    assert_eq!(
+        sorted(&["-V"]),
+        "3 pears|10 figs|Banana|apple|file2|file2|file10|"
+    );
+    assert_eq!(
+        sorted(&["-u", "-r"]),
+        "file2|file10|apple|Banana|3 pears|10 figs|"
+    );
+    assert_eq!(sorted(&["--top", "2"]), "10 figs|3 pears|");
+
+    check(
+        &example("stats"),
+        &[&nums],
+        "count   7\nmin     4.0\nmax     42.0\nmean    16.5714\nstddev  12.8823\nmedian  15.0\np90     30.60000000000001\np99     40.85999999999999\n",
+    );
+
+    check(
+        &example("dirwalk"),
+        &[tree],
+        &format!("           8  {t}\n           5  {t}/sub\n", t = tree),
+    );
+}
+
+/// The rest of zink.io's paths and file system: join, normalize, relative and absolute
+/// (lexical), resolve, copy keeping the mode, move, removeAll not following a link out of
+/// the tree, and temporary files and directories under $TMPDIR.
+#[test]
+fn zink_io_paths_and_file_system() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("zink-io-2");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let exe = build(
+        r##"import zink.io.*;
+
+string at(u8[..>]& buf, string dir, string name) {
+    i64 start = buf.len;
+    buf.append(dir);
+    buf +> '/';
+    buf.append(name);
+    return buf[start:];
+}
+
+void norm(string p) {
+    print("'${path.normalize(p)}' ");
+}
+
+void rel(string a, string b) {
+    u8[.] r @bad = path.relative(a, b);
+    print("${r}${bad != 0 ? "!" : ""} ");
+}
+
+void main(string[.] args) {
+    // Lexical paths.
+    println("${path.join("a", "b")} ${path.join("a/", "b")} ${path.join("a", "/b")} ${path.join("", "b")} ${path.join("a", "")}");
+    norm("a/./b/../c/");
+    norm("a/../..");
+    norm("/..");
+    norm("");
+    norm("//x//y/.");
+    norm("../../a/../b");
+    println("");
+    rel("a/b", "a/c/d");
+    rel("/x/y", "/x/y");
+    rel("/x/y", "/");
+    rel("a", "/b");
+    rel("../a", "b");
+    rel("../a", "../a/b");
+    println("");
+    u8[.] abs = path.absolute("x/../y");
+    println("absolute ends in /y ${path.base(abs) == "y"} ${path.isAbsolute(abs)}");
+
+    string dir = args[0];
+    u8[..>] names = [];
+    string tree = at(names, dir, "tree");
+    string deep = at(names, dir, "tree/a/b/c");
+    string f1 = at(names, dir, "tree/a/one");
+    string f2 = at(names, dir, "tree/a/b/c/two");
+    string ln = at(names, dir, "tree/link");
+    string outside = at(names, dir, "outside");
+    string kept = at(names, dir, "outside/kept");
+    string copied = at(names, dir, "copied");
+    string moved = at(names, dir, "moved");
+    @_ = fs.mkdirAll(deep);
+    @_ = fs.mkdirAll(outside);
+    @_ = File.writeAll(f1, "one");
+    @_ = File.writeAll(f2, "two!");
+    @_ = File.writeAll(kept, "keep");
+    @_ = fs.chmod(f1, 416);
+    @_ = fs.symlink(outside, ln);
+
+    // copy keeps the mode; move renames.
+    u8 c = @fs.copy(f1, copied);
+    Stat cs @_ = fs.stat(copied);
+    u8[..>] back = [];
+    @_ = File.readAll(copied, back);
+    u8 cd = @fs.copy(tree, copied);
+    println("copy ${c} '${back}' mode ${cs.mode % 512}, a directory ${cd == status.IS_DIRECTORY}");
+    u8 m = @fs.move(copied, moved);
+    println("move ${m} ${fs.exists(copied)} ${fs.exists(moved)}");
+
+    // resolve follows the link.
+    u8[.] real @_ = path.resolve(ln);
+    u8[.] realOut @_ = path.resolve(outside);
+    u8[.] none @nf = path.resolve(at(names, dir, "nope"));
+    println("resolve ${real == realOut} missing ${nf == status.NOT_FOUND} '${none}'");
+
+    // removeAll doesn't follow the link out of the tree.
+    u8 ra = @fs.removeAll(tree);
+    u8 again = @fs.removeAll(tree);
+    println("removeAll ${ra} ${fs.exists(tree)} kept ${fs.exists(kept)}, again ${again}");
+
+    // Temporary files and directories.
+    u8[..>] tp = [];
+    File t @te = fs.tempFile(tp);
+    @_ = t.write("temp");
+    @_ = t.close();
+    Stat ts @_ = fs.stat(tp);
+    u8[..>] td = [];
+    u8 tde = @fs.tempDir(td);
+    Stat ds @_ = fs.stat(td);
+    println("tempFile ${te} ${path.base(tp).startsWith("zink-")} ${ts.size} mode ${ts.mode % 512}, tempDir ${tde} ${ds.isDir} mode ${ds.mode % 512}");
+    @_ = fs.remove(tp);
+    @_ = fs.remove(td);
+}
+"##,
+    );
+    let out = Command::new(&exe)
+        .arg(&dir)
+        .env("TMPDIR", &dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "a/b a/b /b b a
+'a/c' '..' '/' '.' '/x/y' '../../b' 
+../c/d . ../.. ! ! b 
+absolute ends in /y true true
+copy 0 'one' mode 416, a directory true
+move 0 false true
+resolve true missing true ''
+removeAll 0 false kept true, again 0
+tempFile 0 true 4 mode 384, tempDir 0 true mode 448
+",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut left: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["moved", "outside"]);
+}
+
+/// A function's array result used as a temporary lasts to the end of its statement, even
+/// when the same function is called again in it (DESIGN §3.3).
+#[test]
+fn returned_arrays_as_temporaries() {
+    prints(
+        r##"u8[.] two(string a, string b) {
+    u8[..>] out = [];
+    out.append(a);
+    out.append(b);
+    return out;
+}
+
+void main() {
+    println("${two("a", "b")} ${two("c", "d")}");
+    bool same = two("x", "y") == two("z", "w");
+    println("${same}");
+    u8[.] k = two("k", "l");
+    println(k);
+}
+"##,
+        "ab cd\nfalse\nkl\n",
     );
 }

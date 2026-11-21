@@ -1,0 +1,170 @@
+package zink.io;
+
+// A file (STDLIB §4.1). It's a handle (DESIGN §6.4): copies share the file, and once one
+// copy closes it the others fail with BAD_HANDLE, even if the descriptor is reused.
+// Writes go straight to the file; `flush` has nothing to do.
+public class File {
+    private i64 h;
+
+    // The C layer: the runtime's zr_io functions (DESIGN §12.6).
+    private static extern("zr_io_open") i64 cOpen(string path, i32 how);
+    private static extern("zr_io_close") u8 cClose(i64 h);
+    private static extern("zr_io_write") u8 cWrite(i64 h, string bytes);
+    private static extern("zr_io_write_line") u8 cWriteLine(i64 h, string text);
+    private static extern("zr_io_read") i64 cRead(i64 h, u8[..>]& buf, i64 max);
+    private static extern("zr_io_read_line") u8 cReadLine(i64 h, u8[..>]& buf);
+    private static extern("zr_io_read_all") u8 cReadAll(i64 h, u8[..>]& buf);
+    private static extern("zr_io_info") i64 cInfo(i64 h, i32 what);
+    private static extern("zr_io_seek") u8 cSeek(i64 h, i64 pos);
+    private static extern("zr_io_sync") u8 cSync(i64 h);
+    private static extern("zr_io_read_path") u8 cReadPath(string path, u8[..>]& buf);
+    private static extern("zr_io_write_path") u8 cWritePath(string path, string bytes, i32 append);
+
+    private static File opened(string path, i32 how) {
+        i64 h = cOpen(path, how);
+        if (h < 0) {
+            return #(extern.errno()) new File(-1);
+        }
+        return new File(h);
+    }
+
+    // A File for a handle the runtime made, for fs.tempFile: the package's own, so a
+    // program can't make a File out of a number.
+    static File adopt(i64 h) {
+        return new File(h);
+    }
+
+    // For reading.
+    public static File open(string path) {
+        File f @err = opened(path, 0);
+        return #err f;
+    }
+
+    // For writing, created or truncated.
+    public static File create(string path) {
+        File f @err = opened(path, 1);
+        return #err f;
+    }
+
+    // For writing at the end, created if missing.
+    public static File append(string path) {
+        File f @err = opened(path, 2);
+        return #err f;
+    }
+
+    // For writing; it must not exist yet, so it works as a lock file.
+    public static File createNew(string path) {
+        File f @err = opened(path, 3);
+        return #err f;
+    }
+
+    // For reading and writing, without truncating.
+    public static File update(string path) {
+        File f @err = opened(path, 4);
+        return #err f;
+    }
+
+    // Appends up to max bytes to buf, and returns how many: END at the end of the file.
+    public i64 read(u8[..>]& buf, i64 max) {
+        i64 n = cRead(h, buf, max);
+        if (n < 0) {
+            return #(extern.errno()) 0;
+        }
+        if (n == 0 && max > 0) {
+            return #status.END 0;
+        }
+        return n;
+    }
+
+    // Appends one line to buf, without its \n or \r\n: END when nothing was left.
+    public void readLine(u8[..>]& buf) {
+        u8 err = cReadLine(h, buf);
+        return #err;
+    }
+
+    // Clears buf, reads one line into it, and gives a view of it: END as readLine.
+    public string nextLine(u8[..~]& buf) {
+        buf.clear();
+        u8 err = cReadLine(h, buf);
+        return #err buf;
+    }
+
+    // Appends the rest of the file to buf.
+    public void readAll(u8[..>]& buf) {
+        u8 err = cReadAll(h, buf);
+        return #err;
+    }
+
+    public void write(string bytes) {
+        u8 err = cWrite(h, bytes);
+        return #err;
+    }
+
+    public void print(string text) {
+        u8 err = cWrite(h, text);
+        return #err;
+    }
+
+    public void println(string text) {
+        u8 err = cWriteLine(h, text);
+        return #err;
+    }
+
+    public void flush() {}
+
+    // Writes what the system holds for the file to the disk.
+    public void sync() {
+        u8 err = cSync(h);
+        return #err;
+    }
+
+    // BAD_HANDLE when it was already closed.
+    public void close() {
+        u8 err = cClose(h);
+        return #err;
+    }
+
+    // From the start.
+    public void seek(i64 pos) {
+        u8 err = cSeek(h, pos);
+        return #err;
+    }
+
+    public i64 position() {
+        i64 at = cInfo(h, 2);
+        if (at < 0) {
+            return #(extern.errno()) 0;
+        }
+        return at;
+    }
+
+    public i64 size() {
+        i64 n = cInfo(h, 0);
+        if (n < 0) {
+            return #(extern.errno()) 0;
+        }
+        return n;
+    }
+
+    public bool isTerminal() {
+        return cInfo(h, 1) == 1;
+    }
+
+    // Opens, reads to the end and closes.
+    public static void readAll(string path, u8[..>]& buf) {
+        u8 err = cReadPath(path, buf);
+        return #err;
+    }
+
+    // Replaces the file atomically: another process sees the old contents or the new,
+    // never half. A symbolic link is followed; the old file's permissions are kept.
+    public static void writeAll(string path, string bytes) {
+        u8 err = cWritePath(path, bytes, 0);
+        return #err;
+    }
+
+    public static void appendAll(string path, string bytes) {
+        u8 err = cWritePath(path, bytes, 1);
+        return #err;
+    }
+}

@@ -1,0 +1,197 @@
+package zink.io;
+
+// File system operations (STDLIB §4.4). The C layer is the runtime's zr_fs functions.
+public class fs {
+    private static extern("zr_fs_stat") u8 cStat(string path, i32 follow, i64[:]& out);
+    private static extern("zr_fs_op") u8 cOp(i32 op, string a, string b, i64 mode);
+    private static extern("zr_fs_read_into") u8 cReadInto(string path, u8[..>]& buf, i32 what);
+    private static extern("zr_fs_copy") u8 cCopy(string from, string to);
+    private static extern("zr_fs_temp") i64 cTemp(u8[..>]& path, i32 dir);
+
+    public static bool exists(string path) {
+        return cOp(5, path, "", 0) == 1;
+    }
+
+    // Follows symbolic links. NOT_FOUND, PERMISSION.
+    public static Stat stat(string path) {
+        Stat s @err = statOf(path, 1);
+        return #err s;
+    }
+
+    // Doesn't follow them.
+    public static Stat lstat(string path) {
+        Stat s @err = statOf(path, 0);
+        return #err s;
+    }
+
+    private static Stat statOf(string path, i32 follow) {
+        i64[.7] o = [0, 0, 0, 0, 0, 0, 0];
+        u8 err = cStat(path, follow, o);
+        if (err != 0) {
+            return #err new Stat(0, 0, 0, 0, 0, false, false, false);
+        }
+        i64 modified = o[1] * 1000000000 + o[2];
+        return new Stat(o[0], modified, (u32) o[3], (u32) o[4], (u32) o[5], o[6] == 1, o[6] == 2, o[6] == 3);
+    }
+
+    // A file, a link or an empty directory. NOT_FOUND, NOT_EMPTY, PERMISSION.
+    public static void remove(string path) {
+        u8 err = cOp(0, path, "", 0);
+        return #err;
+    }
+
+    // Recursively, never following links: a link to a directory goes, not what it points
+    // at. A missing path is success. Written with a stack of directories, as dirwalk is.
+    public static void removeAll(string root) {
+        Stat s @err = statOf(root, 0);
+        if (err == status.NOT_FOUND) {
+            return;
+        }
+        if (err != 0) {
+            return #err;
+        }
+        if (!s.isDir) {
+            u8 r = cOp(0, root, "", 0);
+            return #r;
+        }
+        u8[..>] paths = [];         // every path built; it only grows, so the views stay valid
+        string[..>] dirs = [];      // every directory, parents before their children
+        string[..~] todo = [];
+        todo +> root;
+        while (string d : todo ->) {
+            dirs +> d;
+            Dir dir @openErr = Dir.open(d);
+            if (openErr != 0) {
+                return #openErr;
+            }
+            defer @_ = dir.close();
+            u8[..>] names = [];
+            while (DirEntry e : dir.next(names)) {
+                i64 start = paths.len;
+                paths.append(d);
+                paths +> '/';
+                paths.append(e.name);
+                string full = paths[start:];
+                if (e.isDir) {
+                    todo +> full;
+                } else {
+                    u8 r = cOp(0, full, "", 0);
+                    if (r != 0 && r != status.NOT_FOUND) {
+                        return #r;
+                    }
+                }
+            }
+        }
+        for (i64 i = dirs.len - 1; i >= 0; i--) {
+            u8 r = cOp(0, dirs[i], "", 0);
+            if (r != 0 && r != status.NOT_FOUND) {
+                return #r;
+            }
+        }
+    }
+
+    // The contents and the mode, with copy_file_range where it can. IS_DIRECTORY for one.
+    public static void copy(string from, string to) {
+        u8 err = cCopy(from, to);
+        return #err;
+    }
+
+    // rename, or across file systems, a copy and a remove. A link moves as a link; a
+    // directory across file systems still fails with CROSS_DEVICE.
+    public static void move(string from, string to) {
+        u8 err = cOp(1, from, to, 0);
+        if (err != status.CROSS_DEVICE) {
+            return #err;
+        }
+        Stat s @serr = statOf(from, 0);
+        if (serr != 0) {
+            return #serr;
+        }
+        if (s.isDir) {
+            return #err;
+        }
+        if (s.isLink) {
+            u8[..>] target = [];
+            u8 r = cReadInto(from, target, 0);
+            if (r == 0) {
+                r = cOp(4, target, to, 0);
+            }
+            if (r != 0) {
+                return #r;
+            }
+        } else {
+            u8 c = cCopy(from, to);
+            if (c != 0) {
+                return #c;
+            }
+        }
+        u8 gone = cOp(0, from, "", 0);
+        return #gone;
+    }
+
+    // A new file in $TMPDIR, or /tmp, with a random name and mode 0600; its path is appended
+    // to path. Removing it is the caller's job: `defer @_ = fs.remove(tmp);`.
+    public static File tempFile(u8[..>]& path) {
+        i64 h = cTemp(path, 0);
+        if (h < 0) {
+            return #(extern.errno()) File.adopt(-1);
+        }
+        return File.adopt(h);
+    }
+
+    // A new directory there, mode 0700.
+    public static void tempDir(u8[..>]& path) {
+        i64 r = cTemp(path, 1);
+        if (r < 0) {
+            return #(extern.errno());
+        }
+    }
+
+    // Atomic; CROSS_DEVICE across file systems.
+    public static void rename(string from, string to) {
+        u8 err = cOp(1, from, to, 0);
+        return #err;
+    }
+
+    // EXISTS, NOT_FOUND for a missing parent. The mode is 0777 less the umask.
+    public static void mkdir(string path) {
+        u8 err = cOp(2, path, "", 511);
+        return #err;
+    }
+
+    // Creates missing parents too; an existing directory is success.
+    public static void mkdirAll(string path) {
+        for (i64 i = 1; i <= path.len; i++) {
+            if (i == path.len || path[i] == '/') {
+                string prefix = path[0:i];
+                u8 err = cOp(2, prefix, "", 511);
+                if (err != 0 && err != status.EXISTS) {
+                    return #err;
+                }
+            }
+        }
+        Stat s @err = statOf(path, 1);
+        if (err != 0) {
+            return #err;
+        }
+        if (!s.isDir) {
+            return #status.NOT_DIRECTORY;
+        }
+    }
+
+    public static void chmod(string path, u32 mode) {
+        u8 err = cOp(3, path, "", mode);
+        return #err;
+    }
+
+    public static void symlink(string target, string link) {
+        u8 err = cOp(4, target, link, 0);
+        return #err;
+    }
+
+    // Appends where the link points to buf.
+    public static void readLink(string path, u8[..>]& buf) {
+        u8 err = cReadInto(path, buf, 0);
+        return #err;
+    }
+}

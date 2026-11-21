@@ -25,10 +25,14 @@ impl Span {
 }
 
 /// A source file's text, with line starts for turning spans into lines and columns.
+#[derive(Clone)]
 pub struct SourceFile {
     pub name: String,
     pub text: String,
     line_starts: Vec<usize>,
+    /// Where its spans start: each file of a program gets its own range, so a span names
+    /// one place in the whole program, and facts keyed by spans never collide.
+    pub base: u32,
 }
 
 impl SourceFile {
@@ -44,12 +48,15 @@ impl SourceFile {
             name: name.into(),
             text,
             line_starts,
+            base: 0,
         }
     }
 
-    /// 1-based line and column of a byte offset. Columns count characters, not bytes.
+    /// 1-based line and column of a span's offset. Columns count characters, not bytes.
     pub fn line_col(&self, offset: usize) -> (usize, usize) {
-        let offset = offset.min(self.text.len());
+        let offset = offset
+            .saturating_sub(self.base as usize)
+            .min(self.text.len());
         let line = match self.line_starts.binary_search(&offset) {
             Ok(i) => i,
             Err(i) => i - 1,

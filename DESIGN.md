@@ -590,6 +590,7 @@ first.heavier(2.5);
   - **`this` can't be used until every field is assigned**, except to assign fields. Calling a method on it, passing it or storing it before then is a compile error, since the method could read a field that isn't set yet.
   - **Locals follow the same rule**: a local declared without an initializer can't be read until every path has assigned it.
 - **Default constructor** (Decided): a class that declares no constructor gets one. It takes, in declaration order, every field that has no initializer and isn't an editable array, a `hashmap`, a `hashset` or a `pool`, and assigns each one.
+  - **It is as visible as the least visible field it sets** (§6.1): private when one of them is, package-private when one of them is. So `File`, whose handle is private, can't be made from a number with `new File(5)`; it comes from `File.open` and the other static functions.
   ```
   class Row { string line; string key; f64 num; }
   class Options { bool numeric = false; i64 column = 0; string path = ""; }
@@ -1353,7 +1354,7 @@ Programs compile to native machine code, through C (§12.5), so standalone CLI t
 ### 12.2 The runtime is a library
 A small C static library linked into every program. It holds:
 - the data-stack reservations;
-- built-ins: formatting, I/O, and the standard library's core;
+- built-ins: formatting, I/O, and the C layer the standard library is written on (§12.7);
 - the host API.
 
 There is no allocator, no counting and no collector. With dead-code elimination and a static build it is tens of KB.
@@ -1410,6 +1411,13 @@ writeBytes(1, msg, (u64) msg.len);
 - **Reading headers needs clang**, which lists what a header declares; the program itself is then built with whichever C compiler §14.2 finds, which includes the headers as written.
 - **The C side isn't checked.** A declaration that gets a pointer's meaning wrong, or C that keeps a pointer past the call, can break the reference rules. Explicit declarations belong in library and binding packages, which wrap them in checked Zinkite APIs (`STDLIB.md` §10.6).
 - **Zinkite's output goes through C's `stdout`** (Decided), so text printed by Zinkite and by C code it calls comes out in the order it was written, on a terminal and through pipes alike. stdio buffers it by lines on a terminal and in 64 KB blocks otherwise; stderr is unbuffered, and stdout is flushed before anything goes to stderr. On glibc, Zinkite writes into the block buffer directly, as glibc's own `putc_unlocked` does, so output costs what a private buffer would.
+
+### 12.7 The standard library is Zinkite (Decided)
+- **The library's packages are Zinkite source** inside the `zink` binary (`compiler/lib/zink/`), checked and compiled with the program like its own files. A program gets the packages its files import, and the ones those import.
+- **An error in a library file is a bug in zink**, reported on the program's first file with the library file and line, since there's no file of the program's to point at. The library's warnings aren't shown.
+- **Its C layer is the runtime's `zr_` functions**, declared as explicit `extern`s (§12.6) with the runtime's C name, such as `extern("zr_io_open") i64 cOpen(string path, i32 how);`. Unlike C from a header, they take Zinkite's representations as they are: a `string` as a slice with no NUL copy, and a growable array by reference, so the runtime appends to it. No prototype is written, since the runtime defines them.
+- **Only files in `zink.*` packages may declare them**, and only the library's own files may declare a `zink.*` package (§8.4). A program that wants a C function declares it under the C function's own name.
+- **Handles stay handles.** A `File` or `Dir` holds a private 64-bit handle: the descriptor, and a generation that closing bumps. A copy of a closed `File` fails with `BAD_HANDLE` even after the descriptor is reused (§6.4), and since the handle is private, a program can't make one from a number.
 
 ---
 

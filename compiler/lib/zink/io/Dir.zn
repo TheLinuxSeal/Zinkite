@@ -1,0 +1,45 @@
+package zink.io;
+
+// One entry of a directory. The name is a view into the array next() appended it to.
+public class DirEntry {
+    public string name;
+    public bool isDir;
+    public bool isLink;
+    public i64 size;
+}
+
+// An open directory (STDLIB §4.2): a handle, closed as a File is.
+public class Dir {
+    private i64 h;
+
+    private static extern("zr_dir_open") i64 cOpen(string path);
+    private static extern("zr_dir_next") u8 cNext(i64 h, u8[..>]& names, i64[:]& out);
+    private static extern("zr_dir_close") u8 cClose(i64 h);
+
+    // NOT_FOUND, PERMISSION, NOT_DIRECTORY.
+    public static Dir open(string path) {
+        i64 h = cOpen(path);
+        if (h < 0) {
+            return #(extern.errno()) new Dir(-1);
+        }
+        return new Dir(h);
+    }
+
+    // The next entry, with its name appended to names; . and .. are skipped. END after the
+    // last. The order is the file system's.
+    public DirEntry next(u8[..>]& names) {
+        i64 start = names.len;
+        i64[.3] o = [0, 0, 0];
+        u8 err = cNext(h, names, o);
+        if (err != 0) {
+            return #err new DirEntry("", false, false, 0);
+        }
+        return new DirEntry(names[start:], o[0] == 1, o[1] == 1, o[2]);
+    }
+
+    // BAD_HANDLE when it was already closed.
+    public void close() {
+        u8 err = cClose(h);
+        return #err;
+    }
+}
