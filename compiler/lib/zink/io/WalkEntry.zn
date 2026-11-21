@@ -1,0 +1,14 @@
+package zink.io;
+
+// One entry of a walk (STDLIB §4.3). `path` and `name` are views into the walker's path
+// buffer, valid until its next step.
+public class WalkEntry {
+    public string path;
+    public string name;
+    public i64 depth;
+    public bool isDir;
+    public bool isLink;
+    public i64 size;
+    // Set for a directory that couldn't be read, which isn't descended into.
+    public u8 err;
+}

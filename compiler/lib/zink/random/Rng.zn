@@ -1,0 +1,83 @@
+package zink.random;
+
+// A random number generator: xoshiro256** (Blackman and Vigna), 32 bytes, fast, with good
+// statistics (STDLIB §8.2). Not for secrets: random.secure* is.
+public class Rng {
+    private u64 s0;
+    private u64 s1;
+    private u64 s2;
+    private u64 s3;
+
+    // The state from one seed, through SplitMix64, as the authors recommend.
+    static Rng ofSeed(u64 seed) {
+        u64 x = seed;
+        u64 a = mix(x);
+        x = x +% 0x9E3779B97F4A7C15;
+        u64 b = mix(x);
+        x = x +% 0x9E3779B97F4A7C15;
+        u64 c = mix(x);
+        x = x +% 0x9E3779B97F4A7C15;
+        u64 d = mix(x);
+        return new Rng(a, b, c, d);
+    }
+
+    // SplitMix64's output for the state after `x` was stepped.
+    private static u64 mix(u64 x) {
+        u64 z = x +% 0x9E3779B97F4A7C15;
+        z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
+        z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
+        return z ^ (z >> 31);
+    }
+
+    public mut u64 nextU64() {
+        u64 result = (s1 *% 5).rotateLeft(7) *% 9;
+        u64 t = s1 << 17;
+        s2 = s2 ^ s0;
+        s3 = s3 ^ s1;
+        s1 = s1 ^ s2;
+        s0 = s0 ^ s3;
+        s2 = s2 ^ t;
+        s3 = s3.rotateLeft(45);
+        return result;
+    }
+
+    // In [0, 1), from the top 53 bits.
+    public mut f64 nextF64() {
+        return (f64) (nextU64() >> 11) * 1.1102230246251565e-16;
+    }
+
+    // In [lo, hi), unbiased (Lemire's method). lo >= hi is a bug.
+    public mut <T implements int> T range(T lo, T hi) {
+        if (lo >= hi) {
+            fail("range: lo must be below hi");
+        }
+        // The span and the result in wrapping u128, which is right for every integer type.
+        u128 span = (u128%) hi -% (u128%) lo;
+        u128 off = 0;
+        if (span <= 18446744073709551615) {
+            u128 m = (u128) nextU64() * span;
+            u128 low = m & 18446744073709551615;
+            if (low < span) {
+                u128 floor = (18446744073709551616 - span) % span;
+                while (low < floor) {
+                    m = (u128) nextU64() * span;
+                    low = m & 18446744073709551615;
+                }
+            }
+            off = m >> 64;
+        } else {
+            // A span past 64 bits: whole draws below the next power of two, until one fits.
+            i64 bits = 128 - span.leadingZeros();
+            u128 mask = bits >= 128 ? 340282366920938463463374607431768211455 : ((u128) 1 << bits) - 1;
+            off = span;
+            while (off >= span) {
+                off = (((u128) nextU64() << 64) | (u128) nextU64()) & mask;
+            }
+        }
+        return (T%) ((u128%) lo +% off);
+    }
+
+    public mut bool chance(f64 p) {
+        return nextF64() < p;
+    }
+}

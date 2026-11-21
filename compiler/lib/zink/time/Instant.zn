@@ -1,0 +1,14 @@
+package zink.time;
+
+// A point on the monotonic clock, for measuring: it never goes backwards (STDLIB §5.3).
+public class Instant {
+    private i64 nanos;
+
+    static Instant at(i64 nanos) { return new Instant(nanos); }
+
+    // Since this instant.
+    public Duration elapsed() { return new Duration(time.monotonicNanos() - nanos); }
+
+    // From `earlier` to this instant.
+    public Duration since(Instant earlier) { return new Duration(nanos - earlier.nanos); }
+}

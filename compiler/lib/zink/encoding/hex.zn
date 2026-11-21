@@ -1,0 +1,27 @@
+package zink.encoding;
+
+// Hex text (STDLIB §8.4). Encoding is `bytes.hex()`, on any u8 array or string.
+public class hex {
+    // Appends the bytes of hex text to out. INVALID for an odd length or a non-hex digit.
+    public static void decode(string text, u8[..>]& out) {
+        if (text.len % 2 != 0) {
+            return #status.INVALID;
+        }
+        for (i64 i = 0; i < text.len; i += 2) {
+            i64 a = digit(text[i]);
+            i64 b = digit(text[i + 1]);
+            if (a < 0 || b < 0) {
+                return #status.INVALID;
+            }
+            out +> (u8) (a * 16 + b);
+        }
+    }
+
+    // 0..15, or -1.
+    static i64 digit(u8 c) {
+        if (c >= '0' && c <= '9') { return (i64) (c - '0'); }
+        if (c >= 'a' && c <= 'f') { return (i64) (c - 'a') + 10; }
+        if (c >= 'A' && c <= 'F') { return (i64) (c - 'A') + 10; }
+        return -1;
+    }
+}

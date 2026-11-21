@@ -1,0 +1,64 @@
+package zink.time;
+
+// A length of time, in nanoseconds (STDLIB §5.3). An overflow stops the program.
+public class Duration {
+    public i64 nanos;
+
+    public static Duration ns(i64 n) { return new Duration(n); }
+    public static Duration us(i64 n) { return new Duration(n * 1000); }
+    public static Duration ms(i64 n) { return new Duration(n * 1000000); }
+    public static Duration seconds(i64 n) { return new Duration(n * 1000000000); }
+    public static Duration minutes(i64 n) { return new Duration(n * 60000000000); }
+    public static Duration hours(i64 n) { return new Duration(n * 3600000000000); }
+
+    public i64 toMs() { return nanos / 1000000; }
+    public f64 toSeconds() { return (f64) nanos / 1000000000.0; }
+    public Duration plus(Duration other) { return new Duration(nanos + other.nanos); }
+    public Duration minus(Duration other) { return new Duration(nanos - other.nanos); }
+
+    // For people: "850ns", "1.5us", "350ms", "1.25s", "5m07s", "2h03m".
+    public u8[..~24] human() {
+        string sign = nanos < 0 ? "-" : "";
+        // i64.MIN has no positive; a nanosecond off is invisible at that size.
+        i64 n = nanos < 0 ? (nanos == -9223372036854775807 - 1 ? 9223372036854775807 : -nanos) : nanos;
+        if (n < 1000) {
+            u8[..~24] out = "${sign}${n}ns";
+            return out;
+        }
+        if (n < 1000000) {
+            u8[..~24] out = "${sign}${decimal(n, 1000)}us";
+            return out;
+        }
+        if (n < 1000000000) {
+            u8[..~24] out = "${sign}${decimal(n, 1000000)}ms";
+            return out;
+        }
+        i64 s = n / 1000000000;
+        if (s < 60) {
+            u8[..~24] out = "${sign}${decimal(n, 1000000000)}s";
+            return out;
+        }
+        if (s < 3600) {
+            u8[..~24] out = "${sign}${s / 60}m${(s % 60).zeroPad(2)}s";
+            return out;
+        }
+        u8[..~24] out = "${sign}${s / 3600}h${((s / 60) % 60).zeroPad(2)}m";
+        return out;
+    }
+
+    // n / unit with two decimals at most, trailing zeros dropped: 1.25, 1.5, 3.
+    private static u8[..~24] decimal(i64 n, i64 unit) {
+        i64 whole = n / unit;
+        i64 centi = (n % unit) / (unit / 100);
+        if (centi == 0) {
+            u8[..~24] out = "${whole}";
+            return out;
+        }
+        if (centi % 10 == 0) {
+            u8[..~24] out = "${whole}.${centi / 10}";
+            return out;
+        }
+        u8[..~24] out = "${whole}.${centi.zeroPad(2)}";
+        return out;
+    }
+}

@@ -1,0 +1,109 @@
+package zink.os;
+
+import zink.time.*;
+
+// A program to run, set up step by step (STDLIB §5.1). Its arguments and environment
+// changes share its one growable field: each a run of bytes ended by a NUL, which no
+// argument can hold; an environment change starts with 1 (set) or 2 (unset).
+public class Command {
+    private string program;
+    // Its working directory; "" keeps this one's. A view: what it views must outlive the command.
+    public string cwd = "";
+    // Fed to its stdin; when "", stdin is inherited.
+    public string input = "";
+    // After this it's killed, and the call fails with TIMEOUT; 0 for no limit.
+    public Duration timeout = new Duration(0);
+    private u8[..>] text = [];
+
+    public new(string program) {
+        this.program = program;
+    }
+
+    public mut void arg(string a) {
+        text.append(a);
+        text +> 0;
+    }
+
+    public mut void args(string[:] all) {
+        for (string a : all) {
+            arg(a);
+        }
+    }
+
+    public mut void setEnv(string name, string value) {
+        text +> 1;
+        text.append(name);
+        text +> '=';
+        text.append(value);
+        text +> 0;
+    }
+
+    public mut void unsetEnv(string name) {
+        text +> 2;
+        text.append(name);
+        text +> 0;
+    }
+
+    // stdout and stderr inherited.
+    public Exit run() {
+        u8[..>] out = [];
+        u8[..>] errs = [];
+        Exit e @st = go(out, errs, 0);
+        return #st e;
+    }
+
+    // stdout appended to out.
+    public Exit output(u8[..>]& out) {
+        u8[..>] errs = [];
+        Exit e @st = go(out, errs, 1);
+        return #st e;
+    }
+
+    // stdout and stderr captured separately.
+    public Exit outputBoth(u8[..>]& out, u8[..>]& errs) {
+        Exit e @st = go(out, errs, 3);
+        return #st e;
+    }
+
+    // Runs alongside this program, with its stdin, stdout and stderr; input and timeout
+    // don't apply.
+    public Child spawn() {
+        string[..>] argv = [];
+        string[..>] envs = [];
+        split(argv, envs);
+        i64 pid = process.cSpawn(argv, envs, cwd);
+        if (pid < 0) {
+            return #(extern.errno()) Child.of(0);
+        }
+        return Child.of(pid);
+    }
+
+    private Exit go(u8[..>]& out, u8[..>]& errs, i32 capture) {
+        string[..>] argv = [];
+        string[..>] envs = [];
+        split(argv, envs);
+        i64[.2] r = [0, 0];
+        i32 feed = input.len > 0 ? 1 : 0;
+        u8 st = process.cRun(argv, envs, cwd, input, feed, out, errs, capture, timeout.nanos, r);
+        return #st process.exit(r);
+    }
+
+    // The program and its arguments, and the environment changes, as views into text.
+    private void split(string[..>]& argv, string[..>]& envs) {
+        argv +> program;
+        i64 start = 0;
+        for (i64 i = 0; i < text.len; i++) {
+            if (text[i] == 0) {
+                string item = text[start:i];
+                if (item.len > 0 && item[0] == 1) {
+                    envs +> item[1:];
+                } else if (item.len > 0 && item[0] == 2) {
+                    envs +> item[1:];
+                } else {
+                    argv +> item;
+                }
+                start = i + 1;
+            }
+        }
+    }
+}

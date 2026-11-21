@@ -30,7 +30,11 @@ lib! {
     "zink.io", "zink/io/path.zn";
     "zink.io", "zink/io/Stat.zn";
     "zink.io", "zink/io/Dir.zn";
+    "zink.io", "zink/io/WalkEntry.zn";
+    "zink.io", "zink/io/Walker.zn";
     "zink.cli", "zink/cli/Args.zn";
+    "zink.cli", "zink/cli/Colors.zn";
+    "zink.cli", "zink/cli/ansi.zn";
     "zink.lang", "zink/lang/Iterator.zn";
     "zink.lang", "zink/lang/LineIterator.zn";
     "zink.lang", "zink/lang/WordIterator.zn";
@@ -38,6 +42,29 @@ lib! {
     "zink.lang", "zink/lang/CodePointIterator.zn";
     "zink.lang", "zink/lang/ChunkIterator.zn";
     "zink.lang", "zink/lang/WindowIterator.zn";
+    "zink.lang", "zink/lang/env.zn";
+    "zink.lang", "zink/lang/EnvVar.zn";
+    "zink.lang", "zink/lang/EnvIterator.zn";
+    "zink.time", "zink/time/time.zn";
+    "zink.time", "zink/time/Duration.zn";
+    "zink.time", "zink/time/Instant.zn";
+    "zink.time", "zink/time/Timestamp.zn";
+    "zink.time", "zink/time/DateTime.zn";
+    "zink.os", "zink/os/Exit.zn";
+    "zink.os", "zink/os/process.zn";
+    "zink.os", "zink/os/Child.zn";
+    "zink.os", "zink/os/Command.zn";
+    "zink.os", "zink/os/term.zn";
+    "zink.random", "zink/random/Rng.zn";
+    "zink.random", "zink/random/random.zn";
+    "zink.hash", "zink/hash/hash.zn";
+    "zink.hash", "zink/hash/Sha256.zn";
+    "zink.hash", "zink/hash/Crc32.zn";
+    "zink.encoding", "zink/encoding/hex.zn";
+    "zink.encoding", "zink/encoding/base64.zn";
+    "zink.csv", "zink/csv/ParseError.zn";
+    "zink.csv", "zink/csv/CsvReader.zn";
+    "zink.csv", "zink/csv/CsvWriter.zn";
 }
 
 /// `zink` and `zink.*`, which only the library's own files may declare.

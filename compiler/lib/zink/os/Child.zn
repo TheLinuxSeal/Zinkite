@@ -1,0 +1,27 @@
+package zink.os;
+
+// A program running alongside this one (STDLIB §5.1).
+public class Child {
+    private i64 pid;
+
+    static Child of(i64 pid) { return new Child(pid); }
+
+    // Waits for it to end.
+    public Exit wait() {
+        i64[.2] r = [0, 0];
+        u8 st = process.cWait(pid, r);
+        return #st process.exit(r);
+    }
+
+    // SIGTERM.
+    public void kill() {
+        u8 st = process.cKill(pid, 15);
+        return #st;
+    }
+
+    // SIGKILL.
+    public void killNow() {
+        u8 st = process.cKill(pid, 9);
+        return #st;
+    }
+}

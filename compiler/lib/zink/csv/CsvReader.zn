@@ -1,0 +1,134 @@
+package zink.csv;
+
+// CSV records (RFC 4180, STDLIB §9.1). Quoted fields may hold the separator and line
+// breaks; lines end in \n or \r\n; a UTF-8 byte-order mark at the start is skipped. A field
+// is a view into the input whenever it can be; one with doubled quotes is decoded into the
+// `strings` the caller passes. A blank line is a record with no fields, as Python reads it.
+public class CsvReader {
+    public string input;
+    public u8 separator = ',';
+    public u8 quote = '"';
+    // Every row must have as many fields as the first.
+    public bool strict = false;
+    i64 at = 0;
+    i64 line = 1;
+    i64 lineStart = 0;
+    i64 width = -1;
+    u8 errCode = 0;
+    i64 errLine = 0;
+    i64 errColumn = 0;
+    string errMessage = "";
+
+    public new(string input) {
+        this.input = input;
+        if (input.startsWith("\u{feff}")) {
+            at = 3;
+            lineStart = 3;
+        }
+    }
+
+    // Clears fields and appends one per field of the next record. END after the last;
+    // INVALID for a quote never closed, text after a closing quote, or in strict mode a row
+    // of another width, which error() describes.
+    public mut void next(string[..~]& fields, u8[..>]& strings) {
+        fields.clear();
+        if (at >= input.len) {
+            return #status.END;
+        }
+        // A blank line.
+        if (input[at] == '\n' || (input[at] == '\r' && at + 1 < input.len && input[at + 1] == '\n')) {
+            at += input[at] == '\r' ? 2 : 1;
+            newLine(at);
+            return;
+        }
+        while (true) {
+            if (at < input.len && input[at] == quote) {
+                i64 open = at;
+                i64 openLine = line;
+                i64 openCol = at - lineStart + 1;
+                i64 i = at + 1;
+                bool doubled = false;
+                bool closed = false;
+                while (i < input.len) {
+                    u8 c = input[i];
+                    if (c == quote) {
+                        if (i + 1 < input.len && input[i + 1] == quote) {
+                            doubled = true;
+                            i += 2;
+                            continue;
+                        }
+                        closed = true;
+                        break;
+                    }
+                    if (c == '\n') {
+                        newLine(i + 1);
+                    }
+                    i++;
+                }
+                if (!closed) {
+                    fail(openLine, openCol, "this quote is never closed");
+                    return #status.INVALID;
+                }
+                if (doubled) {
+                    i64 start = strings.len;
+                    i64 k = open + 1;
+                    while (k < i) {
+                        strings +> input[k];
+                        k += input[k] == quote ? 2 : 1;
+                    }
+                    fields +> strings[start:];
+                } else {
+                    fields +> input[open + 1:i];
+                }
+                at = i + 1;
+                if (at < input.len && input[at] != separator && input[at] != '\n'
+                    && !(input[at] == '\r' && at + 1 < input.len && input[at + 1] == '\n')) {
+                    fail(line, at - lineStart + 1, "text after a closing quote");
+                    return #status.INVALID;
+                }
+            } else {
+                i64 start = at;
+                while (at < input.len && input[at] != separator && input[at] != '\n'
+                    && !(input[at] == '\r' && at + 1 < input.len && input[at + 1] == '\n')) {
+                    at++;
+                }
+                fields +> input[start:at];
+            }
+            // After a field: another, the end of the line, or the end of the input.
+            if (at < input.len && input[at] == separator) {
+                at++;
+                continue;
+            }
+            if (at < input.len) {
+                at += input[at] == '\r' ? 2 : 1;
+                newLine(at);
+            }
+            break;
+        }
+        if (strict) {
+            if (width < 0) {
+                width = fields.len;
+            } else if (fields.len != width) {
+                fail(line - 1, 1, "this row has a different number of fields from the first");
+                return #status.INVALID;
+            }
+        }
+    }
+
+    // How the last failure happened; code 0 when nothing failed.
+    public ParseError error() {
+        return new ParseError(errCode, errLine, errColumn, errMessage);
+    }
+
+    private mut void newLine(i64 start) {
+        line++;
+        lineStart = start;
+    }
+
+    private mut void fail(i64 l, i64 col, string message) {
+        errCode = status.INVALID;
+        errLine = l;
+        errColumn = col;
+        errMessage = message;
+    }
+}

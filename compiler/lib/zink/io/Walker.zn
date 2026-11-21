@@ -1,0 +1,116 @@
+package zink.io;
+
+// A walk over a tree (STDLIB §4.3): depth-first, each directory before what it holds,
+// starting with the root itself at depth 0. The path buffer holds only the current path:
+// each name is appended and taken off again. One open directory per level, at most 256.
+public class Walker {
+    // Follow symbolic links to directories; a loop is returned with err set to ELOOP.
+    public bool followLinks = false;
+    public i64 maxDepth = 9223372036854775807;
+    private Dir[..~256] dirs = [];
+    // The path's length before each level's names, and each open directory's identity.
+    private i64[..~256] lens = [];
+    private i64[..~256] devs = [];
+    private i64[..~256] inos = [];
+    private bool started = false;
+    // The last entry returned was a directory that was opened, to go into next.
+    private bool opened = false;
+    private u8[..~]& buf;
+
+    private static extern("zr_fs_ident") u8 cIdent(string path, i64[:]& out);
+
+    new(string root, u8[..~]& path) {
+        this.buf = path;
+        buf.clear();
+        buf.append(root);
+    }
+
+    // The next entry: END after the last.
+    public mut WalkEntry next() {
+        if (!started) {
+            started = true;
+            Stat s @err = fs.lstat(buf);
+            if (err != 0) {
+                return entry(0, buf.len, false, false, 0, err);
+            }
+            bool dir = s.isDir || (s.isLink && followLinks && isDirThere());
+            return found(0, 0, dir, s.isLink, s.size);
+        }
+        opened = false;
+        while (dirs.len > 0) {
+            i64 level = dirs.len - 1;
+            buf.truncate(lens[level]);
+            if (buf.len > 0 && buf[buf.len - 1] != '/') {
+                buf +> '/';
+            }
+            i64 nameAt = buf.len;
+            DirEntry e @end = dirs[level].next(buf);
+            if (end != 0) {
+                @_ = dirs[level].close();
+                @_ = dirs.pop();
+                @_ = lens.pop();
+                @_ = devs.pop();
+                @_ = inos.pop();
+                continue;
+            }
+            bool dir = e.isDir || (e.isLink && followLinks && isDirThere());
+            return found(level + 1, nameAt, dir, e.isLink, e.size);
+        }
+        buf.clear();
+        return #status.END entry(0, 0, false, false, 0, 0);
+    }
+
+    // Don't go into the directory next() just returned.
+    public mut void skip() {
+        if (opened) {
+            i64 level = dirs.len - 1;
+            @_ = dirs[level].close();
+            @_ = dirs.pop();
+            @_ = lens.pop();
+            @_ = devs.pop();
+            @_ = inos.pop();
+            opened = false;
+        }
+    }
+
+    private mut bool isDirThere() {
+        Stat s @err = fs.stat(buf);
+        return err == 0 && s.isDir;
+    }
+
+    // An entry for what `buf` holds now, opening it to go into next when it's a directory.
+    private mut WalkEntry found(i64 depth, i64 nameAt, bool dir, bool link, i64 size) {
+        if (!dir || depth >= maxDepth) {
+            return entry(depth, nameAt, dir, link, size, 0);
+        }
+        i64[.2] id = [0, 0];
+        u8 idErr = cIdent(buf, id);
+        if (idErr != 0) {
+            return entry(depth, nameAt, dir, link, size, idErr);
+        }
+        for (i64 k = 0; k < devs.len; k++) {
+            if (devs[k] == id[0] && inos[k] == id[1]) {
+                return entry(depth, nameAt, dir, link, size, status.LOOP);
+            }
+        }
+        if (dirs.len == 256) {
+            return entry(depth, nameAt, dir, link, size, status.NAME_TOO_LONG);
+        }
+        Dir d @err = Dir.open(buf);
+        if (err != 0) {
+            return entry(depth, nameAt, dir, link, size, err);
+        }
+        @_ = dirs +> d;
+        @_ = lens +> buf.len;
+        @_ = devs +> id[0];
+        @_ = inos +> id[1];
+        opened = true;
+        return entry(depth, nameAt, dir, link, size, 0);
+    }
+
+    private WalkEntry entry(i64 depth, i64 nameAt, bool dir, bool link, i64 size, u8 err) {
+        string p = buf;
+        string name = depth == 0 ? path.base(p) : p[nameAt:];
+        return new WalkEntry(p, name, depth, dir, link, size, err);
+    }
+}

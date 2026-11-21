@@ -1,0 +1,55 @@
+package zink.os;
+
+// Running programs (STDLIB §5.1). A program without a '/' is searched for in PATH, and
+// arguments reach it as they are, with no shell in between.
+public class process {
+    static extern("zr_proc_run") u8 cRun(string[:] argv, string[:] envs, string cwd, string input, i32 feed, u8[..>]& out, u8[..>]& err, i32 capture, i64 timeout, i64[:]& result);
+    static extern("zr_proc_spawn") i64 cSpawn(string[:] argv, string[:] envs, string cwd);
+    static extern("zr_proc_wait") u8 cWait(i64 pid, i64[:]& result);
+    static extern("zr_proc_kill") u8 cKill(i64 pid, i32 sig);
+    private static extern("zr_proc_exec") u8 cExec(string[:] argv);
+    private static extern("zr_proc_pid") i64 cPid();
+    private static extern("zr_proc_name") string cName();
+    private static extern("zr_proc_which") u8 cWhich(string program, u8[..>]& out);
+
+    // Runs program with args to its end, appending its stdout to out; its stdin and
+    // stderr are this program's. NOT_FOUND, PERMISSION when it can't be started; a
+    // program that runs and fails isn't a failed call: see the Exit.
+    public static Exit run(string program, string[:] args, u8[..>]& out) {
+        string[..>] argv = [];
+        argv +> program;
+        for (string a : args) {
+            argv +> a;
+        }
+        string[..>] none = [];
+        u8[..>] errs = [];
+        i64[.2] r = [0, 0];
+        u8 st = cRun(argv, none, "", "", 0, out, errs, 1, 0, r);
+        return #st new Exit((u8) r[0], (u8) r[1]);
+    }
+
+    // Replaces this process; returns only on failure.
+    public static void exec(string program, string[:] args) {
+        string[..>] argv = [];
+        argv +> program;
+        for (string a : args) {
+            argv +> a;
+        }
+        u8 st = cExec(argv);
+        return #st;
+    }
+
+    public static i32 pid() { return (i32) cPid(); }
+
+    // argv[0]; main's args don't include it.
+    public static string name() { return cName(); }
+
+    // The full path PATH finds for program. NOT_FOUND.
+    public static u8[.] which(string program) {
+        u8[..~] out = [];
+        u8 st = cWhich(program, out);
+        return #st out;
+    }
+
+    static Exit exit(i64[:] r) { return new Exit((u8) r[0], (u8) r[1]); }
+}

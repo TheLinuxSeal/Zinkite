@@ -1,0 +1,185 @@
+package zink.time;
+
+// Calendar fields (STDLIB §5.3). `parts` says which of a date, a time and an offset the
+// value has, as RFC 3339 text and TOML's local dates and times may have some only.
+public class DateTime {
+    public i32 year;
+    public u8 month;
+    public u8 day;
+    public u8 hour;
+    public u8 minute;
+    public u8 second;
+    public u32 nanos;
+    public i16 offsetMinutes;
+    public u8 parts;
+
+    public static u8 DATE = 1;
+    public static u8 TIME = 2;
+    public static u8 OFFSET = 4;
+
+    // RFC 3339 ("2026-11-18T09:30:00.5+01:00"), and its date-only ("2026-11-18") and
+    // time-only ("09:30:00") forms. 't' and ' ' may stand for 'T', 'z' for 'Z'. INVALID.
+    public static DateTime parse(string s) {
+        DateTime none = new DateTime(0, 0, 0, 0, 0, 0, 0, 0, 0);
+        i32 y = 0;
+        u8 mo = 0;
+        u8 d = 0;
+        u8 h = 0;
+        u8 mi = 0;
+        u8 se = 0;
+        u32 ns = 0;
+        i16 off = 0;
+        u8 parts = 0;
+        i64 i = 0;
+        if (s.len >= 10 && s[4] == '-' && s[7] == '-') {
+            i64 yy = digits(s, 0, 4);
+            i64 mm = digits(s, 5, 2);
+            i64 dd = digits(s, 8, 2);
+            if (yy < 0 || mm < 1 || mm > 12 || dd < 1 || dd > time.monthDays(yy, mm)) {
+                return #status.INVALID none;
+            }
+            y = (i32) yy;
+            mo = (u8) mm;
+            d = (u8) dd;
+            parts = DATE;
+            i = 10;
+            if (i == s.len) {
+                return new DateTime(y, mo, d, 0, 0, 0, 0, 0, parts);
+            }
+            if (s[i] != 'T' && s[i] != 't' && s[i] != ' ') {
+                return #status.INVALID none;
+            }
+            i++;
+        }
+        // The time.
+        if (s.len - i < 8 || s[i + 2] != ':' || s[i + 5] != ':') {
+            return #status.INVALID none;
+        }
+        i64 hh = digits(s, i, 2);
+        i64 nn = digits(s, i + 3, 2);
+        i64 ss = digits(s, i + 6, 2);
+        if (hh < 0 || hh > 23 || nn < 0 || nn > 59 || ss < 0 || ss > 60) {
+            return #status.INVALID none;
+        }
+        h = (u8) hh;
+        mi = (u8) nn;
+        se = (u8) ss;
+        parts = parts | TIME;
+        i += 8;
+        if (i < s.len && s[i] == '.') {
+            i++;
+            i64 start = i;
+            i64 frac = 0;
+            while (i < s.len && s[i] >= '0' && s[i] <= '9') {
+                if (i - start < 9) {
+                    frac = frac * 10 + (i64) (s[i] - '0');
+                }
+                i++;
+            }
+            if (i == start) {
+                return #status.INVALID none;
+            }
+            for (i64 k = i - start; k < 9; k++) {
+                frac = frac * 10;
+            }
+            ns = (u32) frac;
+        }
+        if (i < s.len) {
+            if ((parts & DATE) == 0) {
+                return #status.INVALID none;
+            }
+            if (s[i] == 'Z' || s[i] == 'z') {
+                i++;
+            } else if ((s[i] == '+' || s[i] == '-') && s.len - i == 6 && s[i + 3] == ':') {
+                i64 oh = digits(s, i + 1, 2);
+                i64 om = digits(s, i + 4, 2);
+                if (oh < 0 || oh > 23 || om < 0 || om > 59) {
+                    return #status.INVALID none;
+                }
+                i64 total = oh * 60 + om;
+                off = (i16) (s[i] == '-' ? -total : total);
+                i += 6;
+            } else {
+                return #status.INVALID none;
+            }
+            parts = parts | OFFSET;
+        }
+        if (i != s.len) {
+            return #status.INVALID none;
+        }
+        return new DateTime(y, mo, d, h, mi, se, ns, off, parts);
+    }
+
+    // `n` decimal digits of s from `at`, or -1 if they aren't all digits.
+    private static i64 digits(string s, i64 at, i64 n) {
+        if (at + n > s.len) {
+            return -1;
+        }
+        i64 v = 0;
+        for (i64 k = at; k < at + n; k++) {
+            u8 c = s[k];
+            if (c < '0' || c > '9') {
+                return -1;
+            }
+            v = v * 10 + (i64) (c - '0');
+        }
+        return v;
+    }
+
+    // RFC 3339 text of the parts the value has.
+    public u8[..~40] iso() {
+        u8[..~12] f = "";
+        if (nanos != 0) {
+            u32 n = nanos;
+            i64 w = 9;
+            while (n % 10 == 0) {
+                n = n / 10;
+                w--;
+            }
+            u8[..~12] g = ".${((i64) n).zeroPad(w)}";
+            f = g;
+        }
+        u8[..~16] date = "";
+        if ((parts & DATE) != 0) {
+            u8[..~16] g = "${year.zeroPad(4)}-${month.zeroPad(2)}-${day.zeroPad(2)}";
+            date = g;
+        }
+        u8[..~24] clock = "";
+        if ((parts & TIME) != 0) {
+            string t = (parts & DATE) != 0 ? "T" : "";
+            u8[..~24] g = "${t}${hour.zeroPad(2)}:${minute.zeroPad(2)}:${second.zeroPad(2)}${f}";
+            clock = g;
+        }
+        u8[..~8] zone = "";
+        if ((parts & OFFSET) != 0) {
+            if (offsetMinutes == 0) {
+                u8[..~8] g = "Z";
+                zone = g;
+            } else {
+                i64 o = (i64) offsetMinutes;
+                string sign = o < 0 ? "-" : "+";
+                i64 a = o < 0 ? -o : o;
+                u8[..~8] g = "${sign}${(a / 60).zeroPad(2)}:${(a % 60).zeroPad(2)}";
+                zone = g;
+            }
+        }
+        u8[..~40] out = "${date}${clock}${zone}";
+        return out;
+    }
+
+    // INVALID without a date or an offset.
+    public Timestamp toTimestamp() {
+        if ((parts & DATE) == 0 || (parts & OFFSET) == 0) {
+            return #status.INVALID new Timestamp(0);
+        }
+        i64 days = time.daysFromCivil((i64) year, (i64) month, (i64) day);
+        i64 secs = days * 86400 + (i64) hour * 3600 + (i64) minute * 60 + (i64) second - (i64) offsetMinutes * 60;
+        return new Timestamp(secs * 1000000000 + (i64) nanos);
+    }
+
+    // 1 = Monday … 7 = Sunday, as in ISO 8601.
+    public u8 weekday() {
+        i64 days = time.daysFromCivil((i64) year, (i64) month, (i64) day);
+        return (u8) (time.floorMod(days + 3, 7) + 1);
+    }
+}

@@ -234,10 +234,29 @@ representations as they are. Written so far:
   temporary file and a rename; each `readAll` both returning the text and appending
   it to a buffer), `Dir` and `DirEntry`, `Stat`, `fs` (exists,
   stat, lstat, remove, removeAll, rename, move, copy, mkdir, mkdirAll, chmod,
-  symlink, readLink, tempFile, tempDir) and `path` (join, base, dir, ext, stem,
-  isAbsolute, normalize, absolute, relative, resolve, cwd, chdir);
-- `zink.cli`: `Args`, with the `--help` it generates, and `ArgIterator` for
-  `getAll` and `restValues`.
+  symlink, readLink, tempFile, tempDir, walk) and `path` (join, base, dir, ext, stem,
+  isAbsolute, normalize, absolute, relative, resolve, cwd, chdir). A File's writes
+  are buffered, 64 KB at a time, and written out at exit however the program ends;
+  a million `println` calls to a file take 0.05 s and 184 system calls;
+- `zink.cli`: `Args`, with the `--help` it generates, `ArgIterator` for `getAll`
+  and `restValues`, and `ansi`'s `Colors`;
+- `zink.lang`: `env` (get, has, set, unset, all) besides what's built in;
+- `zink.os`: `process` (run, exec, pid, name, which), `Exit`, `Command` (arguments,
+  working directory, environment changes, input, timeout; run, output, outputBoth,
+  spawn), `Child` (wait, kill, killNow) and `term.size`. A program is started with
+  `posix_spawnp`, SIGPIPE back to its default, and one `poll` loop feeds its stdin
+  and reads its stdout and stderr;
+- `zink.time`: `time` (now, monotonic, sleep), `Duration`, `Instant`, `Timestamp`
+  and `DateTime` (RFC 3339 both ways, weekdays), with Howard Hinnant's calendar
+  algorithms; they agree with Python's `datetime` over 5,000 random instants;
+- `zink.random`: `Rng`, xoshiro256** seeded through SplitMix64, with Lemire's
+  unbiased `range` for every integer type, and the kernel's bytes for secrets;
+- `zink.hash`: FNV-1a, CRC-32 and SHA-256, one-shot and incremental, in the runtime's
+  C; they agree with Python's `zlib` and `hashlib`. `xxh3` waits for a reference to
+  test against;
+- `zink.encoding`: `bytes.hex()`, `hex.decode` and base64 with both alphabets;
+- `zink.csv`: `CsvReader`, with fields as views into the input where they can be,
+  and `CsvWriter`; 2,000 random rows round-trip through Python's `csv`.
 
 `zink.lang`'s `Iterator<T>` is in `lib/zink/lang/`, with every library iterator,
 each implementing it: `LineIterator`, `WordIterator`, `SplitIterator` and
@@ -249,11 +268,9 @@ and `zink.cli`'s `ArgIterator`. `text.lines()` calls the package-private
 against 0.25 s for the C functions they replace, since each `next()` is a direct
 call the C compiler inlines.
 
-Where they differ from STDLIB: `Stat.modified` is nanoseconds as an `i64` until
-`zink.time` is written; file writes aren't buffered,
-so `flush` has nothing to do (`println` is one `writev`); and `fs.move` of a
-directory across file systems still fails with `CROSS_DEVICE`. `fs.walk` and
-`ansi` aren't written yet. A bug the library finds, such as asking `Args` for an
+Where they differ from STDLIB: `fs.move` of a directory across file systems still
+fails with `CROSS_DEVICE`; `ParseError` is in `zink.csv` until `zink.data` is written;
+and `hash.xxh3` isn't written. A bug the library finds, such as asking `Args` for an
 option that was never declared, is reported at the library's line, not the
 caller's.
 

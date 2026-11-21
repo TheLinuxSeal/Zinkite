@@ -1,0 +1,17 @@
+package zink.cli;
+
+// Escape codes for text styles (STDLIB §6.2), or all "" when colors are off, so the same
+// code prints plain text into a pipe. Static text, so a Colors is a handful of views.
+public class Colors {
+    public string bold;
+    public string dim;
+    public string underline;
+    public string red;
+    public string green;
+    public string yellow;
+    public string blue;
+    public string magenta;
+    public string cyan;
+    public string gray;
+    public string reset;
+}

@@ -2647,6 +2647,32 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
             E::Lambda { .. } => (self.lambda_value(e), t),
             E::InstanceOf { expr, ty, bind } => (self.instance_of(expr, ty, bind.as_ref()), t),
+            // A literal used as a temporary, as for a slice parameter: its elements on the
+            // scratch stack, to the end of the statement.
+            E::ArrayLit(items)
+                if matches!(layout(&t), Some(Layout::Vec | Layout::Slice))
+                    && !self.vs_elems(&t) =>
+            {
+                let el = t.elem().cloned().unwrap_or(Ty::Unknown);
+                let ec = self.cty(&el, e.span);
+                let mut code = format!(
+                    "({{ {ec} *_al = ({ec} *)zr_scratch_alloc({n} * sizeof({ec})); ",
+                    ec = ec,
+                    n = items.len().max(1)
+                );
+                for (i, x) in items.iter().enumerate() {
+                    let v = self.expr(x, &el);
+                    let _ = write!(code, "_al[{}] = {}; ", i, v);
+                }
+                let hdr = if matches!(t, Ty::Slice(_) | Ty::View(_)) {
+                    "zr_slice"
+                } else {
+                    "zr_vec"
+                };
+                let _ = write!(code, "({}){{_al, {}}}; }})", hdr, items.len());
+                self.used_scratch = true;
+                (code, t)
+            }
             E::ArrayLit(_) => (self.unsupported(e.span, "an array literal here"), t),
             E::Discard => ("0".into(), t),
         }
@@ -3262,7 +3288,13 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
             return format!("({} {} NULL)", a, sym);
         }
-        let (lu, ru) = (settle(lt.unref()), settle(rt.unref()));
+        // An unsuffixed literal takes the other side's integer type, as in arithmetic:
+        // `span <= 18446744073709551615` with a u128 `span`.
+        let (lu, ru) = match (lt.unref(), rt.unref()) {
+            (Ty::IntLit { .. }, Ty::Prim(p)) if p.is_int() => (Ty::Prim(*p), Ty::Prim(*p)),
+            (Ty::Prim(p), Ty::IntLit { .. }) if p.is_int() => (Ty::Prim(*p), Ty::Prim(*p)),
+            _ => (settle(lt.unref()), settle(rt.unref())),
+        };
         // Handles are equal when they name the same slot in the same generation.
         if matches!(lu, Ty::Handle(_)) {
             let a = self.expr(l, &lu);
@@ -3391,7 +3423,31 @@ impl<'p, 'a> Gen<'p, 'a> {
             },
         };
         let to = &to;
-        let from = settle(self.ty(x).unref());
+        let mut from = settle(self.ty(x).unref());
+        // A literal too big for i64, as in `(i128) -100000000000000000000000`, is converted
+        // from the 128-bit type that holds it.
+        let lit = match &strip_paren(x).kind {
+            E::Int {
+                value,
+                suffix: None,
+            } => Some(*value as i128),
+            E::Unary {
+                op: UnaryOp::Neg,
+                expr,
+            } => match &strip_paren(expr).kind {
+                E::Int {
+                    value,
+                    suffix: None,
+                } => Some((*value as i128).wrapping_neg()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(n) = lit
+            && (n > i64::MAX as i128 || n < i64::MIN as i128)
+        {
+            from = Ty::Prim(if n < 0 { Prim::I128 } else { Prim::U128 });
+        }
         let v = self.expr(x, &from);
         let tc = prim_c(*to);
         let loc = self.loc(span);
@@ -3546,7 +3602,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                         name.name.as_str(),
                         "pad" | "zeroPad" | "hex" | "bin" | "oct" | "fixed" | "utf8"
                     ) && matches!(bt.unref(), Ty::Prim(_))
-                        || matches!(name.name.as_str(), "toUpper" | "toLower" | "repeat")
+                        || matches!(name.name.as_str(), "toUpper" | "toLower" | "repeat" | "hex")
                             && matches!(bt.unref(), Ty::Slice(_) | Ty::View(_) | Ty::Array(..))
                 }
                 _ => false,
@@ -3662,6 +3718,16 @@ impl<'p, 'a> Gen<'p, 'a> {
                             writes,
                             "{{ zr_slice _s = {}; for (int64_t _j = 0; _j < _s.n; _j++) {{ uint8_t _c = ((uint8_t*)_s.p)[_j]; zr_w_byte({}, _c >= {} && _c <= {} ? (uint8_t)(_c ^ 32) : _c); }} }} ",
                             s, k, a, b
+                        );
+                    }
+                    // Bytes as hex (STDLIB §8.4): two lowercase digits each.
+                    ("hex", None) => {
+                        let s = self.conv(&v, &bt, &Ty::string(), e.span);
+                        let _ = write!(
+                            writes,
+                            "{{ zr_slice _s = {}; for (int64_t _j = 0; _j < _s.n; _j++) {{ uint8_t _c = ((uint8_t*)_s.p)[_j]; zr_w_byte({k}, (uint8_t)\"0123456789abcdef\"[_c >> 4]); zr_w_byte({k}, (uint8_t)\"0123456789abcdef\"[_c & 15]); }} }} ",
+                            s,
+                            k = k
                         );
                     }
                     ("repeat", None) => {
@@ -4218,7 +4284,18 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
             if *ns == "math" {
                 let fname = match name {
-                    "roundToI64" => return ok(self.unsupported(span, "`math.roundToI64`"), ret),
+                    // Half away from zero; RANGE for NaN, infinities and what i64 can't hold.
+                    "roundToI64" => {
+                        let x = arg(self, 0);
+                        return CallOut {
+                            code: format!(
+                                "({{ double _x = round((double)({})); zr_res_i64 _r = {{0, 0}}; if (_x >= -9223372036854775808.0 && _x < 9223372036854775808.0) _r.v = (int64_t)_x; else _r.s = 34; _r; }})",
+                                x
+                            ),
+                            ret: Ty::i64(),
+                            fails: true,
+                        };
+                    }
                     n => n.to_string(),
                 };
                 let vs: Vec<String> = (0..args.len()).map(|k| arg(self, k)).collect();
@@ -4313,6 +4390,84 @@ impl<'p, 'a> Gen<'p, 'a> {
                     ),
                     Ty::i64(),
                 ),
+                // Bit operations (STDLIB §8.1), on the value's bits as unsigned.
+                "leadingZeros" | "trailingZeros" => {
+                    let w = bits(p);
+                    let u = unsigned_of(p);
+                    let code = match (m, w) {
+                        ("leadingZeros", 128) => format!(
+                            "({{ zr_u128 _x = (zr_u128)({}); uint64_t _h = (uint64_t)(_x >> 64), _l = (uint64_t)_x; (int64_t)(_h ? __builtin_clzll(_h) : _l ? 64 + __builtin_clzll(_l) : 128); }})",
+                            v
+                        ),
+                        ("leadingZeros", _) => format!(
+                            "({{ {u} _x = ({u})({v}); (int64_t)(_x ? __builtin_clzll((uint64_t)_x) - {d} : {w}); }})",
+                            u = u,
+                            v = v,
+                            d = 64 - w,
+                            w = w
+                        ),
+                        (_, 128) => format!(
+                            "({{ zr_u128 _x = (zr_u128)({}); uint64_t _h = (uint64_t)(_x >> 64), _l = (uint64_t)_x; (int64_t)(_l ? __builtin_ctzll(_l) : _h ? 64 + __builtin_ctzll(_h) : 128); }})",
+                            v
+                        ),
+                        _ => format!(
+                            "({{ {u} _x = ({u})({v}); (int64_t)(_x ? __builtin_ctzll((uint64_t)_x) : {w}); }})",
+                            u = u,
+                            v = v,
+                            w = w
+                        ),
+                    };
+                    ok(code, Ty::i64())
+                }
+                "rotateLeft" | "rotateRight" => {
+                    let w = bits(p);
+                    let u = unsigned_of(p);
+                    let n = arg(self, 0);
+                    let (a, b) = if m == "rotateLeft" {
+                        ("<<", ">>")
+                    } else {
+                        (">>", "<<")
+                    };
+                    ok(
+                        format!(
+                            "({{ {u} _x = ({u})({v}); unsigned _n = (unsigned)((((int64_t)({n})) % {w} + {w}) % {w}); ({t})(_n ? ({u})((_x {a} _n) | (_x {b} ({w} - _n))) : _x); }})",
+                            u = u,
+                            v = v,
+                            n = n,
+                            w = w,
+                            a = a,
+                            b = b,
+                            t = prim_c(p)
+                        ),
+                        Ty::Prim(p),
+                    )
+                }
+                "reverseBytes" => {
+                    let code = match bits(p) {
+                        8 => format!("(({})({}))", prim_c(p), v),
+                        16 => format!("(({})__builtin_bswap16((uint16_t)({})))", prim_c(p), v),
+                        32 => format!("(({})__builtin_bswap32((uint32_t)({})))", prim_c(p), v),
+                        64 => format!("(({})__builtin_bswap64((uint64_t)({})))", prim_c(p), v),
+                        _ => format!(
+                            "({{ zr_u128 _x = (zr_u128)({}); ({})(((zr_u128)__builtin_bswap64((uint64_t)_x) << 64) | __builtin_bswap64((uint64_t)(_x >> 64))); }})",
+                            v,
+                            prim_c(p)
+                        ),
+                    };
+                    ok(code, Ty::Prim(p))
+                }
+                "isPowerOf2" => {
+                    let u = unsigned_of(p);
+                    ok(
+                        format!(
+                            "({{ {t} _v = ({v}); {u} _x = ({u})_v; (bool)(_v > 0 && !(_x & (_x - 1))); }})",
+                            t = prim_c(p),
+                            v = v,
+                            u = u
+                        ),
+                        Ty::bool(),
+                    )
+                }
                 _ => ok(self.unsupported(span, &format!("`{}` on numbers", m)), ret),
             };
         }
@@ -5513,7 +5668,9 @@ pub fn status_code(name: &str) -> u8 {
         "NO_SPACE" | "ENOSPC" => 28,
         "BROKEN_PIPE" | "EPIPE" => 32,
         "RANGE" | "ERANGE" => 34,
+        "NAME_TOO_LONG" | "ENAMETOOLONG" => 36,
         "NOT_EMPTY" | "ENOTEMPTY" => 39,
+        "LOOP" | "ELOOP" => 40,
         "UNSUPPORTED" | "EOPNOTSUPP" => 95,
         "TIMEOUT" | "ETIMEDOUT" => 110,
         "EMPTY" => 192,

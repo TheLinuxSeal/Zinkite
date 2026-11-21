@@ -1,0 +1,7 @@
+package zink.lang;
+
+// One environment variable: views into the environment's text.
+public class EnvVar {
+    public string name;
+    public string value;
+}

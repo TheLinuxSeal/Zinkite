@@ -1,0 +1,28 @@
+package zink.hash;
+
+// SHA-256, for data that arrives in pieces (STDLIB §8.3): update with each, then finish.
+public class Sha256 {
+    // The runtime's state, kept in the object.
+    private u8[..~112] st = [];
+
+    private static extern("zr_sha_init") void cInit(u8[:]& st);
+    private static extern("zr_sha_update") void cUpdate(u8[:]& st, string data);
+    private static extern("zr_sha_final") void cFinal(u8[:]& st, u8[:]& out);
+
+    public new() {
+        for (i64 i = 0; i < 112; i++) {
+            @_ = st +> 0;
+        }
+        cInit(st);
+    }
+
+    public mut void update(string chunk) { cUpdate(st, chunk); }
+
+    // The digest. The object starts over afterwards.
+    public mut u8[.32] finish() {
+        u8[.32] out = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        cFinal(st, out);
+        cInit(st);
+        return out;
+    }
+}

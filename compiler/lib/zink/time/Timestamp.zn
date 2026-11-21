@@ -1,0 +1,28 @@
+package zink.time;
+
+// A point in wall-clock time: nanoseconds since 1970-01-01T00:00:00Z (STDLIB §5.3).
+public class Timestamp {
+    public i64 nanos;
+
+    public static Timestamp fromUnix(i64 seconds) { return new Timestamp(seconds * 1000000000); }
+
+    // Whole seconds, rounded down.
+    public i64 unixSeconds() { return time.floorDiv(nanos, 1000000000); }
+
+    // The calendar fields in UTC.
+    public DateTime utc() {
+        i64 secs = unixSeconds();
+        i64 days = time.floorDiv(secs, 86400);
+        i64 rest = secs - days * 86400;
+        (i32 y, u8 m, u8 d) = time.civil(days);
+        return new DateTime(y, m, d, (u8) (rest / 3600), (u8) ((rest / 60) % 60), (u8) (rest % 60),
+            (u32) (nanos - secs * 1000000000), 0, DateTime.DATE | DateTime.TIME | DateTime.OFFSET);
+    }
+
+    // "2026-11-18T09:30:00Z", with fractional seconds when they aren't zero.
+    public u8[..~32] iso() {
+        DateTime dt = utc();
+        u8[..~32] out = "${dt.iso()}";
+        return out;
+    }
+}

@@ -1,0 +1,19 @@
+package zink.lang;
+
+// The environment's variables, one by one (STDLIB §2.3).
+public class EnvIterator implements Iterator<EnvVar> {
+    i64 at;
+
+    public mut EnvVar next() {
+        string e = env.entry(at);
+        if (e.len == 0) {
+            return #status.END new EnvVar("", "");
+        }
+        at++;
+        i64 eq @none = e.find("=");
+        if (none) {
+            return new EnvVar(e, "");
+        }
+        return new EnvVar(e[0:eq], e[eq + 1:]);
+    }
+}

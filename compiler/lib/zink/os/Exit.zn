@@ -1,0 +1,10 @@
+package zink.os;
+
+// How a program ended (STDLIB §5.1): its exit code, or the signal that killed it.
+public class Exit {
+    public u8 code;
+    public u8 signal;
+
+    // Exit code 0 and no signal.
+    public bool ok() { return code == 0 && signal == 0; }
+}

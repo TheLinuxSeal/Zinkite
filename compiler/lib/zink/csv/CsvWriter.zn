@@ -1,0 +1,68 @@
+package zink.csv;
+
+// Writes CSV (STDLIB §9.1) to the end of a buffer. A field is quoted only when it needs to
+// be: when it holds the separator, a quote, \r or \n, or starts or ends with a space. Rows
+// end in \n, or \r\n with `crlf`. It sets no status.
+public class CsvWriter {
+    public u8 separator = ',';
+    public bool crlf = false;
+    i64 count = 0;
+    bool lastEmpty = false;
+    u8[..>]& out;
+
+    public new(u8[..>]& out) {
+        this.out = out;
+    }
+
+    public mut void writeField(string field) {
+        if (count > 0) {
+            out +> separator;
+        }
+        count++;
+        lastEmpty = field.len == 0;
+        if (!needsQuotes(field)) {
+            out.append(field);
+            return;
+        }
+        out +> '"';
+        for (u8 c : field) {
+            out +> c;
+            if (c == '"') {
+                out +> '"';
+            }
+        }
+        out +> '"';
+    }
+
+    public mut void endRow() {
+        // A row of one empty field is written "", so it doesn't read back as no fields.
+        if (count == 1 && lastEmpty) {
+            out.append("\"\"");
+        }
+        if (crlf) {
+            out.append("\r\n");
+        } else {
+            out +> '\n';
+        }
+        count = 0;
+    }
+
+    public mut void writeRow(string[:] fields) {
+        for (string f : fields) {
+            writeField(f);
+        }
+        endRow();
+    }
+
+    private bool needsQuotes(string f) {
+        if (f.len > 0 && (f[0] == ' ' || f[f.len - 1] == ' ')) {
+            return true;
+        }
+        for (u8 c : f) {
+            if (c == separator || c == '"' || c == '\r' || c == '\n') {
+                return true;
+            }
+        }
+        return false;
+    }
+}

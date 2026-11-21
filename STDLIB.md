@@ -78,7 +78,9 @@ DESIGN §7.7 lists them too.
 |---|---|---|---|---|
 | `CROSS_DEVICE` | 18 | `EXDEV` | Invalid cross-device link | `fs.rename` across file systems (`fs.move` copies instead) |
 | `NOT_TERMINAL` | 25 | `ENOTTY` | Inappropriate ioctl for device | `term.size()` when stdout isn't a terminal |
+| `NAME_TOO_LONG` | 36 | `ENAMETOOLONG` | File name too long | a path past the system's limit; `fs.walk` deeper than 256 levels |
 | `NOT_EMPTY` | 39 | `ENOTEMPTY` | Directory not empty | `fs.remove` on a directory that has entries |
+| `LOOP` | 40 | `ELOOP` | Too many levels of symbolic links | `fs.walk` with `followLinks` coming back to a directory it is in |
 | `UNSUPPORTED` | 95 | `EOPNOTSUPP` | Operation not supported | input that uses a feature a parser leaves out, such as YAML keys that are collections |
 | `TYPE` | 197 | Zinkite | Wrong kind of value: `asI64()` on a string | tree accessors (§9.2), `finish()` on writers (§9.7) |
 | `NO_MEMORY` | 12 | `ENOMEM` | Cannot allocate memory | the graphics bindings, when host or GPU memory runs out (§10.6) |
@@ -337,6 +339,7 @@ void File.appendAll(string path, string bytes)
 
 - **`readLine` keeps a last line that has no newline**, and fails with `END` only when nothing at all was left.
 - **`nextLine` is for repeat loops**: `while (string line : stdin.nextLine(buf)) { ... }` reads every line into one reused buffer. Clearing it is allowed, because the previous pass's `line` is gone when the next call runs (REFERENCES §9).
+- **Writes are buffered**, 64 KB at a time, and written when the buffer fills, by `flush`, `sync` and `close`, before a read, a seek or asking the size or position, and at exit, however the program ends. A failed write can show only at one of those. `stdout`'s writes go into C's `stdout` buffer, in order with `print`, and `stderr`'s straight out.
 - **`writeAll` writes a temporary file next to the target, then renames it over the target.**
   - Another process sees the old contents or the new ones, never half a file.
   - The old file's permissions are kept.
@@ -378,14 +381,15 @@ while (WalkEntry e : w.next()) {
 }
 ```
 
-- **The walk is depth-first**, and each directory comes before its contents.
+- **The walk is depth-first**, and each directory comes before its contents. The root itself comes first, at depth 0.
+- **At most 256 levels are open at once**: a directory deeper than that is returned with `err` set to `NAME_TOO_LONG`, and not gone into.
 - **`path` holds only the current path.**
   - The walker appends each name and removes it again, so the buffer never grows past the deepest path.
   - `e.path` is a view into the buffer and stays valid until the next step.
   - Keeping it longer is a compile error under rule R, and the message suggests copying it (`kept.append(e.path)`).
 - **A directory that can't be read is still returned**, with `err` set, and the walk goes on without descending into it.
-- **Symbolic links aren't followed** unless `w.followLinks` is set. When they are, a loop is detected by device and inode, and returned with `err` set to `status.ELOOP`.
-- **Fields**: `bool followLinks = false; i64 maxDepth = i64.MAX;`. The walker keeps one open directory per level, in its one growable field.
+- **Symbolic links aren't followed** unless `w.followLinks` is set. When they are, a loop is detected by device and inode, and returned with `err` set to `status.LOOP`.
+- **Fields**: `bool followLinks = false; i64 maxDepth = i64.MAX;`. The walker keeps one open directory per level, in a capped array, so `fs.walk` can return it.
 - **`w.skip()` acts on the walker the loop calls**, since the repeat loop names it (DESIGN §9.4). `for (WalkEntry e : w)` is an error that suggests this form.
 
 ### 4.4 File system operations: `fs`
@@ -469,11 +473,13 @@ c.arg(archive);
 c.args(files);
 c.cwd = "build";
 c.setEnv("LC_ALL", "C");
-c.input = manifest;              // fed to its stdin; without it, stdin is inherited
+c.unsetEnv("TERM");
+c.input = manifest;              // fed to its stdin when it isn't ""; otherwise stdin is inherited
 c.timeout = Duration.seconds(30);    // after that it is killed, and the call fails with TIMEOUT
 ```
 
-- **Storage**: the arguments and the environment changes share `Command`'s one growable field, a list of strings. `cwd` and `input` are views, so what they view must outlive the command (rule S).
+- **Storage**: the arguments and the environment changes share `Command`'s one growable field, as text, so an argument needn't outlive the command. `cwd` and `input` are views, so what they view must outlive it (rule S).
+- **`spawn` runs it with this program's stdin, stdout and stderr**; `input` and `timeout` are for `run` and `output`.
 
 ```
 Exit c.run()                                    // stdout and stderr inherited
@@ -545,7 +551,8 @@ Timestamp dt.toTimestamp()           // INVALID without a date or an offset
 u8 dt.weekday()                      // 1 = Monday … 7 = Sunday, as in ISO 8601
 ```
 
-- **`parts` says which pieces the text had**: a date, a time, an offset. TOML's local dates and times (§9.5) need it.
+- **`parts` says which pieces the text had**: a date, a time, an offset (`DateTime.DATE`, `TIME` and `OFFSET`). TOML's local dates and times (§9.5) need it.
+- **`Duration` and `Timestamp` hold their nanoseconds in a public `i64 nanos`**, so a `Timestamp` covers 1677 to 2262.
 - **Later**:
   - time zones beyond UTC and fixed offsets (reading `/etc/localtime` and the tz database);
   - formatting with patterns.
@@ -622,7 +629,7 @@ ArgIterator cli.restValues()
 
 ### 6.2 Colors: `ansi`
 ```
-Colors ansi.colors(File f)     // escape codes when f is a terminal, NO_COLOR is unset and TERM isn't "dumb"
+Colors ansi.colors(File f)     // escape codes when f is a terminal, NO_COLOR isn't set to something (no-color.org) and TERM isn't "dumb"
 Colors ansi.always()           // for --color=always
 Colors ansi.never()            // for --color=never
 
@@ -886,7 +893,7 @@ u64 random.secureU64()
 ### 8.3 `hash`
 ```
 u64 hash.fnv1a(string bytes)
-u64 hash.xxh3(string bytes, u64 seed)
+u64 hash.xxh3(string bytes, u64 seed)    // not written yet: it waits for a reference implementation to test against
 u32 hash.crc32(string bytes)              // the IEEE polynomial, as gzip and zip use
 u8[.32] hash.sha256(string bytes)
 ```
@@ -940,6 +947,8 @@ while (true) {
 - **`r.next(string[..~]& fields, u8[..>]& strings)` clears `fields`**, then appends one view per field. Clearing is a removal, so `fields` must allow removal at the end (`[..~]`).
 - **A field is a view into the input whenever it can be**: an unquoted field, or a quoted one with no `""` inside (the view leaves the quotes out).
 - **Only fields with doubled quotes are decoded**, into `strings`. `next` never clears `strings`; clear it yourself once no earlier field is kept.
+- **A blank line is a record with no fields**, as Python's `csv` reads it.
+- **`ParseError` is in `zink.csv`** until `zink.data` is written (§9.2).
 - **The format is RFC 4180's**:
   - quoted fields may contain the separator and newlines;
   - lines end in `\n` or `\r\n`;

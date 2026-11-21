@@ -1,0 +1,20 @@
+package zink.hash;
+
+// Hashes of bytes (STDLIB §8.3). hashmap doesn't use these: it has its own keyed hash
+// with a seed per run (DESIGN §4.14).
+public class hash {
+    private static extern("zr_fnv1a") u64 cFnv(string bytes);
+    static extern("zr_crc32") u32 cCrc(u32 crc, string bytes);
+
+    // FNV-1a, 64 bits.
+    public static u64 fnv1a(string bytes) { return cFnv(bytes); }
+
+    // CRC-32 with the IEEE polynomial, as gzip and zip use.
+    public static u32 crc32(string bytes) { return cCrc(0, bytes); }
+
+    public static u8[.32] sha256(string bytes) {
+        Sha256 h = new Sha256();
+        h.update(bytes);
+        return h.finish();
+    }
+}

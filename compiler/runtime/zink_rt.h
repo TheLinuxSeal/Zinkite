@@ -16,6 +16,10 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <sys/uio.h>
+#include <spawn.h>
+#include <poll.h>
+#include <sys/wait.h>
+#include <sys/ioctl.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -982,6 +986,194 @@ static ZR_UNUSED int64_t zr_num_prefix(zr_slice s, int32_t is_float) {
     return i;
 }
 
+/* ------------------------------------------------------------ environment (STDLIB §2.3) */
+
+extern char **environ;
+static uint8_t zr_errno(void);
+
+/* A view of the variable's value, which the runtime never frees, even after env.set
+ * replaces it; p is NULL when it isn't set. */
+static ZR_UNUSED zr_slice zr_env_get(zr_slice name) {
+    int64_t m = zr_sm();
+    const char *v = getenv(zr_cstr(name));
+    zr_sr(m);
+    zr_slice s = {(void *)v, v ? (int64_t)strlen(v) : 0};
+    return s;
+}
+
+/* INVALID for an empty name or one with '='. glibc keeps the text it replaces. */
+static ZR_UNUSED uint8_t zr_env_set(zr_slice name, zr_slice value, int32_t unset) {
+    if (name.n == 0 || memchr(name.p, '=', (size_t)name.n)) return 22;
+    int64_t m = zr_sm();
+    const char *n = zr_cstr(name);
+    int r = unset ? unsetenv(n) : setenv(n, zr_cstr(value), 1);
+    uint8_t s = r < 0 ? zr_errno() : 0;
+    zr_sr(m);
+    return s;
+}
+
+/* The i-th "name=value" of the environment, or an empty view past the end. */
+static ZR_UNUSED zr_slice zr_env_entry(int64_t i) {
+    for (int64_t k = 0; k < i; k++)
+        if (!environ[k]) { zr_slice none = {NULL, 0}; return none; }
+    const char *e = environ[i];
+    zr_slice s = {(void *)e, e ? (int64_t)strlen(e) : 0};
+    return s;
+}
+
+/* ------------------------------------------------------------ hashing (STDLIB §8.3) */
+
+static ZR_UNUSED uint64_t zr_fnv1a(zr_slice s) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    const uint8_t *p = (const uint8_t *)s.p;
+    for (int64_t i = 0; i < s.n; i++) { h ^= p[i]; h *= 0x100000001b3ULL; }
+    return h;
+}
+
+/* CRC-32 with the IEEE polynomial, reflected, as gzip, zip and zlib compute it. `crc` is
+ * the value so far, 0 to start. */
+static ZR_UNUSED uint32_t zr_crc32(uint32_t crc, zr_slice s) {
+    static uint32_t table[256];
+    if (!table[1]) {
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            table[i] = c;
+        }
+    }
+    const uint8_t *p = (const uint8_t *)s.p;
+    crc = ~crc;
+    for (int64_t i = 0; i < s.n; i++) crc = table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
+    return ~crc;
+}
+
+/* SHA-256 (FIPS 180-4). Its state lives in the Sha256 object's bytes. */
+typedef struct { uint32_t h[8]; uint64_t len; uint32_t used; uint8_t buf[64]; } zr_sha;
+
+static void zr_sha_block(uint32_t *h, const uint8_t *b) {
+    static const uint32_t k[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+#define ZR_ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+    uint32_t w[64];
+    for (int i = 0; i < 16; i++)
+        w[i] = (uint32_t)b[4 * i] << 24 | (uint32_t)b[4 * i + 1] << 16 | (uint32_t)b[4 * i + 2] << 8 | b[4 * i + 3];
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = ZR_ROR(w[i - 15], 7) ^ ZR_ROR(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        uint32_t s1 = ZR_ROR(w[i - 2], 17) ^ ZR_ROR(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    uint32_t a = h[0], bb = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+    for (int i = 0; i < 64; i++) {
+        uint32_t t1 = hh + (ZR_ROR(e, 6) ^ ZR_ROR(e, 11) ^ ZR_ROR(e, 25)) + ((e & f) ^ (~e & g)) + k[i] + w[i];
+        uint32_t t2 = (ZR_ROR(a, 2) ^ ZR_ROR(a, 13) ^ ZR_ROR(a, 22)) + ((a & bb) ^ (a & c) ^ (bb & c));
+        hh = g; g = f; f = e; e = d + t1; d = c; c = bb; bb = a; a = t1 + t2;
+    }
+#undef ZR_ROR
+    h[0] += a; h[1] += bb; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+}
+
+static ZR_UNUSED void zr_sha_init(zr_slice st) {
+    zr_sha s = {{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19}, 0, 0, {0}};
+    memcpy(st.p, &s, sizeof s);
+}
+
+static ZR_UNUSED void zr_sha_update(zr_slice st, zr_slice data) {
+    zr_sha s;
+    memcpy(&s, st.p, sizeof s);
+    const uint8_t *p = (const uint8_t *)data.p;
+    int64_t n = data.n;
+    s.len += (uint64_t)n;
+    if (s.used) {
+        int64_t take = 64 - s.used < n ? 64 - s.used : n;
+        memcpy(s.buf + s.used, p, (size_t)take);
+        s.used += (uint32_t)take;
+        p += take;
+        n -= take;
+        if (s.used == 64) { zr_sha_block(s.h, s.buf); s.used = 0; }
+    }
+    while (n >= 64) { zr_sha_block(s.h, p); p += 64; n -= 64; }
+    if (n) { memcpy(s.buf, p, (size_t)n); s.used = (uint32_t)n; }
+    memcpy(st.p, &s, sizeof s);
+}
+
+/* The digest, into the 32 bytes at out. */
+static ZR_UNUSED void zr_sha_final(zr_slice st, zr_slice out) {
+    zr_sha s;
+    memcpy(&s, st.p, sizeof s);
+    uint64_t bits = s.len * 8;
+    uint8_t pad[72] = {0x80};
+    int64_t padn = s.used < 56 ? 56 - s.used : 120 - s.used;
+    for (int i = 0; i < 8; i++) pad[padn + i] = (uint8_t)(bits >> (56 - 8 * i));
+    zr_slice p = {pad, padn + 8};
+    s.len = 0;
+    memcpy(st.p, &s, sizeof s);
+    zr_sha_update(st, p);
+    memcpy(&s, st.p, sizeof s);
+    uint8_t *o = (uint8_t *)out.p;
+    for (int i = 0; i < 8; i++) {
+        o[4 * i] = (uint8_t)(s.h[i] >> 24);
+        o[4 * i + 1] = (uint8_t)(s.h[i] >> 16);
+        o[4 * i + 2] = (uint8_t)(s.h[i] >> 8);
+        o[4 * i + 3] = (uint8_t)s.h[i];
+    }
+}
+
+/* ------------------------------------------------------------ random (STDLIB §8.2) */
+
+/* Bytes from the kernel. getrandom can only block briefly at early boot. */
+static void zr_random_fill(void *p, size_t n) {
+    char *c = (char *)p;
+    while (n) {
+        ssize_t r = getrandom(c, n, 0);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            zr_fail("zink runtime", 0, "getrandom failed");
+        }
+        c += r;
+        n -= (size_t)r;
+    }
+}
+
+static ZR_UNUSED uint64_t zr_random_u64(void) {
+    uint64_t v;
+    zr_random_fill(&v, sizeof v);
+    return v;
+}
+
+static ZR_UNUSED void zr_random_bytes(zr_vec *out, int64_t n) {
+    if (n <= 0) return;
+    zr_random_fill((char *)out->p + out->n, (size_t)n);
+    out->n += n;
+}
+
+/* ------------------------------------------------------------ time (STDLIB §5.3) */
+
+static ZR_UNUSED int64_t zr_time_now(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    return (int64_t)t.tv_sec * 1000000000 + t.tv_nsec;
+}
+
+static ZR_UNUSED int64_t zr_time_mono(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (int64_t)t.tv_sec * 1000000000 + t.tv_nsec;
+}
+
+/* Sleeps the whole duration, through signals; a negative one doesn't sleep. */
+static ZR_UNUSED void zr_time_sleep(int64_t ns) {
+    if (ns <= 0) return;
+    struct timespec t = {ns / 1000000000, ns % 1000000000};
+    while (nanosleep(&t, &t) < 0 && errno == EINTR) {}
+}
+
 /* ------------------------------------------------------------ pools (DESIGN §3.5, STDLIB §7.5) */
 
 /* A handle: a slot's index, and the generation the slot had when its value was added. */
@@ -1051,7 +1243,7 @@ static uint8_t zr_errno(void) { return (uint8_t)(errno > 0 && errno < 192 ? errn
 /* Per file descriptor: an input buffer, made on its first read and freed when it's closed,
  * and for a File or a Dir, a generation that each close bumps, so a copy of a closed one
  * can't reach whatever reuses its descriptor (DESIGN §6.4). A Dir keeps its DIR here. */
-typedef struct { uint8_t *b; size_t pos, len; uint32_t gen; uint8_t open; DIR *dir; } zr_inbuf;
+typedef struct { uint8_t *b; size_t pos, len; uint32_t gen; uint8_t open; DIR *dir; uint8_t *wb; size_t wn; } zr_inbuf;
 static zr_inbuf *zr_ins;
 static int zr_nins;
 
@@ -1166,20 +1358,58 @@ static ZR_UNUSED int64_t zr_io_open(zr_slice path, int32_t how) {
 }
 
 /* BAD_HANDLE (EBADF) for a File already closed. */
+static uint8_t zr_write_fd(int fd, zr_slice s);
+
+/* A File's writes are buffered, 64 KB at a time (STDLIB §4.1), and written when the buffer
+ * fills, at flush, sync, close, before a read, a seek or asking its size or position, and
+ * at exit. A failed write can show only then. */
+#define ZR_WBUF ((size_t)1 << 16)
+
+static uint8_t zr_wflush(int fd) {
+    if (fd < 0 || fd >= zr_nins || !zr_ins[fd].wn) return 0;
+    zr_inbuf *e = &zr_ins[fd];
+    zr_slice s = {e->wb, (int64_t)e->wn};
+    e->wn = 0;
+    return zr_write_fd(fd, s);
+}
+
+static uint8_t zr_wput(int fd, const void *p, size_t n) {
+    zr_inbuf *e = zr_in_entry(fd);
+    if (e->wn + n > ZR_WBUF) {
+        uint8_t s = zr_wflush(fd);
+        if (s) return s;
+    }
+    if (n >= ZR_WBUF) {
+        zr_slice d = {(void *)p, (int64_t)n};
+        return zr_write_fd(fd, d);
+    }
+    if (!e->wb && !(e->wb = (uint8_t *)malloc(ZR_WBUF))) zr_fail("zink runtime", 0, "out of memory for a write buffer");
+    memcpy(e->wb + e->wn, p, n);
+    e->wn += n;
+    return 0;
+}
+
+/* At exit: what open files still hold. */
+static void zr_wflush_all(void) {
+    for (int fd = 3; fd < zr_nins; fd++)
+        if (zr_ins[fd].open && zr_ins[fd].wn) zr_wflush(fd);
+}
+
 static ZR_UNUSED uint8_t zr_io_close(int64_t h) {
     int fd = zr_io_fd(h);
     if (fd < 0) return 9;
     if (fd == 1) zr_flush();
+    uint8_t w = zr_wflush(fd);
     zr_inbuf *e = &zr_ins[fd];
     free(e->b);
-    e->b = NULL;
-    e->pos = e->len = 0;
+    free(e->wb);
+    e->b = e->wb = NULL;
+    e->pos = e->len = e->wn = 0;
     e->open = 0;
     e->gen++;
-    return close(fd) < 0 && errno != EINTR ? zr_errno() : 0;
+    uint8_t c = close(fd) < 0 && errno != EINTR ? zr_errno() : 0;
+    return w ? w : c;
 }
-
-static uint8_t zr_write_fd(int fd, zr_slice s);
 
 /* Writes all of `s`: 0, or the error's status. */
 /* stdout and stderr through a File go where print does, so they stay in order with it
@@ -1192,14 +1422,14 @@ static uint8_t zr_std_write(int fd, zr_slice s) {
 static ZR_UNUSED uint8_t zr_io_write(int64_t h, zr_slice s) {
     int fd = zr_io_fd(h);
     if (fd == 1 || fd == 2) return zr_std_write(fd, s);
-    return fd < 0 ? 9 : zr_write_fd(fd, s);
+    return fd < 0 ? 9 : zr_wput(fd, s.p, (size_t)s.n);
 }
 
 /* Writes what stdout holds; nothing else is buffered. */
 static ZR_UNUSED uint8_t zr_io_flush(int64_t h) {
     int fd = zr_io_fd(h);
     if (fd < 0) return 9;
-    if (fd != 1) return 0;
+    if (fd != 1) return zr_wflush(fd);
     if (fflush(stdout) == 0) return 0;
     uint8_t s = zr_errno();
     if (errno == EPIPE) exit(141);
@@ -1216,18 +1446,8 @@ static ZR_UNUSED uint8_t zr_io_write_line(int64_t h, zr_slice s) {
         zr_end_line(fd);
         return 0;
     }
-    struct iovec v[2] = {{(void *)s.p, (size_t)s.n}, {(void *)"\n", 1}};
-    ssize_t r;
-    do { r = writev(fd, v, 2); } while (r < 0 && errno == EINTR);
-    if (r < 0) return zr_errno();
-    if (r == s.n + 1) return 0;
-    if (r < s.n) {
-        zr_slice rest = {(uint8_t *)s.p + r, s.n - r};
-        uint8_t e = zr_write_fd(fd, rest);
-        if (e) return e;
-    }
-    zr_slice nl = {(void *)"\n", 1};
-    return zr_write_fd(fd, nl);
+    uint8_t e = zr_wput(fd, s.p, (size_t)s.n);
+    return e ? e : zr_wput(fd, "\n", 1);
 }
 
 static uint8_t zr_write_fd(int fd, zr_slice s) {
@@ -1249,6 +1469,8 @@ static uint8_t zr_write_fd(int fd, zr_slice s) {
 static ZR_UNUSED int64_t zr_io_read(int64_t h, zr_vec *v, int64_t max) {
     int fd = zr_io_fd(h);
     if (fd < 0) { errno = EBADF; return -1; }
+    uint8_t w = zr_wflush(fd);
+    if (w) { errno = w; return -1; }
     if (max <= 0) return 0;
     zr_inbuf *in = zr_in(fd);
     if (in->pos < in->len) {
@@ -1269,18 +1491,24 @@ static ZR_UNUSED int64_t zr_io_read(int64_t h, zr_vec *v, int64_t max) {
 /* For File.readLine and File.readAll. */
 static ZR_UNUSED uint8_t zr_io_read_line(int64_t h, zr_vec *v) {
     int fd = zr_io_fd(h);
-    return fd < 0 ? 9 : zr_read_line(fd, v);
+    if (fd < 0) return 9;
+    uint8_t w = zr_wflush(fd);
+    return w ? w : zr_read_line(fd, v);
 }
 
 static ZR_UNUSED uint8_t zr_io_read_all(int64_t h, zr_vec *v) {
     int fd = zr_io_fd(h);
-    return fd < 0 ? 9 : zr_read_all(fd, v);
+    if (fd < 0) return 9;
+    uint8_t w = zr_wflush(fd);
+    return w ? w : zr_read_all(fd, v);
 }
 
 /* About a File: 0 its size, 1 whether it's a terminal, 2 its position; -1 with errno set. */
 static ZR_UNUSED int64_t zr_io_info(int64_t h, int32_t what) {
     int fd = zr_io_fd(h);
     if (fd < 0) { errno = EBADF; return -1; }
+    uint8_t w = zr_wflush(fd);
+    if (w) { errno = w; return -1; }
     struct stat st;
     switch (what) {
         case 0: return fstat(fd, &st) < 0 ? -1 : (int64_t)st.st_size;
@@ -1298,6 +1526,8 @@ static ZR_UNUSED int64_t zr_io_info(int64_t h, int32_t what) {
 static ZR_UNUSED uint8_t zr_io_seek(int64_t h, int64_t pos) {
     int fd = zr_io_fd(h);
     if (fd < 0) return 9;
+    uint8_t w = zr_wflush(fd);
+    if (w) return w;
     zr_ins[fd].pos = zr_ins[fd].len = 0;
     return lseek(fd, (off_t)pos, SEEK_SET) < 0 ? zr_errno() : 0;
 }
@@ -1305,6 +1535,8 @@ static ZR_UNUSED uint8_t zr_io_seek(int64_t h, int64_t pos) {
 static ZR_UNUSED uint8_t zr_io_sync(int64_t h) {
     int fd = zr_io_fd(h);
     if (fd < 0) return 9;
+    uint8_t w = zr_wflush(fd);
+    if (w) return w;
     return fsync(fd) < 0 ? zr_errno() : 0;
 }
 
@@ -1582,11 +1814,287 @@ static ZR_UNUSED uint8_t zr_dir_close(int64_t h) {
     return closedir(d) < 0 ? zr_errno() : 0;
 }
 
+/* The device and inode of what path names, following links, for fs.walk's loop check. */
+static ZR_UNUSED uint8_t zr_fs_ident(zr_slice path, zr_slice out) {
+    int64_t m = zr_sm();
+    struct stat st;
+    int r = stat(zr_cstr(path), &st);
+    int e = errno;
+    zr_sr(m);
+    if (r < 0) { errno = e; return zr_errno(); }
+    int64_t *o = (int64_t *)out.p;
+    o[0] = (int64_t)st.st_dev;
+    o[1] = (int64_t)st.st_ino;
+    return 0;
+}
+
 static ZR_UNUSED uint8_t zr_fs_chdir(zr_slice path) {
     int64_t m = zr_sm();
     int r = chdir(zr_cstr(path));
     zr_sr(m);
     return r < 0 ? zr_errno() : 0;
+}
+
+/* ------------------------------------------------------------ processes (STDLIB §5.1, §5.2) */
+
+static const char *zr_argv0 = "";
+
+/* A pipe whose ends close on exec, so only the descriptors given to a child reach it. */
+static int zr_pipe(int p[2]) {
+    if (pipe(p) < 0) return -1;
+    fcntl(p[0], F_SETFD, FD_CLOEXEC);
+    fcntl(p[1], F_SETFD, FD_CLOEXEC);
+    return 0;
+}
+
+/* A list of strings as NULL-terminated C strings, on the scratch stack. */
+static char **zr_proc_strings(zr_slice list) {
+    zr_slice *items = (zr_slice *)list.p;
+    char **v = (char **)zr_scratch_alloc((size_t)(list.n + 1) * sizeof(char *));
+    for (int64_t i = 0; i < list.n; i++) v[i] = (char *)zr_cstr(items[i]);
+    v[list.n] = NULL;
+    return v;
+}
+
+/* This environment with the changes applied: "NAME=VALUE" sets, a bare "NAME" unsets. */
+static char **zr_proc_env(zr_slice changes) {
+    char **ch = zr_proc_strings(changes);
+    int64_t n = 0;
+    while (environ[n]) n++;
+    char **v = (char **)zr_scratch_alloc((size_t)(n + changes.n + 1) * sizeof(char *));
+    int64_t k = 0;
+    for (int64_t i = 0; i < n; i++) {
+        const char *e = environ[i];
+        size_t len = strcspn(e, "=");
+        int replaced = 0;
+        for (int64_t j = 0; j < changes.n; j++) {
+            size_t cl = strcspn(ch[j], "=");
+            if (cl == len && memcmp(ch[j], e, len) == 0) { replaced = 1; break; }
+        }
+        if (!replaced) v[k++] = (char *)e;
+    }
+    /* The last change to a name wins: a set that a later change undoes isn't kept. */
+    for (int64_t j = 0; j < changes.n; j++) {
+        if (!strchr(ch[j], '=')) continue;
+        size_t jl = strcspn(ch[j], "=");
+        int later = 0;
+        for (int64_t l = j + 1; l < changes.n; l++)
+            if (strcspn(ch[l], "=") == jl && memcmp(ch[l], ch[j], jl) == 0) { later = 1; break; }
+        if (!later) v[k++] = ch[j];
+    }
+    v[k] = NULL;
+    return v;
+}
+
+/* Starts argv[0], searched for in PATH unless it has a '/', with these descriptors as
+ * its stdin, stdout and stderr (-1 to inherit). SIGPIPE goes back to its default, since
+ * this program ignores it and an ignored signal stays ignored across exec. */
+static int zr_proc_start(pid_t *pid, char **argv, char **envp, const char *cwd, int in, int out, int err) {
+    posix_spawn_file_actions_t fa;
+    posix_spawnattr_t at;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawnattr_init(&at);
+    if (in >= 0) posix_spawn_file_actions_adddup2(&fa, in, 0);
+    if (out >= 0) posix_spawn_file_actions_adddup2(&fa, out, 1);
+    if (err >= 0) posix_spawn_file_actions_adddup2(&fa, err, 2);
+    if (cwd) posix_spawn_file_actions_addchdir_np(&fa, cwd);
+    sigset_t def;
+    sigemptyset(&def);
+    sigaddset(&def, SIGPIPE);
+    posix_spawnattr_setsigdefault(&at, &def);
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGDEF);
+    zr_flush();
+    fflush(stderr);
+    int r = posix_spawnp(pid, argv[0], &fa, &at, argv, envp ? envp : environ);
+    posix_spawn_file_actions_destroy(&fa);
+    posix_spawnattr_destroy(&at);
+    return r;
+}
+
+static void zr_proc_exit(int ws, zr_slice result) {
+    int64_t *r = (int64_t *)result.p;
+    r[0] = WIFEXITED(ws) ? WEXITSTATUS(ws) : 0;
+    r[1] = WIFSIGNALED(ws) ? WTERMSIG(ws) : 0;
+}
+
+/* Runs a program to its end: `input` fed to its stdin when `feed`, its stdout appended to
+ * `out` and its stderr to `err` as `capture` says (bit 1 and bit 2), killed after `timeout`
+ * nanoseconds when that's positive. `result` gets the exit code and signal. The status is
+ * nonzero only when it couldn't be started, or for TIMEOUT. */
+static ZR_UNUSED uint8_t zr_proc_run(zr_slice argv, zr_slice envs, zr_slice cwd, zr_slice input, int32_t feed,
+                                     zr_vec *out, zr_vec *err, int32_t capture, int64_t timeout, zr_slice result) {
+    int64_t m = zr_sm();
+    char **av = zr_proc_strings(argv);
+    char **ev = envs.n ? zr_proc_env(envs) : NULL;
+    const char *dir = cwd.n ? zr_cstr(cwd) : NULL;
+    int ip[2] = {-1, -1}, op[2] = {-1, -1}, ep[2] = {-1, -1};
+    uint8_t st = 0;
+    if ((feed && zr_pipe(ip) < 0) || ((capture & 1) && zr_pipe(op) < 0) || ((capture & 2) && zr_pipe(ep) < 0)) {
+        st = zr_errno();
+    }
+    pid_t pid = 0;
+    if (!st) {
+        int r = zr_proc_start(&pid, av, ev, dir, ip[0], op[1], ep[1]);
+        if (r) { errno = r; st = zr_errno(); }
+    }
+    int *child[3] = {&ip[0], &op[1], &ep[1]};
+    for (int i = 0; i < 3; i++) if (*child[i] >= 0) { close(*child[i]); *child[i] = -1; }
+    if (st) {
+        if (ip[1] >= 0) close(ip[1]);
+        if (op[0] >= 0) close(op[0]);
+        if (ep[0] >= 0) close(ep[0]);
+        zr_sr(m);
+        return st;
+    }
+    if (ip[1] >= 0) {
+        fcntl(ip[1], F_SETFL, fcntl(ip[1], F_GETFL) | O_NONBLOCK);
+        if (input.n == 0) { close(ip[1]); ip[1] = -1; }
+    }
+    int64_t deadline = timeout > 0 ? zr_time_mono() + timeout : 0, fed = 0;
+    while (ip[1] >= 0 || op[0] >= 0 || ep[0] >= 0) {
+        struct pollfd pf[3];
+        int k = 0, wait_ms = -1;
+        if (ip[1] >= 0) pf[k++] = (struct pollfd){ip[1], POLLOUT, 0};
+        if (op[0] >= 0) pf[k++] = (struct pollfd){op[0], POLLIN, 0};
+        if (ep[0] >= 0) pf[k++] = (struct pollfd){ep[0], POLLIN, 0};
+        if (deadline) {
+            int64_t left = deadline - zr_time_mono();
+            if (left <= 0) { st = 110; break; }
+            wait_ms = (int)(left / 1000000) + 1;
+        }
+        int n = poll(pf, (nfds_t)k, wait_ms);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) { st = zr_errno(); break; }
+        for (int i = 0; i < k; i++) {
+            if (!pf[i].revents) continue;
+            int fd = pf[i].fd;
+            if (fd == ip[1]) {
+                ssize_t w = write(fd, (const char *)input.p + fed, (size_t)(input.n - fed));
+                if (w > 0) fed += w;
+                if ((w < 0 && errno != EAGAIN && errno != EINTR) || fed == input.n) { close(fd); ip[1] = -1; }
+            } else {
+                zr_vec *v = fd == op[0] ? out : err;
+                ssize_t r = read(fd, (char *)v->p + v->n, 1 << 16);
+                if (r > 0) v->n += r;
+                else if (r == 0 || (errno != EAGAIN && errno != EINTR)) {
+                    close(fd);
+                    if (fd == op[0]) op[0] = -1; else ep[0] = -1;
+                }
+            }
+        }
+    }
+    if (ip[1] >= 0) close(ip[1]);
+    if (op[0] >= 0) close(op[0]);
+    if (ep[0] >= 0) close(ep[0]);
+    int ws = 0;
+    if (deadline && !st) {
+        for (;;) {
+            pid_t w = waitpid(pid, &ws, WNOHANG);
+            if (w == pid) break;
+            if (w < 0 && errno != EINTR) break;
+            if (zr_time_mono() >= deadline) { st = 110; break; }
+            zr_time_sleep(1000000);
+        }
+    }
+    if (st == 110) kill(pid, SIGKILL);
+    if (st == 110 || !deadline) while (waitpid(pid, &ws, 0) < 0 && errno == EINTR) {}
+    zr_proc_exit(ws, result);
+    zr_sr(m);
+    return st;
+}
+
+/* Starts a program alongside this one, with this program's stdin, stdout and stderr. Its
+ * pid, or -1 and errno. */
+static ZR_UNUSED int64_t zr_proc_spawn(zr_slice argv, zr_slice envs, zr_slice cwd) {
+    int64_t m = zr_sm();
+    char **av = zr_proc_strings(argv);
+    char **ev = envs.n ? zr_proc_env(envs) : NULL;
+    pid_t pid;
+    int r = zr_proc_start(&pid, av, ev, cwd.n ? zr_cstr(cwd) : NULL, -1, -1, -1);
+    zr_sr(m);
+    if (r) { errno = r; return -1; }
+    return pid;
+}
+
+static ZR_UNUSED uint8_t zr_proc_wait(int64_t pid, zr_slice result) {
+    int ws;
+    pid_t w;
+    do { w = waitpid((pid_t)pid, &ws, 0); } while (w < 0 && errno == EINTR);
+    if (w < 0) return zr_errno();
+    zr_proc_exit(ws, result);
+    return 0;
+}
+
+static ZR_UNUSED uint8_t zr_proc_kill(int64_t pid, int32_t sig) {
+    return kill((pid_t)pid, sig) < 0 ? zr_errno() : 0;
+}
+
+/* Replaces this process; returns only on failure. */
+static ZR_UNUSED uint8_t zr_proc_exec(zr_slice argv) {
+    char **av = zr_proc_strings(argv);
+    zr_flush();
+    fflush(stderr);
+    signal(SIGPIPE, SIG_DFL);
+    execvp(av[0], av);
+    signal(SIGPIPE, SIG_IGN);
+    return zr_errno();
+}
+
+static ZR_UNUSED int64_t zr_proc_pid(void) { return getpid(); }
+
+static ZR_UNUSED zr_slice zr_proc_name(void) {
+    zr_slice s = {(void *)zr_argv0, (int64_t)strlen(zr_argv0)};
+    return s;
+}
+
+/* Appends the path PATH finds for `prog` (or `prog` itself when it has a '/') to out,
+ * when that's an executable file; NOT_FOUND otherwise. */
+static ZR_UNUSED uint8_t zr_proc_which(zr_slice prog, zr_vec *out) {
+    int64_t m = zr_sm();
+    const char *p = zr_cstr(prog);
+    uint8_t st = 2;
+    struct stat sb;
+    if (prog.n == 0) {
+    } else if (memchr(prog.p, '/', (size_t)prog.n)) {
+        if (access(p, X_OK) == 0 && stat(p, &sb) == 0 && S_ISREG(sb.st_mode)) {
+            memcpy((char *)out->p + out->n, p, (size_t)prog.n);
+            out->n += prog.n;
+            st = 0;
+        }
+    } else {
+        const char *path = getenv("PATH");
+        if (!path) path = "/usr/local/bin:/usr/bin:/bin";
+        while (st && *path) {
+            size_t dl = strcspn(path, ":");
+            char *cand = (char *)zr_scratch_alloc(dl + (size_t)prog.n + 2);
+            memcpy(cand, path, dl);
+            size_t at = dl;
+            if (dl == 0) cand[at++] = '.';
+            cand[at++] = '/';
+            memcpy(cand + at, prog.p, (size_t)prog.n);
+            at += (size_t)prog.n;
+            cand[at] = 0;
+            if (access(cand, X_OK) == 0 && stat(cand, &sb) == 0 && S_ISREG(sb.st_mode)) {
+                memcpy((char *)out->p + out->n, cand, at);
+                out->n += (int64_t)at;
+                st = 0;
+            }
+            path += dl;
+            if (*path == ':') path++;
+        }
+    }
+    zr_sr(m);
+    return st;
+}
+
+/* (columns, rows) of stdout's terminal; NOT_TERMINAL. */
+static ZR_UNUSED uint8_t zr_term_size(zr_slice result) {
+    struct winsize w;
+    if (ioctl(1, TIOCGWINSZ, &w) < 0) return 25;
+    int64_t *r = (int64_t *)result.p;
+    r[0] = w.ws_col;
+    r[1] = w.ws_row;
+    return 0;
 }
 
 /* ------------------------------------------------------------ the program's start */
@@ -1703,8 +2211,11 @@ static ZR_UNUSED void zr_start(int argc, char **argv) {
         zr_stdout = stdout;
     }
     zr_seed_init();
+    zr_argv0 = argc > 0 ? argv[0] : "";
     /* stdin, stdout and stderr are Files from the start (STDLIB §2.1). */
     for (int fd = 0; fd < 3; fd++) zr_in_entry(fd)->open = 1;
+    /* Files still open at exit are written out, however the program ends (DESIGN §6.4). */
+    atexit(zr_wflush_all);
     zr_slice *a = (zr_slice *)zr_stack(1);
     for (int i = 1; i < argc; i++) { a[i - 1].p = argv[i]; a[i - 1].n = (int64_t)strlen(argv[i]); }
     zr_args.p = a;

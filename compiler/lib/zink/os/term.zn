@@ -1,0 +1,13 @@
+package zink.os;
+
+// The terminal (STDLIB §5.2).
+public class term {
+    private static extern("zr_term_size") u8 cSize(i64[:]& r);
+
+    // (columns, rows) of stdout's terminal. NOT_TERMINAL.
+    public static (i64, i64) size() {
+        i64[.2] r = [0, 0];
+        u8 st = cSize(r);
+        return #st (r[0], r[1]);
+    }
+}

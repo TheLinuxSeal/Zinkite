@@ -1798,7 +1798,7 @@ void main(string[.] args) {
     println("mkdirAll again ${again}, over a file ${onFile == status.NOT_DIRECTORY}, mkdir existing ${dup == status.EXISTS}");
     Stat sd @_ = fs.stat(sub);
     Stat sf @_ = fs.stat(b);
-    println("dir ${sd.isDir} ${sd.isFile}, file ${sf.size} ${sf.isFile} ${sf.modified > 1600000000000000000}");
+    println("dir ${sd.isDir} ${sd.isFile}, file ${sf.size} ${sf.isFile} ${sf.modified.nanos > 1600000000000000000}");
     fs.chmod(b, 384);
     Stat sm @_ = fs.stat(b);
     println("mode ${sm.mode % 512}");
@@ -3357,5 +3357,411 @@ void main() {
 }
 "##,
         "bottom\n",
+    );
+}
+
+// ---------------------------------------------------------------- the rest of the v1 library
+
+/// zink.time (STDLIB §5.3): Duration's units and human text, Timestamp to calendar fields
+/// and RFC 3339, parsing with offsets, date-only and time-only forms and a leap second,
+/// INVALID for a bad date, weekdays, a negative timestamp, sleeping and the clocks. The
+/// calendar code agrees with Python's datetime over 5,000 random instants.
+#[test]
+fn zink_time() {
+    prints(
+        r##"import zink.time.*;
+
+void main() {
+    println("${Duration.ns(850).human()} ${Duration.us(1500).human()} ${Duration.ms(350).human()} ${Duration.ms(1250).human()} ${Duration.seconds(3).human()} ${Duration.seconds(427).human()} ${Duration.minutes(123).human()} ${Duration.ms(-1500).human()}");
+    Timestamp t = Timestamp.fromUnix(1795512600);
+    println("${t.iso()} ${t.unixSeconds()}");
+    DateTime d = t.utc();
+    println("${d.year}-${d.month}-${d.day} ${d.weekday()}");
+    DateTime p @e1 = DateTime.parse("2026-11-18T09:30:00.25+01:30");
+    Timestamp pt @e2 = p.toTimestamp();
+    println("${e1} ${p.iso()} ${pt.iso()} ${e2}");
+    DateTime dateOnly @e3 = DateTime.parse("2024-02-29");
+    DateTime timeOnly @e4 = DateTime.parse("23:59:60.123");
+    DateTime bad @e5 = DateTime.parse("2023-02-29");
+    Timestamp none @e6 = timeOnly.toTimestamp();
+    println("${dateOnly.iso()} ${e3} ${timeOnly.iso()} ${e4} ${e5} ${e6}");
+    Timestamp old = Timestamp.fromUnix(-1);
+    println("${old.iso()} ${Timestamp.fromUnix(0).utc().weekday()}");
+    Instant a = time.monotonic();
+    time.sleep(Duration.ms(20));
+    Duration took = a.elapsed();
+    println("slept ${took.toMs() >= 20} ${took.toMs() < 500}");
+    println("now ${time.now().utc().year >= 2026}");
+}
+"##,
+        "850ns 1.5ms 350ms 1.25s 3s 7m07s 2h03m -1.5s
+2026-11-24T09:30:00Z 1795512600
+2026-11-24 2
+0 2026-11-18T09:30:00.25+01:30 2026-11-18T08:00:00.25Z 0
+2024-02-29 0 23:59:60.123 0 22 22
+1969-12-31T23:59:59Z 4
+slept true true
+now true
+",
+    );
+}
+
+/// env (STDLIB §2.3): get, has, set (a view from before keeping the old value), INVALID
+/// names, unset and all().
+#[test]
+fn environment() {
+    prints(
+        r##"void main() {
+    string home @e1 = env.get("HOME");
+    string none @e2 = env.get("ZINK_SURELY_UNSET");
+    println("${home.len > 0} ${e1} ${e2 == status.MISSING} ${env.has("PATH")}");
+    @_ = env.set("ZINK_T", "one");
+    string v1 @_ = env.get("ZINK_T");
+    @_ = env.set("ZINK_T", "two");
+    string v2 @_ = env.get("ZINK_T");
+    println("${v1} ${v2} ${@env.set("", "x")} ${@env.set("a=b", "x")}");
+    env.unset("ZINK_T");
+    i64 n = 0;
+    for (EnvVar v : env.all()) { if (v.name == "ZINK_T") { n++; } }
+    println("after unset ${n} ${env.has("ZINK_T")}");
+}
+"##,
+        "true 0 true true\none two 22 22\nafter unset 0 false\n",
+    );
+}
+
+/// zink.os (STDLIB §5.1, §5.2): running a program and capturing its output, an exit code, a
+/// signal, NOT_FOUND, a Command with arguments, a working directory, environment changes,
+/// input and stderr captured, a timeout, a spawned child killed, which, pid, name,
+/// term.size off a terminal, and exec.
+#[test]
+fn zink_os() {
+    let r = run(
+        r##"import zink.os.*;
+import zink.time.*;
+
+void main(string[.] args) {
+    u8[..>] out = [];
+    Exit e @err = process.run("echo", ["hello", "two words"], out);
+    print("run ${err} ${e.code} ${e.ok()} out=${out}");
+    u8[..>] none = [];
+    Exit f @_ = process.run("sh", ["-c", "exit 3"], none);
+    Exit g @_ = process.run("sh", ["-c", "kill -TERM $$"], none);
+    Exit h @nf = process.run("zink-surely-missing", [], none);
+    println("exit ${f.code} ${f.ok()}, signal ${g.signal}, missing ${nf == status.NOT_FOUND}");
+
+    Command c = new Command("sh");
+    c.arg("-c");
+    c.arg("pwd; echo \"$GREETING\"; echo [$UNSET_ME]; tr a-z A-Z; echo err >&2; exit 5");
+    c.cwd = "/tmp";
+    c.setEnv("GREETING", "hi there");
+    c.setEnv("UNSET_ME", "x");
+    c.unsetEnv("UNSET_ME");
+    c.input = "fed through stdin\n";
+    u8[..>] o2 = [];
+    u8[..>] e2 = [];
+    Exit r2 @_ = c.outputBoth(o2, e2);
+    print("command ${r2.code}\n${o2}stderr ${e2}");
+
+    Command slow = new Command("sleep");
+    slow.arg("5");
+    slow.timeout = Duration.ms(100);
+    Instant t0 = time.monotonic();
+    Exit s @timeout = slow.run();
+    println("timeout ${timeout == status.TIMEOUT} after ${t0.elapsed().toMs() < 2000} signal ${s.signal}");
+
+    Command bg = new Command("sleep");
+    bg.arg("30");
+    Child ch @_ = bg.spawn();
+    @_ = ch.kill();
+    Exit w @_ = ch.wait();
+    println("spawned and killed: signal ${w.signal}");
+
+    u8[.] sh @_ = process.which("sh");
+    u8[.] nope @wn = process.which("zink-surely-missing");
+    println("which ${sh.endsWith("/sh")} ${wn == status.NOT_FOUND}, pid ${process.pid() > 0}, name ${process.name().len > 0}");
+    (i64 cols, i64 rows) @nt = term.size();
+    println("term ${nt == status.NOT_TERMINAL}");
+    if (args.len > 0) {
+        u8 xe = @process.exec("echo", ["exec replaced the process"]);
+        println("exec failed ${xe}");
+    }
+}
+"##,
+        &["exec"],
+    );
+    assert_eq!(
+        r.stdout,
+        "run 0 0 true out=hello two words
+exit 3 false, signal 15, missing true
+command 5
+/tmp
+hi there
+[]
+FED THROUGH STDIN
+stderr err
+timeout true after true signal 9
+spawned and killed: signal 15
+which true true, pid true, name true
+term true
+exec replaced the process
+",
+        "{}",
+        r.stderr
+    );
+}
+
+/// zink.random (STDLIB §8.2): xoshiro256** seeded by SplitMix64, nextF64, Lemire's
+/// unbiased range for small, unsigned and 128-bit spans, an even spread, and the kernel's
+/// random bytes. The numbers are what a Python model of the same algorithms gives.
+#[test]
+fn zink_random() {
+    prints(
+        r##"import zink.random.*;
+
+void main() {
+    Rng r = random.seeded(42);
+    for (i64 i = 0; i < 5; i++) { print("${r.nextU64()} "); }
+    println("");
+    Rng f = random.seeded(7);
+    println("${f.nextF64()} ${f.nextF64()}");
+    Rng g = random.seeded(99);
+    for (i64 i = 0; i < 6; i++) { print("${g.range(-3, 4)} "); }
+    for (i64 i = 0; i < 3; i++) { print("${g.range((u8) 10, (u8) 250)} "); }
+    print("${g.range((i128) -100000000000000000000000, (i128) 100000000000000000000000)} ");
+    println("");
+    i64[..>] counts = [0, 0, 0, 0, 0, 0];
+    Rng h = random.seeded(1);
+    for (i64 i = 0; i < 600000; i++) { counts[h.range(0, 6)] += 1; }
+    bool even = true;
+    for (i64 c : counts) { if (c < 99000 || c > 101000) { even = false; } }
+    println("even ${even}");
+    u8[..>] bytes = [];
+    random.secureBytes(bytes, 16);
+    Rng os = random.fromOs();
+    println("secure ${bytes.len} ${random.secureU64() != random.secureU64()} ${os.chance(1.0)} ${os.chance(0.0)}");
+}
+"##,
+        "1546998764402558742 6990951692964543102 12544586762248559009 17057574109182124193 18295552978065317476 
+0.7005764821796896 0.2787512294737843
+-1 0 -1 2 2 -2 76 24 213 31889431257593731978611 
+even true
+secure 16 true true false
+",
+    );
+}
+
+/// zink.hash, zink.encoding, ansi, math.roundToI64 and the bit methods (STDLIB §6.2, §8):
+/// the values are Python's hashlib, zlib and base64 ones.
+#[test]
+fn hashing_encoding_colors_and_bits() {
+    prints(
+        r##"import zink.hash.*;
+import zink.encoding.*;
+import zink.cli.*;
+
+void main() {
+    string t = "The quick brown fox jumps over the lazy dog";
+    println("${hash.fnv1a(t)} ${hash.crc32(t)} ${hash.sha256(t).hex()}");
+    Sha256 h = new Sha256();
+    h.update("The quick brown ");
+    h.update("fox jumps over the lazy dog");
+    Crc32 c = new Crc32();
+    c.update("The quick brown ");
+    c.update("fox jumps over the lazy dog");
+    println("${h.finish().hex()} ${c.finish()}");
+    u8[..>] raw = [];
+    raw +> 0xfb;
+    raw +> 0xff;
+    raw +> 0xfe;
+    println("${t.hex()} ${base64.encode(t)} ${base64.encodeUrl(raw)} ${base64.encode(raw)}");
+    u8[..>] back = [];
+    @_ = base64.decodeUrl("-__-", back);
+    u8[..>] hb = [];
+    @_ = hex.decode("DEADbeef", hb);
+    println("${back == raw} ${hb.hex()} ${@hex.decode("abc", hb)} ${@base64.decode("QR==", hb)}");
+    Colors piped = ansi.colors(stdout);
+    Colors on = ansi.always();
+    println("[${piped.red}plain${piped.reset}] [${on.green}${on.bold}x${on.reset}]");
+    i64 r1 @e1 = math.roundToI64(2.5);
+    i64 r2 @e2 = math.roundToI64(0.0 / 0.0);
+    u64 bits = 0x8000000000000001;
+    println("${r1} ${e1} ${r2} ${e2} ${bits.rotateLeft(1)} ${bits.leadingZeros()} ${((u16) 0x1234).reverseBytes()} ${(64).isPowerOf2()} ${(-64).isPowerOf2()}");
+}
+"##,
+        "17580284887202820368 1095738169 d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592
+d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592 1095738169
+54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f67 VGhlIHF1aWNrIGJyb3duIGZveCBqdW1wcyBvdmVyIHRoZSBsYXp5IGRvZw== -__- +//+
+true deadbeef 22 22
+[plain] [\u{1b}[32m\u{1b}[1mx\u{1b}[0m]
+3 0 0 34 3 0 13330 true false
+",
+    );
+}
+
+/// zink.csv (STDLIB §9.1): quoted separators, doubled quotes, a blank line, spaces kept
+/// and quoted on the way out, a quoted line break, \r\n, and where a bad file fails. 2,000
+/// random rows round-trip through Python's csv module and back.
+#[test]
+fn zink_csv() {
+    let exe = build(
+        r##"import zink.csv.*;
+
+void main() {
+    u8[.] text @_ = stdin.readAll();
+    CsvReader r = new CsvReader(text);
+    u8[..>] strings = [];
+    string[..~] fields = [];
+    u8[..>] out = [];
+    CsvWriter w = new CsvWriter(out);
+    while (true) {
+        u8 st = @r.next(fields, strings);
+        if (st == status.END) { break; }
+        if (st != 0) {
+            ParseError e = r.error();
+            println("error ${e.code} line ${e.line} column ${e.column}: ${e.message}");
+            return;
+        }
+        w.writeRow(fields);
+    }
+    print(out);
+}
+"##,
+    );
+    let feed = |input: &str| {
+        use std::io::Write;
+        let mut child = Command::new(&exe)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned()
+    };
+    assert_eq!(
+        feed("name,note\n\"a, b\",\"say \"\"hi\"\"\"\n\nplain, spaced \n\"multi\nline\",x\r\nlast"),
+        "name,note\n\"a, b\",\"say \"\"hi\"\"\"\n\nplain,\" spaced \"\n\"multi\nline\",x\nlast\n"
+    );
+    assert_eq!(
+        feed("a,\"b\nc"),
+        "error 22 line 1 column 3: this quote is never closed\n"
+    );
+    assert_eq!(
+        feed("a,\"b\"c,d\n"),
+        "error 22 line 1 column 6: text after a closing quote\n"
+    );
+}
+
+/// fs.walk (STDLIB §4.3): depth-first from the root, skip(), links not followed, and
+/// followed with a loop back to an open directory reported as LOOP.
+#[test]
+fn walking_a_tree() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("zink-walk");
+    let _ = std::fs::remove_dir_all(&dir);
+    let t = dir.join("tree");
+    std::fs::create_dir_all(t.join("a/b")).unwrap();
+    std::fs::create_dir_all(t.join(".git/objects")).unwrap();
+    std::fs::create_dir_all(t.join("c")).unwrap();
+    std::fs::write(t.join("a/one.zn"), "1").unwrap();
+    std::fs::write(t.join("a/b/two.zn"), "22").unwrap();
+    std::fs::write(t.join(".git/objects/obj"), "x").unwrap();
+    std::fs::write(t.join("c/three.txt"), "3").unwrap();
+    std::os::unix::fs::symlink("../a", t.join("c/link")).unwrap();
+    std::os::unix::fs::symlink("..", t.join("a/b/up")).unwrap();
+    let exe = build(
+        r##"import zink.io.*;
+
+void main(string[.] args) {
+    u8[..~] buf = [];
+    Walker w = fs.walk(args[0], buf);
+    w.followLinks = args.len > 1;
+    u8[..>] lines = [];
+    while (WalkEntry e : w.next()) {
+        if (e.isDir && e.name == ".git") { w.skip(); continue; }
+        lines.append("${e.depth} ${e.name} ${e.isDir} ${e.isLink} ${e.err}\n");
+    }
+    print(lines);
+}
+"##,
+    );
+    let sorted = |args: &[&str]| {
+        let mut v: Vec<String> = exec(&exe, args).stdout.lines().map(String::from).collect();
+        v.sort();
+        v
+    };
+    let root = t.to_str().unwrap();
+    assert_eq!(
+        sorted(&[root]),
+        [
+            "0 tree true false 0",
+            "1 a true false 0",
+            "1 c true false 0",
+            "2 b true false 0",
+            "2 link false true 0",
+            "2 one.zn false false 0",
+            "2 three.txt false false 0",
+            "3 two.zn false false 0",
+            "3 up false true 0",
+        ]
+    );
+    assert_eq!(
+        sorted(&[root, "follow"]),
+        [
+            "0 tree true false 0",
+            "1 a true false 0",
+            "1 c true false 0",
+            "2 b true false 0",
+            "2 link true true 0",
+            "2 one.zn false false 0",
+            "2 three.txt false false 0",
+            "3 b true false 0",
+            "3 one.zn false false 0",
+            "3 two.zn false false 0",
+            "3 up true true 40",
+            "4 two.zn false false 0",
+            "4 up true true 40",
+        ]
+    );
+}
+
+/// A File's writes are buffered: position() counts what's buffered, close() writes it,
+/// and a program that stops as a bug with the file open still writes it out.
+#[test]
+fn file_writes_are_buffered() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("zink-wbuf");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let exe = build(
+        r##"import zink.io.*;
+
+void main(string[.] args) {
+    File f @_ = File.create(args[0]);
+    for (i64 i = 0; i < 100000; i++) { @_ = f.println("line ${i}"); }
+    i64 at @_ = f.position();
+    @_ = f.write("tail");
+    if (args.len > 1) { fail("stopping with a file open"); }
+    @_ = f.close();
+    println("position ${at}");
+}
+"##,
+    );
+    let a = dir.join("a.txt");
+    let r = exec(&exe, &[a.to_str().unwrap()]);
+    assert_eq!(r.stdout, "position 1088890\n");
+    let text = std::fs::read_to_string(&a).unwrap();
+    assert_eq!(text.matches('\n').count(), 100000);
+    assert!(text.ends_with("line 99999\ntail"));
+    let b = dir.join("b.txt");
+    let r = exec(&exe, &[b.to_str().unwrap(), "stop"]);
+    assert_eq!(r.code, 1);
+    assert!(
+        std::fs::read_to_string(&b)
+            .unwrap()
+            .ends_with("line 99999\ntail")
     );
 }

@@ -1,5 +1,7 @@
 package zink.io;
 
+import zink.time.*;
+
 // File system operations (STDLIB §4.4). The C layer is the runtime's zr_fs functions.
 public class fs {
     private static extern("zr_fs_stat") u8 cStat(string path, i32 follow, i64[:]& out);
@@ -28,10 +30,16 @@ public class fs {
         i64[.7] o = [0, 0, 0, 0, 0, 0, 0];
         u8 err = cStat(path, follow, o);
         if (err != 0) {
-            return #err new Stat(0, 0, 0, 0, 0, false, false, false);
+            return #err new Stat(0, new Timestamp(0), 0, 0, 0, false, false, false);
         }
-        i64 modified = o[1] * 1000000000 + o[2];
+        Timestamp modified = new Timestamp(o[1] * 1000000000 + o[2]);
         return new Stat(o[0], modified, (u32) o[3], (u32) o[4], (u32) o[5], o[6] == 1, o[6] == 2, o[6] == 3);
+    }
+
+    // A walk over the tree at root, with the current path in `path` (STDLIB §4.3):
+    // `while (WalkEntry e : w.next())`.
+    public static Walker walk(string root, u8[..~]& path) {
+        return new Walker(root, path);
     }
 
     // A file, a link or an empty directory. NOT_FOUND, NOT_EMPTY, PERMISSION.

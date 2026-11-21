@@ -653,6 +653,8 @@ fn text_method(name: &str) -> Vec<Sig> {
         "replaceAll" | "replaceFirst" => one(Sig::new(name, vec![s(), s()], text())),
         "repeat" | "pad" | "padEnd" => one(Sig::new(name, vec![i64t()], text())),
         "isValidUtf8" => one(Sig::new(name, vec![], Ty::bool())),
+        // The bytes as hex (STDLIB §8.4); on an integer, `hex` formats its value.
+        "hex" => one(Sig::new(name, vec![], text())),
         "codePointCount" => one(Sig::new(name, vec![], i64t())),
         _ => Vec::new(),
     }

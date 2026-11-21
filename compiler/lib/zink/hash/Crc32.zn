@@ -1,0 +1,10 @@
+package zink.hash;
+
+// CRC-32, for data that arrives in pieces (STDLIB §8.3).
+public class Crc32 {
+    private u32 crc = 0;
+
+    public mut void update(string chunk) { crc = hash.cCrc(crc, chunk); }
+
+    public u32 finish() { return crc; }
+}

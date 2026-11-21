@@ -1,0 +1,34 @@
+package zink.cli;
+
+import zink.io.*;
+
+// Terminal colors (STDLIB §6.2).
+public class ansi {
+    // Escape codes when f is a terminal, NO_COLOR isn't set to something (no-color.org),
+    // and TERM isn't "dumb".
+    public static Colors colors(File f) {
+        if (!f.isTerminal()) {
+            return never();
+        }
+        string no @unset = env.get("NO_COLOR");
+        if (!unset && no.len > 0) {
+            return never();
+        }
+        string term @noTerm = env.get("TERM");
+        if (!noTerm && term == "dumb") {
+            return never();
+        }
+        return always();
+    }
+
+    // For --color=always.
+    public static Colors always() {
+        return new Colors("\u{1b}[1m", "\u{1b}[2m", "\u{1b}[4m", "\u{1b}[31m", "\u{1b}[32m",
+            "\u{1b}[33m", "\u{1b}[34m", "\u{1b}[35m", "\u{1b}[36m", "\u{1b}[90m", "\u{1b}[0m");
+    }
+
+    // For --color=never.
+    public static Colors never() {
+        return new Colors("", "", "", "", "", "", "", "", "", "", "");
+    }
+}

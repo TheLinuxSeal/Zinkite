@@ -2,8 +2,10 @@ package zink.io;
 
 // A file (STDLIB §4.1). It's a handle (DESIGN §6.4): copies share the file, and once one
 // copy closes it the others fail with BAD_HANDLE, even if the descriptor is reused.
-// stdin, stdout and stderr are Files for descriptors 0, 1 and 2. Writes go straight to
-// the file, but stdout's go into C's stdout buffer, in order with print.
+// stdin, stdout and stderr are Files for descriptors 0, 1 and 2. Writes are buffered, 64
+// KB at a time, and written by flush, sync and close, before reads and seeks, and at exit,
+// so a failed write may show only then; stdout's go into C's stdout buffer, in order with
+// print, and stderr's straight out.
 public class File {
     private i64 h;
 
@@ -122,7 +124,7 @@ public class File {
         return #err;
     }
 
-    // Writes what stdout holds; other files aren't buffered. IO, NO_SPACE.
+    // Writes what's buffered. IO, NO_SPACE.
     public void flush() {
         u8 err = cFlush(h);
         return #err;

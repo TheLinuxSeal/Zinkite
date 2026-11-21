@@ -103,9 +103,11 @@ checks for lifetimes, removals and variable-size values (rules S, R and V of
 - statuses;
 - calling C.
 
-Of the standard library, `zink.io` (files, directories, paths) and `zink.cli`
-(argument parsing with generated `--help`) are written, in Zinkite, and built
-into the compiler.
+The standard library's first tier is written, in Zinkite on a small C layer, and
+built into the compiler: files, directories and paths (`zink.io`), running programs
+(`zink.os`), time and dates (`zink.time`), argument parsing and colors (`zink.cli`),
+random numbers, hashing, hex and base64, and CSV. Only `hash.xxh3` is missing from
+it. JSON, TOML and YAML come next.
 
 Seven of the eight programs in `examples/` run; `jsonfmt` needs `zink.json`.
 `compiler/README.md` lists what's done and what isn't, in detail.

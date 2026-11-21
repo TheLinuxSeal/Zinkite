@@ -2707,7 +2707,6 @@ impl<'p, 'a> Checker<'p, 'a> {
                     None => Ty::Unknown,
                 };
             }
-            "env" => return Ty::Unknown,
             _ => {}
         }
         if self.unmodelled() && builtins::LIBRARY_NAMESPACES.contains(&name) {
@@ -2756,7 +2755,9 @@ impl<'p, 'a> Checker<'p, 'a> {
             );
         }
         for (p, ty) in m.decl.params.iter().zip(&m.params) {
-            let array = runtime && matches!(ty, Ty::Ref(a) if matches!(**a, Ty::Array(..)));
+            let array = runtime
+                && (matches!(ty, Ty::Ref(a) if matches!(**a, Ty::Array(..)))
+                    || matches!(ty, Ty::Slice(_) | Ty::View(_)));
             if !crate::cheader::crosses_as_param(ty) && !array {
                 self.err_help(
                     p.ty.span,
@@ -2765,7 +2766,9 @@ impl<'p, 'a> Checker<'p, 'a> {
                 );
             }
         }
-        if !crate::cheader::crosses_as_result(&m.ret) {
+        // The runtime gives text back as a Zinkite view: environment text, which it keeps.
+        let runtime_text = runtime && m.ret.is_string();
+        if !crate::cheader::crosses_as_result(&m.ret) && !runtime_text {
             self.err_help(
                 m.decl.name.span,
                 format!("a C function can't return {}", self.show(&m.ret)),

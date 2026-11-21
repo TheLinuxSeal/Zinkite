@@ -1,0 +1,18 @@
+package zink.random;
+
+// Random numbers (STDLIB §8.2).
+public class random {
+    private static extern("zr_random_u64") u64 cU64();
+    private static extern("zr_random_bytes") void cBytes(u8[..>]& out, i64 n);
+
+    // The same sequence on every run.
+    public static Rng seeded(u64 seed) { return Rng.ofSeed(seed); }
+
+    // Seeded from getrandom.
+    public static Rng fromOs() { return Rng.ofSeed(cU64()); }
+
+    // From the kernel: for keys, tokens and salts. Appends n bytes to out.
+    public static void secureBytes(u8[..>]& out, i64 n) { cBytes(out, n); }
+
+    public static u64 secureU64() { return cU64(); }
+}
