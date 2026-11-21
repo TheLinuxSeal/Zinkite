@@ -97,8 +97,8 @@ and caches the executable by a hash of the C; `-O` builds at `-O2`. TinyCC, whic
 DESIGN plans for `zink run`, isn't built in yet.
 
 It covers script files, classes, enums, constructors and methods, statuses,
-references, strings and interpolation, every array kind except capped ones with a
-start or cursor slot, slices, every statement form, casts and
+references, strings and interpolation, every array kind, slices (except of arrays
+whose elements aren't in order, which are undecided), every statement form, casts and
 the integer rules, and for-each over arrays and text iterators. Bugs stop the
 program with the file and line, and exit status 1. `examples/linebuf.zn` runs.
 
@@ -125,6 +125,18 @@ Arrays on data stacks, by layout:
   passes 4 B², which keeps it between √n/2 and √n.
 
 Each declaration of a growable local gets data stacks of its own.
+
+Capped arrays (`T[..~16]`) sit inline in their parent, with counters as narrow as
+the cap allows (DESIGN §11):
+- `{n, e[k]}` when only the end changes;
+- with a start slot (`T[~.~8]`): a ring buffer `{h, n, e[k]}`;
+- with a cursor (`T[~8]`, `T[.~.8]`): a gap buffer `{gs, an, e[k]}`, the elements
+  before the cursor at the start of `e` and those after it at the end. Edits at
+  the cursor are O(1), and seeks move the elements in between, so a reference into
+  one reads whatever element is in its slot afterwards (DESIGN §4.5).
+
+A literal longer than the cap doesn't compile, and text or a slice that's longer
+stops the program, as a cast that doesn't fit does (DESIGN §9.1).
 
 ## Layout
 

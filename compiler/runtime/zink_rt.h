@@ -361,6 +361,40 @@ static ZR_UNUSED void zr_chk_clear(zr_chk *c) {
     c->M = 15;
 }
 
+/* Capped arrays with a cursor (DESIGN §4.3) keep a small gap buffer inline: the gs
+ * elements before the cursor at the start of e, the an after it at the end. Moving the
+ * cursor to position i moves the elements in between across the gap. */
+static ZR_UNUSED void zr_gap_move(char *e, size_t sz, int64_t k, int64_t *gs, int64_t *an, int64_t i) {
+    if (i < *gs) {
+        int64_t d = *gs - i;
+        memmove(e + (size_t)(k - *an - d) * sz, e + (size_t)i * sz, (size_t)d * sz);
+        *gs = i;
+        *an += d;
+    } else if (i > *gs) {
+        int64_t d = i - *gs;
+        memmove(e + (size_t)*gs * sz, e + (size_t)(k - *an) * sz, (size_t)d * sz);
+        *gs += d;
+        *an -= d;
+    }
+}
+
+/* Capped arrays with a start slot are ring buffers (DESIGN §4.3). For sorting, the
+ * buffer is rotated in place so its first element, at h, comes to e[0]: three
+ * reversals, as k is small. */
+static void zr_ring_reverse(char *e, size_t sz, int64_t lo, int64_t hi) {
+    for (hi--; lo < hi; lo++, hi--) {
+        char *a = e + (size_t)lo * sz, *b = e + (size_t)hi * sz;
+        for (size_t i = 0; i < sz; i++) { char t = a[i]; a[i] = b[i]; b[i] = t; }
+    }
+}
+
+static ZR_UNUSED void zr_ring_line(char *e, size_t sz, int64_t k, int64_t h) {
+    if (h == 0) return;
+    zr_ring_reverse(e, sz, 0, h);
+    zr_ring_reverse(e, sz, h, k);
+    zr_ring_reverse(e, sz, 0, k);
+}
+
 /* ------------------------------------------------------------ output (DESIGN §4.13) */
 
 static char zr_obuf[1 << 16];

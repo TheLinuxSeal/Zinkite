@@ -212,6 +212,10 @@ fn bugs_stop_the_program_with_their_location() {
         ),
         ("fail(\"unreachable\");", "prog.zn:3: unreachable"),
         (
+            "string s = \"abcdef\"; u8[~4] g = s;",
+            "prog.zn:3: the value doesn't fit in an array that holds 4",
+        ),
+        (
             "i64[..>] a = []; string s = \"abc\"; string t = s[2:9];",
             "prog.zn:3: slice 2:9 is out of range for length 3",
         ),
@@ -605,5 +609,274 @@ void main() {
 "#,
         "ok: 8008 elements after 12004 inserts, 16 checks, sums agree: true
 ",
+    );
+}
+
+/// Capped arrays with a start slot are inline ring buffers, and with a cursor inline gap
+/// buffers (DESIGN §4.3): wrapping, FULL, sorting and truncating around the cursor, and
+/// both as fields held inside an object.
+#[test]
+fn capped_ring_and_gap_buffers() {
+    prints(
+        r#"class Recent {
+    i64[~.~4] last = [];
+    u8[~8] word = [];
+
+
+    mut void see(i64 x) {
+        if (this.last.len == 4) {
+            @_ = this.last -<;
+        }
+        @_ = this.last +> x;
+    }
+}
+
+void main() {
+    // A ring buffer: pushes and pops at both ends wrap around inside its 4 slots.
+    i64[~.~4] q = [];
+    @_ = q +> 1;
+    @_ = q +> 2;
+    @_ = q +< 0;
+    i64 a @_ = q -<;
+    @_ = q +> 3;
+    @_ = q +> 4;
+    i64& r @st = q.push(5);
+    println("ring ${q} len ${q.len} took ${a}, full: ${st == status.FULL}, last ${r}");
+    i64 b @_ = q -<;
+    @_ = q +> 6;
+    @_ = q +< -1;
+    println("ring ${q}, q[0] ${q[0]} q[3] ${q[3]} took ${b}");
+    q.sort();
+    println("sorted ${q}, then [0]=${q[0]}");
+    q.reverse();
+    q.swap(0, 3);
+    println("reversed and swapped ${q}, sum ${q.sum()} has 6: ${q.contains(6)} index of 3: ${q.indexOf(3)}");
+    for (i64 x : q) { print("${x * 10} "); }
+    println("");
+    q.truncate(2);
+    i64 e1 @_ = q ->;
+    i64 e2 @_ = q ->;
+    i64 e3 @s3 = q ->;
+    println("drained ${e1} ${e2}, then ${e3} ${s3 == status.EMPTY}, len ${q.len}");
+
+    // A gap buffer: inserts at the cursor move the elements after it to the far end.
+    u8[~8] g = [];
+    @_ = g +^ 'a';
+    @_ = g +^ 'c';
+    g.move(-1);
+    @_ = g +^ 'b';
+    @_ = g +> 'z';
+    @_ = g +< '<';
+    println("gap ${g} len ${g.len} cursor ${g.cursor}");
+    @_ = g.seek(1);
+    u8 d @_ = g -^;
+    u8 f @_ = g ^-;
+    println("removed '${d}' and '${f}': ${g} cursor ${g.cursor}");
+    @_ = g.insertAt(2, 'Q');
+    u8 w @_ = g.removeAt(0);
+    println("insertAt and removeAt: ${g}, removed '${w}', cursor ${g.cursor}");
+    for (i64 i = 0; i < 5; i++) { @_ = g +^ 'x'; }
+    u8& last @full = g.insert('y');
+    println("${g} full: ${full == status.FULL}, len ${g.len}, ref to '${last}'");
+    g.move(-3);
+    g.sort();
+    println("sorted ${g}, cursor ${g.cursor}");
+    g.truncate(3);
+    println("truncated ${g} len ${g.len} cursor ${g.cursor}");
+    g[1] = 'M';
+    g.seekStart();
+    @_ = g +^ '_';
+    println("${g} g[0] '${g[0]}' g[g.len - 1] '${g[g.len - 1]}'");
+    @_ = g.seekFromEnd(0);
+    g.clear();
+    println("cleared: len ${g.len} cursor ${g.cursor}");
+
+    // Inline in a class: the object holds both buffers directly.
+    Recent rc = new Recent();
+    for (i64 i = 1; i <= 7; i++) { rc.see(i * i); }
+    @_ = rc.word +> 'h';
+    @_ = rc.word +> 'i';
+    println("recent ${rc.last} word ${rc.word}");
+}
+"#,
+        r#"ring [1, 2, 3, 4] len 4 took 0, full: true, last 4
+ring [2, 3, 4, 6], q[0] 2 q[3] 6 took 1
+sorted [2, 3, 4, 6], then [0]=2
+reversed and swapped [2, 4, 3, 6], sum 15 has 6: true index of 3: 2
+20 40 30 60 
+drained 4 2, then 0 true, len 0
+gap <abcz len 5 cursor 3
+removed '60' and '97': bcz cursor 0
+insertAt and removeAt: cQz, removed '98', cursor 0
+xxxxxcQz full: true, len 8, ref to '122'
+sorted Qcxxxxxz, cursor 2
+truncated Qcx len 3 cursor 2
+_QMx g[0] '95' g[g.len - 1] '120'
+cleared: len 0 cursor 0
+recent [16, 25, 36, 49] word hi
+"#,
+    );
+}
+
+/// Literals and text fill capped arrays; copies are values; references reach callees.
+#[test]
+fn capped_literals_copies_and_parameters() {
+    prints(
+        r#"void rotate(i64[~.~4]& r) {
+    i64 x @_ = r -<;
+    @_ = r +> x;
+}
+
+i64 total(i64[~8]& g) {
+    i64 t = 0;
+    for (i64 x : g) { t += x; }
+    return t;
+}
+
+void main() {
+    i64[..~4] plain = [7, 8];
+    i64[~.~4] r = [1, 2, 3];
+    u8[~8] g = "abc";
+    println("${plain} ${r} ${g} cursor ${g.cursor}");
+    rotate(r);
+    rotate(r);
+    i64[~.~4] copy = r;
+    @_ = copy +> 9;
+    println("rotated ${r}, a copy ${copy}");
+    i64[~8] h = [5, 6, 7];
+    @_ = h.seek(1);
+    @_ = h +^ 100;
+    for (i64& x : h) { x *= 2; }
+    println("${h} total ${total(h)} min ${h.min()} max ${h.max()} getOr ${h.getOr(9, -1)}");
+    h.sortDescending();
+    println("${h} cursor ${h.cursor}");
+    h.fill(3);
+    println("${h}");
+}
+"#,
+        r#"[7, 8] [1, 2, 3] abc cursor 0
+rotated [3, 1, 2], a copy [3, 1, 2, 9]
+[10, 200, 12, 14] total 236 min 10 max 200 getOr -1
+[200, 14, 12, 10] cursor 2
+[3, 3, 3, 3]
+"#,
+    );
+}
+
+/// Random inserts, removals, seeks and moves on a gap buffer and a ring buffer, checked
+/// against plain arrays and a cursor position kept by hand.
+#[test]
+fn capped_buffers_against_a_model() {
+    prints(
+        r#"u64 seed = 99;
+
+i64 below(i64 n) {
+    seed = seed *% 6364136223846793005 +% 1442695040888963407;
+    return (i64) ((seed >> 33) % (u64) n);
+}
+
+void put(i64[..~]& m, i64 i, i64 x) {
+    @_ = m +> 0;
+    for (i64 k = m.len - 1; k > i; k--) { m[k] = m[k - 1]; }
+    m[i] = x;
+}
+
+i64 cut(i64[..~]& m, i64 i) {
+    i64 x = m[i];
+    for (i64 k = i; k + 1 < m.len; k++) { m[k] = m[k + 1]; }
+    @_ = m ->;
+    return x;
+}
+
+void main() {
+    i64[~16] g = [];
+    i64[~.~16] r = [];
+    i64[..~] gm = [];
+    i64[..~] rm = [];
+    i64 cur = 0;
+    i64 next = 0;
+    i64 bad = 0;
+    i64 fulls = 0;
+    i64 empties = 0;
+    for (i64 step = 0; step < 20000; step++) {
+        i64 op = below(11);
+        i64 x = next;
+        next++;
+        u8 st = 0;
+        if (op == 0) {
+            @st = g +^ x;
+            if (st == 0) { put(gm, cur, x); cur++; }
+        } else if (op == 1) {
+            @st = g +> x;
+            if (st == 0) { put(gm, gm.len, x); }
+        } else if (op == 2) {
+            @st = g +< x;
+            if (st == 0) { put(gm, 0, x); cur++; }
+        } else if (op == 3) {
+            i64 i = below(gm.len + 1);
+            @st = g.insertAt(i, x);
+            cur = i;
+            if (st == 0) { put(gm, i, x); cur++; }
+        } else if (op == 4) {
+            i64 v @s = g -^;
+            st = s;
+            if (s == 0) { if (v != cut(gm, cur - 1)) { bad++; } cur--; }
+        } else if (op == 5) {
+            i64 v @s = g ^-;
+            st = s;
+            if (s == 0 && v != cut(gm, cur)) { bad++; }
+        } else if (op == 6) {
+            i64 v @s = g ->;
+            st = s;
+            if (s == 0) { if (cur == gm.len) { cur--; } if (v != cut(gm, gm.len - 1)) { bad++; } }
+        } else if (op == 7) {
+            i64 v @s = g -<;
+            st = s;
+            if (s == 0) { if (cur > 0) { cur--; } if (v != cut(gm, 0)) { bad++; } }
+        } else if (op == 8 && gm.len > 0) {
+            i64 i = below(gm.len);
+            i64 v @s = g.removeAt(i);
+            cur = i;
+            if (v != cut(gm, i)) { bad++; }
+        } else if (op == 9) {
+            i64 i = below(gm.len + 1);
+            @_ = g.seek(i);
+            cur = i;
+        } else {
+            i64 d = below(9) - 4;
+            g.move(d);
+            cur = clamp(cur + d, 0, gm.len);
+        }
+        if (st == status.FULL) { fulls++; }
+        if (st == status.EMPTY) { empties++; }
+        if (g.len != gm.len || g.cursor != cur) { bad++; }
+        for (i64 k = 0; k < gm.len; k++) { if (g[k] != gm[k]) { bad++; } }
+
+        i64 rop = below(5);
+        if (rop == 0) {
+            @st = r +> x;
+            if (st == 0) { put(rm, rm.len, x); }
+        } else if (rop == 1) {
+            @st = r +< x;
+            if (st == 0) { put(rm, 0, x); }
+        } else if (rop == 2) {
+            i64 v @s = r ->;
+            if (s == 0 && v != cut(rm, rm.len - 1)) { bad++; }
+        } else if (rop == 3) {
+            i64 v @s = r -<;
+            if (s == 0 && v != cut(rm, 0)) { bad++; }
+        } else if (rm.len > 0) {
+            i64 i = below(rm.len);
+            r[i] = x;
+            rm[i] = x;
+        }
+        if (r.len != rm.len) { bad++; }
+        i64 k = 0;
+        for (i64 v : r) { if (v != rm[k]) { bad++; } k++; }
+    }
+    println("mismatches ${bad}, FULL ${fulls > 0}, EMPTY ${empties > 0}, lengths ${g.len} ${r.len}");
+}
+"#,
+        "mismatches 0, FULL true, EMPTY true, lengths 9 5\n",
     );
 }

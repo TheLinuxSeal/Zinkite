@@ -1943,7 +1943,11 @@ impl<'p, 'a> Checker<'p, 'a> {
             self.flow.assign(s);
         }
         let t = match self.lookup_local(&id.name) {
-            Some(l) => self.locals[l].ty.clone(),
+            Some(l) => {
+                let decl = key(self.locals[l].decl);
+                self.facts.names.insert(key(id.span), NameRes::Local(decl));
+                self.locals[l].ty.clone()
+            }
             None => match self.field_type(&id.name, id.span) {
                 Some(t) => t,
                 None => {
@@ -2316,6 +2320,19 @@ impl<'p, 'a> Checker<'p, 'a> {
                     if let StrPart::Interp(x) = p {
                         self.interp(x);
                     }
+                }
+                if let Some(Ty::Array(_, k)) = want.map(|w| w.unref())
+                    && k.cap == CapKind::Capped
+                    && parts.iter().all(|p| matches!(p, StrPart::Text(_)))
+                {
+                    let n: usize = parts
+                        .iter()
+                        .map(|p| match p {
+                            StrPart::Text(t) => t.len(),
+                            StrPart::Interp(_) => 0,
+                        })
+                        .sum();
+                    self.over_cap(n, k.size, "bytes", e.span);
                 }
                 Ty::string()
             }
@@ -3860,6 +3877,21 @@ impl<'p, 'a> Checker<'p, 'a> {
         }
     }
 
+    /// A literal longer than a capped array's capacity doesn't compile, as a number
+    /// literal that doesn't fit its type doesn't (DESIGN §9.1).
+    fn over_cap(&mut self, n: usize, cap: u64, what: &str, span: Span) {
+        if cap > 0 && n as u64 > cap {
+            self.err_help(
+                span,
+                format!(
+                    "this literal has {} {}, and the array holds {}",
+                    n, what, cap
+                ),
+                "shorten the literal, or raise the array's cap",
+            );
+        }
+    }
+
     fn array_lit(&mut self, items: &[Expr], want: Option<&Ty>, span: Span) -> Ty {
         match want.map(|w| w.unref().clone()) {
             Some(t @ (Ty::Array(..) | Ty::Slice(_))) => {
@@ -3867,6 +3899,11 @@ impl<'p, 'a> Checker<'p, 'a> {
                 for x in items {
                     let it = self.expr(x, Some(&e));
                     self.expect(&it, &e, x);
+                }
+                if let Ty::Array(_, k) = &t
+                    && k.cap == CapKind::Capped
+                {
+                    self.over_cap(items.len(), k.size, "elements", span);
                 }
                 t
             }

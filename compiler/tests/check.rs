@@ -129,6 +129,15 @@ fn literals_take_their_type_from_where_they_are_used() {
         "u8 b = 200; f64 x = 0.5; var i = 0; i64 big = 100000 * 100000; u32 c = 'a'; u8 comma = ','; f32 h = 1.5f32; i64 m = -1;",
     ));
     rejects(&body("u8 b = 300;"), "300 doesn't fit in u8");
+    rejects(
+        &body("i64[~.~2] q = [1, 2, 3];"),
+        "this literal has 3 elements, and the array holds 2",
+    );
+    rejects(
+        &body("u8[~4] g = \"hello\";"),
+        "this literal has 5 bytes, and the array holds 4",
+    );
+    ok(&body("u8[~5] g = \"hello\"; i64[..~2] p = [1, 2];"));
     rejects(&body("u8 b = 200 + 100;"), "300 doesn't fit in u8");
     rejects(&body("u8 b = -1;"), "-1 doesn't fit in u8");
     rejects(&body("u8 e = 'é';"), "isn't ASCII");
