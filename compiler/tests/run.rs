@@ -443,3 +443,167 @@ fn linebuf_example_runs() {
     );
     assert!(out.status.success());
 }
+
+/// The same operations on cursor arrays with a chunked index (`$`, DESIGN §4.1).
+#[test]
+fn chunked_cursor_arrays() {
+    prints(
+        r#"root LineBuffer {
+    u32[.~.$] text;
+
+    mut void type(string s) { for (u32 c : s.codePoints()) { text +^ c; } }
+    mut i64 back(i64 n) { for (i64 i = 0; i < n; i++) { if (@(text -^)) { return i; } } return n; }
+    mut i64 del(i64 n) { for (i64 i = 0; i < n; i++) { if (@(text ^-)) { return i; } } return n; }
+    mut void left(i64 n) { text.move(-n); }
+    mut void right(i64 n) { text.move(n); }
+    mut void home() { text.seekStart(); }
+    mut void end() { text.seekFromEnd(0); }
+    void show() {
+        u8[..>] out = [];
+        for (i64 i = 0; i <= text.len; i++) {
+            if (i == text.cursor) { out +> '|'; }
+            if (i < text.len) { @_ = out.append("${text[i].utf8()}"); }
+        }
+        println(out);
+    }
+}
+
+void main() {
+    LineBuffer buf = new LineBuffer();
+    buf.type("hello world");
+    buf.show();
+    buf.left(5);
+    buf.type("big ");
+    buf.show();
+    i64 gone = buf.back(2);
+    buf.show();
+    buf.home();
+    buf.type(">> ");
+    buf.end();
+    buf.type("!");
+    buf.show();
+    buf.left(3);
+    i64 deleted = buf.del(10);
+    buf.show();
+    println("back ${gone}, deleted ${deleted}");
+    buf.type("héllo ✓");
+    buf.show();
+
+    // A cursor array of i64: seek, insertAt, removeAt, indexing, for-each.
+    i64[~$] xs = [];
+    for (i64 i = 0; i < 5; i++) { xs +> i * 10; }
+    @_ = xs.seek(2);
+    xs +^ 15;
+    xs +< -10;
+    i64& first = xs[0];
+    @_ = xs.insertAt(3, 99);
+    println("first ${first}, after inserts and seeks");
+    i64 removed @_ = xs.removeAt(1);
+    println("${xs} len ${xs.len} cursor ${xs.cursor} removed ${removed}");
+    i64 last @_ = xs.pop();
+    i64 front @_ = xs.popFront();
+    println("${xs} last ${last} front ${front}");
+    xs.reverse();
+    println("reversed ${xs}");
+    xs.sort();
+    println("sorted ${xs}, cursor still ${xs.cursor}");
+    i64 total = 0;
+    for (i64& x : xs) { x += 1; total += x; }
+    println("${xs} total ${total} has 100: ${xs.contains(100)}");
+    u8 bad = @xs.seek(100);
+    println("seek 100: ${bad}");
+
+    // Deques: both ends, and a window that only narrows.
+    i64[~.~] q = [];
+    q +> 1 +> 2;
+    q +< 0;
+    q.pushFront(-1);
+    i64 a @_ = q.popFront();
+    i64 b @_ = q.pop();
+    println("deque ${q} took ${a} and ${b}, as a slice ${q[1:]}");
+    for (i64 i = 0; i < 100000; i++) { q +> i; @_ = q.popFront(); }
+    println("after a long queue: ${q.len}");
+    i64[<.<] w = [1, 2, 3, 4, 5];
+    @_ = w -<;
+    @_ = w ->;
+    println("window ${w}");
+
+    // Holes are reused: removing and inserting doesn't grow the data array.
+    i64[.~.$] h = [];
+    for (i64 r = 0; r < 1000; r++) { h +^ r; @_ = h -^; }
+    println("holes reused, len ${h.len}");
+}
+"#,
+        r#"hello world|
+hello big |world
+hello bi|world
+>> hello biworld!|
+>> hello biwor|
+back 2, deleted 3
+>> hello biworhéllo ✓|
+first -10, after inserts and seeks
+[-10, 10, 99, 15, 20, 30, 40] len 7 cursor 1 removed 0
+[10, 99, 15, 20, 30] last 40 front -10
+reversed [30, 20, 15, 99, 10]
+sorted [10, 15, 20, 30, 99], cursor still 0
+[11, 16, 21, 31, 100] total 179 has 100: true
+seek 100: 196
+deque [0, 1] took -1 and 2, as a slice [1]
+after a long queue: 2
+window [2, 3, 4]
+holes reused, len 0
+"#,
+    );
+}
+
+/// Random edits at random positions against a plain array: enough for the chunk size
+/// to double twice.
+#[test]
+fn chunked_index_against_a_model() {
+    prints(
+        r#"u64 seed = 12345;
+
+i64 below(i64 n) {
+    seed = seed *% 6364136223846793005 +% 1442695040888963407;
+    return (i64) ((seed >> 33) % (u64) n);
+}
+
+void main() {
+    i64[.~.$] chunked = [];
+    i64[..~] model = [];
+    i64 next = 0;
+    i64 checks = 0;
+    for (i64 step = 0; step < 16000; step++) {
+        if (below(4) < 3 || model.len == 0) {
+            i64 i = below(model.len + 1);
+            @_ = chunked.insertAt(i, next);
+            model +> 0;
+            for (i64 k = model.len - 1; k > i; k--) { model[k] = model[k - 1]; }
+            model[i] = next;
+            next++;
+        } else {
+            i64 i = below(model.len);
+            i64 got @_ = chunked.removeAt(i);
+            if (got != model[i]) { println("wrong element at step ${step}"); exit(1); }
+            for (i64 k = i; k + 1 < model.len; k++) { model[k] = model[k + 1]; }
+            @_ = model ->;
+        }
+        if (step % 1000 == 0) {
+            if (chunked.len != model.len) { println("length ${chunked.len} against ${model.len}"); exit(1); }
+            for (i64 k = 0; k < model.len; k++) {
+                if (chunked[k] != model[k]) { println("mismatch at ${k}, step ${step}"); exit(1); }
+            }
+            checks++;
+        }
+    }
+    i64 sum = 0;
+    for (i64 x : chunked) { sum += x; }
+    i64 msum = 0;
+    for (i64 x : model) { msum += x; }
+    println("ok: ${chunked.len} elements after ${next} inserts, ${checks} checks, sums agree: ${sum == msum}");
+}
+"#,
+        "ok: 8008 elements after 12004 inserts, 16 checks, sums agree: true
+",
+    );
+}

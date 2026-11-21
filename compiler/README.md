@@ -97,8 +97,8 @@ and caches the executable by a hash of the C; `-O` builds at `-O2`. TinyCC, whic
 DESIGN plans for `zink run`, isn't built in yet.
 
 It covers script files, classes, enums, constructors and methods, statuses,
-references, strings and interpolation, every array kind except chunked (`$`) ones
-and capped ones with a start or cursor slot, slices, every statement form, casts and
+references, strings and interpolation, every array kind except capped ones with a
+start or cursor slot, slices, every statement form, casts and
 the integer rules, and for-each over arrays and text iterators. Bugs stop the
 program with the file and line, and exit status 1. `examples/linebuf.zn` runs.
 
@@ -117,7 +117,12 @@ Arrays on data stacks, by layout:
   prototyped in `bench/gap_buffer.c`. Elements live in a data array and never
   move; removals leave holes that the next insert reuses; the order is an index
   of 32-bit slots, kept as two deques, before and after the cursor. Two data
-  stacks: the data, and the index.
+  stacks: the data, and the index;
+- with a chunked index (`T[.~.$]`, `T[~$]`): the same data array, with the index
+  split into chunks of 2^L entries, each a circular buffer: a two-level tiered
+  vector, as in `bench/gap_buffer.c`. Edits anywhere cost O(√n), reads take three
+  loads, and the cursor is just a position. The chunk size doubles when the length
+  passes 4 B², which keeps it between √n/2 and √n.
 
 Each declaration of a growable local gets data stacks of its own.
 

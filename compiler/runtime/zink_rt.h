@@ -79,17 +79,56 @@ static ZR_UNUSED zr_deq zr_deq_new(void *base) {
 /* Back to the middle when empty, so a queue doesn't drift through the reservation. */
 static ZR_UNUSED void zr_deq_settle(zr_deq *d) { if (d->n == 0) d->p = d->mid; }
 
-/* A cursor array (DESIGN §4.3, §4.5): elements live in a data array and never move, so
- * references stay valid; the order is an index of 32-bit slot numbers, kept as two
- * deques, the entries before the cursor and those after it. Removals leave holes that
- * the next insert reuses, through a free list inside the holes for elements of at least
- * 4 bytes, and a side list for smaller ones. Two data stacks: the data, and the index. */
+/* The elements of a cursor array (DESIGN §4.5): a data array whose elements never move,
+ * so references stay valid. Removals leave holes that the next insert reuses, through a
+ * free list inside the holes for elements of at least 4 bytes, and a side list for
+ * smaller ones. */
 typedef struct {
     char *data;
     int64_t used;    /* slots ever used */
     int64_t freeh;   /* first free hole, plus one; 0 when there is none */
     uint32_t *side;  /* free holes, for elements under 4 bytes */
     int64_t nside;
+} zr_data;
+
+static zr_data zr_data_new(void *base) {
+    zr_data d;
+    memset(&d, 0, sizeof d);
+    d.data = (char *)base;
+    d.side = (uint32_t *)((char *)base + ZR_STACK_BYTES / 2);
+    return d;
+}
+
+static ZR_UNUSED uint32_t zr_data_slot(zr_data *d, size_t esz) {
+    if (esz >= 4 && d->freeh) {
+        uint32_t s = (uint32_t)(d->freeh - 1);
+        uint32_t next;
+        memcpy(&next, d->data + (size_t)s * esz, 4);
+        d->freeh = next;
+        return s;
+    }
+    if (esz < 4 && d->nside) return d->side[--d->nside];
+    return (uint32_t)d->used++;
+}
+
+static ZR_UNUSED void zr_data_release(zr_data *d, uint32_t s, size_t esz) {
+    if (esz >= 4) {
+        uint32_t next = (uint32_t)d->freeh;
+        memcpy(d->data + (size_t)s * esz, &next, 4);
+        d->freeh = (int64_t)s + 1;
+    } else {
+        d->side[d->nside++] = s;
+    }
+}
+
+static void zr_data_clear(zr_data *d) { d->used = d->freeh = d->nside = 0; }
+
+/* A cursor array (DESIGN §4.3): the order is an index of 32-bit slots, kept as two
+ * deques, the entries before the cursor and those after it, so edits at the cursor and
+ * at both ends are O(1), and seek moves 4-byte entries. Two data stacks: the data, and
+ * the index. */
+typedef struct {
+    zr_data d;
     uint32_t *bp, *ap, *bmid, *amid;
     int64_t bn, an;  /* entries before and after the cursor */
 } zr_cur;
@@ -97,8 +136,7 @@ typedef struct {
 static ZR_UNUSED zr_cur zr_cur_new(void *data, void *index) {
     zr_cur c;
     memset(&c, 0, sizeof c);
-    c.data = (char *)data;
-    c.side = (uint32_t *)((char *)data + ZR_STACK_BYTES / 2);
+    c.d = zr_data_new(data);
     c.bmid = c.bp = (uint32_t *)((char *)index + ZR_STACK_BYTES / 4);
     c.amid = c.ap = (uint32_t *)((char *)index + ZR_STACK_BYTES / 4 * 3);
     return c;
@@ -109,39 +147,17 @@ static ZR_UNUSED int64_t zr_cur_len(const zr_cur *c) { return c->bn + c->an; }
 /* The slot of the element at logical position i. */
 static ZR_UNUSED uint32_t zr_cur_at(const zr_cur *c, int64_t i) { return i < c->bn ? c->bp[i] : c->ap[i - c->bn]; }
 
-static ZR_UNUSED uint32_t zr_cur_slot(zr_cur *c, size_t esz) {
-    if (esz >= 4 && c->freeh) {
-        uint32_t s = (uint32_t)(c->freeh - 1);
-        uint32_t next;
-        memcpy(&next, c->data + (size_t)s * esz, 4);
-        c->freeh = next;
-        return s;
-    }
-    if (esz < 4 && c->nside) return c->side[--c->nside];
-    return (uint32_t)c->used++;
-}
-
-static ZR_UNUSED void zr_cur_release(zr_cur *c, uint32_t s, size_t esz) {
-    if (esz >= 4) {
-        uint32_t next = (uint32_t)c->freeh;
-        memcpy(c->data + (size_t)s * esz, &next, 4);
-        c->freeh = (int64_t)s + 1;
-    } else {
-        c->side[c->nside++] = s;
-    }
-}
-
 static void zr_cur_settle(zr_cur *c) {
     if (c->bn == 0) c->bp = c->bmid;
     if (c->an == 0) c->ap = c->amid;
 }
 
 /* Where an insert puts its element: at the cursor, the start or the end. */
-static ZR_UNUSED uint32_t zr_cur_insert(zr_cur *c, size_t esz) { uint32_t s = zr_cur_slot(c, esz); c->bp[c->bn++] = s; return s; }
-static ZR_UNUSED uint32_t zr_cur_push_front(zr_cur *c, size_t esz) { uint32_t s = zr_cur_slot(c, esz); *--c->bp = s; c->bn++; return s; }
-static ZR_UNUSED uint32_t zr_cur_push(zr_cur *c, size_t esz) { uint32_t s = zr_cur_slot(c, esz); c->ap[c->an++] = s; return s; }
+static ZR_UNUSED uint32_t zr_cur_insert(zr_cur *c, size_t esz) { uint32_t s = zr_data_slot(&c->d, esz); c->bp[c->bn++] = s; return s; }
+static ZR_UNUSED uint32_t zr_cur_push_front(zr_cur *c, size_t esz) { uint32_t s = zr_data_slot(&c->d, esz); *--c->bp = s; c->bn++; return s; }
+static ZR_UNUSED uint32_t zr_cur_push(zr_cur *c, size_t esz) { uint32_t s = zr_data_slot(&c->d, esz); c->ap[c->an++] = s; return s; }
 
-/* The slot an removal takes out of the order, or UINT32_MAX when there is none. */
+/* The slot a removal takes out of the order, or UINT32_MAX when there is none. */
 static ZR_UNUSED uint32_t zr_cur_take_before(zr_cur *c) { if (!c->bn) return UINT32_MAX; uint32_t s = c->bp[--c->bn]; zr_cur_settle(c); return s; }
 static ZR_UNUSED uint32_t zr_cur_take_after(zr_cur *c) { if (!c->an) return UINT32_MAX; uint32_t s = *c->ap++; c->an--; zr_cur_settle(c); return s; }
 static ZR_UNUSED uint32_t zr_cur_take_front(zr_cur *c) {
@@ -188,7 +204,8 @@ static ZR_UNUSED void zr_cur_move(zr_cur *c, int64_t n) {
 }
 
 static ZR_UNUSED void zr_cur_clear(zr_cur *c) {
-    c->used = c->freeh = c->nside = c->bn = c->an = 0;
+    zr_data_clear(&c->d);
+    c->bn = c->an = 0;
     c->bp = c->bmid;
     c->ap = c->amid;
 }
@@ -196,6 +213,153 @@ static ZR_UNUSED void zr_cur_clear(zr_cur *c) {
 /* All of the order in the entries before the cursor, contiguous, for reordering; gives the
  * cursor's position, to put back afterwards. */
 static ZR_UNUSED int64_t zr_cur_gather(zr_cur *c) { int64_t at = c->bn; zr_cur_seek(c, c->bn + c->an); return at; }
+
+/* A cursor array with a chunked index (DESIGN §4.1, `$`): the same data array, with the
+ * index split into chunks of B = 2^L entries, each a circular buffer starting at its
+ * head: a two-level tiered vector (Goodrich and Kloss, 1999). An edit anywhere moves at
+ * most one chunk's entries and one entry of each later chunk, O(B + n/B); a read is three
+ * loads; the cursor is just a position, so seek is free. B doubles when the length passes
+ * 4 B^2, keeping it near sqrt(n). Two data stacks: the data, and heads then chunks. */
+typedef struct {
+    zr_data d;
+    uint32_t *heads, *buf;
+    int64_t n, pos;
+    uint32_t L, M;
+} zr_chk;
+
+#define ZR_CHK_HEADS ((size_t)4 << 20)
+
+static ZR_UNUSED zr_chk zr_chk_new(void *data, void *index) {
+    zr_chk c;
+    memset(&c, 0, sizeof c);
+    c.d = zr_data_new(data);
+    c.heads = (uint32_t *)index;
+    c.buf = (uint32_t *)((char *)index + ZR_CHK_HEADS);
+    c.L = 4;
+    c.M = 15;
+    return c;
+}
+
+#define ZR_CHK_SLOT(c, ch, k) ((c)->buf[((size_t)(ch) << (c)->L) + (((c)->heads[ch] + (uint32_t)(k)) & (c)->M)])
+
+static ZR_UNUSED uint32_t zr_chk_at(const zr_chk *c, int64_t i) { return ZR_CHK_SLOT(c, (size_t)i >> c->L, (uint32_t)i & c->M); }
+
+/* The entry at position i, to change in place. */
+static ZR_UNUSED uint32_t *zr_chk_entry(zr_chk *c, int64_t i) { return &ZR_CHK_SLOT(c, (size_t)i >> c->L, (uint32_t)i & c->M); }
+
+/* The order, copied in sequence onto the scratch stack, which a statement's end releases. */
+static ZR_UNUSED uint32_t *zr_chk_flatten(zr_chk *c) {
+    zr_sm();
+    uint32_t *f = (uint32_t *)zr_scratch_top;
+    for (int64_t i = 0; i < c->n; i++) f[i] = zr_chk_at(c, i);
+    zr_scratch_top += (size_t)c->n * 4;
+    return f;
+}
+
+/* Lays the order out again from `f`, in chunks of 2^L with every head at 0. */
+static ZR_UNUSED void zr_chk_unflatten(zr_chk *c, const uint32_t *f) {
+    size_t chunks = ((size_t)c->n >> c->L) + 1;
+    memset(c->heads, 0, chunks * 4);
+    memmove(c->buf, f, (size_t)c->n * 4);
+}
+
+static void zr_chk_regrow(zr_chk *c) {
+    int64_t m = zr_sm();
+    uint32_t *f = zr_chk_flatten(c);
+    c->L++;
+    c->M = (1u << c->L) - 1;
+    zr_chk_unflatten(c, f);
+    zr_sr(m);
+}
+
+/* Inserts a new element at position i; gives its slot. */
+static ZR_UNUSED uint32_t zr_chk_insert_at(zr_chk *c, int64_t i, size_t esz) {
+    if (c->n + 1 > (int64_t)4 << (2 * c->L)) zr_chk_regrow(c);
+    uint32_t v = zr_data_slot(&c->d, esz), B = c->M + 1, o = (uint32_t)i & c->M;
+    size_t ch = (size_t)i >> c->L, last = (size_t)c->n >> c->L;
+    if (ch == last) {
+        uint32_t m = (uint32_t)c->n & c->M;
+        for (uint32_t k = m; k > o; k--) ZR_CHK_SLOT(c, ch, k) = ZR_CHK_SLOT(c, ch, k - 1);
+        ZR_CHK_SLOT(c, ch, o) = v;
+    } else {
+        /* A full chunk: its last entry moves on to the front of the next. */
+        uint32_t carry = ZR_CHK_SLOT(c, ch, B - 1);
+        for (uint32_t k = B - 1; k > o; k--) ZR_CHK_SLOT(c, ch, k) = ZR_CHK_SLOT(c, ch, k - 1);
+        ZR_CHK_SLOT(c, ch, o) = v;
+        for (size_t d = ch + 1; d < last; d++) {
+            uint32_t h = (c->heads[d] - 1) & c->M;
+            uint32_t *p = &c->buf[(d << c->L) + h];
+            uint32_t out = *p;
+            *p = carry;
+            carry = out;
+            c->heads[d] = h;
+        }
+        uint32_t h = (c->heads[last] - 1) & c->M;
+        c->buf[(last << c->L) + h] = carry;
+        c->heads[last] = h;
+    }
+    c->n++;
+    return v;
+}
+
+/* Takes the element at position i out of the order; gives its slot. */
+static ZR_UNUSED uint32_t zr_chk_take_at(zr_chk *c, int64_t i) {
+    uint32_t B = c->M + 1, o = (uint32_t)i & c->M;
+    size_t ch = (size_t)i >> c->L, last = (size_t)(c->n - 1) >> c->L;
+    uint32_t v = ZR_CHK_SLOT(c, ch, o);
+    if (ch == last) {
+        uint32_t m = (uint32_t)(c->n - (int64_t)(last << c->L));
+        for (uint32_t k = o; k + 1 < m; k++) ZR_CHK_SLOT(c, ch, k) = ZR_CHK_SLOT(c, ch, k + 1);
+    } else {
+        for (uint32_t k = o; k + 1 < B; k++) ZR_CHK_SLOT(c, ch, k) = ZR_CHK_SLOT(c, ch, k + 1);
+        /* Each later chunk gives its front to the end of the chunk before. */
+        for (size_t d = ch + 1; d <= last; d++) {
+            uint32_t h = c->heads[d];
+            uint32_t front = c->buf[(d << c->L) + h];
+            c->heads[d] = (h + 1) & c->M;
+            ZR_CHK_SLOT(c, d - 1, B - 1) = front;
+        }
+    }
+    c->n--;
+    return v;
+}
+
+/* Where an insert goes: 0 the end, 1 the start, 2 the cursor. The cursor stays between
+ * the same elements, as for a cursor array. */
+static ZR_UNUSED uint32_t zr_chk_put(zr_chk *c, int where, size_t esz) {
+    if (where == 0) return zr_chk_insert_at(c, c->n, esz);
+    if (where == 1) { c->pos++; return zr_chk_insert_at(c, 0, esz); }
+    return zr_chk_insert_at(c, c->pos++, esz);
+}
+
+/* What a removal takes: 0 the end, 1 the start, 2 before the cursor, 3 after it.
+ * UINT32_MAX when there is nothing. */
+static ZR_UNUSED uint32_t zr_chk_take(zr_chk *c, int where) {
+    switch (where) {
+        case 0: if (!c->n) return UINT32_MAX; if (c->pos == c->n) c->pos--; return zr_chk_take_at(c, c->n - 1);
+        case 1: if (!c->n) return UINT32_MAX; if (c->pos > 0) c->pos--; return zr_chk_take_at(c, 0);
+        case 2: if (!c->pos) return UINT32_MAX; return zr_chk_take_at(c, --c->pos);
+        default: if (c->pos == c->n) return UINT32_MAX; return zr_chk_take_at(c, c->pos);
+    }
+}
+
+static ZR_UNUSED uint8_t zr_chk_seek(zr_chk *c, int64_t i) {
+    if (i < 0 || i > c->n) return 196;
+    c->pos = i;
+    return 0;
+}
+
+static ZR_UNUSED void zr_chk_move(zr_chk *c, int64_t n) {
+    int64_t to = c->pos + n;
+    c->pos = to < 0 ? 0 : to > c->n ? c->n : to;
+}
+
+static ZR_UNUSED void zr_chk_clear(zr_chk *c) {
+    zr_data_clear(&c->d);
+    c->n = c->pos = 0;
+    c->L = 4;
+    c->M = 15;
+}
 
 /* ------------------------------------------------------------ output (DESIGN §4.13) */
 
