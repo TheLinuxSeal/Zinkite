@@ -257,6 +257,11 @@ enum Place {
 impl Types<'_> {
     /// A function's signature, `int (const char *, int)`, in Zinkite types.
     fn func(&self, sig: &str, handles: &mut HashSet<String>) -> CFunc {
+        // `void (int) __attribute__((noreturn))`: attributes don't change what crosses.
+        let sig = match sig.find(" __attribute__") {
+            Some(i) => &sig[..i],
+            None => sig,
+        };
         let not = |why: &str, ret: Ty| CFunc {
             params: Vec::new(),
             ret,

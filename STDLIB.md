@@ -107,7 +107,7 @@ void errprintln(string text)
 - **Writing to stdout after its reader has gone ends the program quietly**, so `BROKEN_PIPE` is only reported for stderr (DESIGN §7.6).
 - **`stdin`, `stdout` and `stderr` are `File` handles** for descriptors 0, 1 and 2, with the methods of §4.1 (Decided), so `File input = stdin;` works.
 - **Buffering**:
-  - stdout is line-buffered on a terminal and block-buffered otherwise;
+  - stdout is line-buffered on a terminal and block-buffered otherwise. It is C's `stdout`, so C code a program calls writes into the same buffer, in order (DESIGN §12.6);
   - stderr is unbuffered;
   - `stdout.flush()` writes whatever is pending;
   - everything is flushed at exit (DESIGN §6.4).

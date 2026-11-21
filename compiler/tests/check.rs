@@ -1679,6 +1679,10 @@ fn calling_c_checks() {
     ok(
         "extern import stdio.h;\nvoid main() { FILE f = fopen(\"x\", \"r\"); bool none = f == null; i64 e = EOF; u8 seek = SEEK_SET; }\n",
     );
+    // `__attribute__((noreturn))` in a C type changes nothing that crosses.
+    ok(
+        "extern import stdlib.h;\nextern import unistd.h;\nvoid main() { if (false) { abort(); exit(1); _exit(2); } }\n",
+    );
     // Explicit declarations: static, with types that cross.
     rejects(
         "class K { extern i32 abs(i32 x); }\nvoid main() {}\n",

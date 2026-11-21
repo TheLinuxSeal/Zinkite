@@ -456,58 +456,61 @@ static ZR_UNUSED char *zr_ring_span(char *e, size_t sz, int64_t k, int64_t *h, i
 
 /* ------------------------------------------------------------ output (DESIGN §4.13) */
 
-static char zr_obuf[1 << 16];
-static size_t zr_on;
-static int zr_out_failed, zr_out_tty = -1;
+/* Output goes through C's `stdout`, so what a program prints and what C code it calls
+ * prints come out in the order they were written (DESIGN §12.6). stdio buffers it: by
+ * lines on a terminal, in 64 KB blocks otherwise (zr_start). stderr is unbuffered, as in
+ * C, and stdout is flushed before anything goes to stderr, so the two interleave in order. */
+static int zr_out_failed;
 
-static void zr_flush(void) {
-    size_t off = 0;
-    while (off < zr_on) {
-        ssize_t w = write(1, zr_obuf + off, zr_on - off);
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EPIPE) exit(141); /* the reader has gone: end quietly (DESIGN §7.6) */
-            zr_out_failed = 1;
-            break;
-        }
-        off += (size_t)w;
+#if defined(__GLIBC__)
+#define zr_fwrite fwrite_unlocked /* a program is one thread */
+#else
+#define zr_fwrite fwrite
+#endif
+
+/* After a failed write: a reader that has gone ends the program quietly (DESIGN §7.6);
+ * anything else is reported at exit (DESIGN §6.4). */
+static void zr_check_out(FILE *f) {
+    if (ferror(f)) {
+        if (errno == EPIPE) exit(141);
+        zr_out_failed = 1;
+        clearerr(f);
     }
-    zr_on = 0;
 }
 
-static void zr_out(int fd, const void *p, size_t n) {
+static void zr_flush(void) {
+    fflush(stdout);
+    zr_check_out(stdout);
+}
+
+static void zr_out_slow(int fd, const void *p, size_t n) {
     if (fd == 2) {
-        zr_flush();
-        while (n > 0) {
-            ssize_t w = write(2, p, n);
-            if (w < 0) {
-                if (errno == EINTR) continue;
-                zr_out_failed = 1;
-                return;
-            }
-            p = (const char *)p + w;
-            n -= (size_t)w;
-        }
+        fflush(stdout);
+        zr_fwrite(p, 1, n, stderr);
+        zr_check_out(stderr);
         return;
     }
-    if (n > sizeof zr_obuf) {
-        zr_flush();
-        while (n > 0) {
-            ssize_t w = write(1, p, n);
-            if (w < 0) {
-                if (errno == EINTR) continue;
-                if (errno == EPIPE) exit(141);
-                zr_out_failed = 1;
-                return;
-            }
-            p = (const char *)p + w;
-            n -= (size_t)w;
-        }
+    if (zr_fwrite(p, 1, n, stdout) < n) zr_check_out(stdout);
+}
+
+/* stdout when it's fully buffered (not a terminal), read once: C code writes through
+ * the same FILE, so its buffer is shared. NULL on a terminal, where stdio checks every
+ * write for a newline. */
+static FILE *zr_stdout;
+
+static inline void zr_out(int fd, const void *p, size_t n) {
+#if defined(__GLIBC__)
+    /* Straight into stdio's buffer while it has room, as glibc's own putc_unlocked does
+     * through the same fields. Only when fully buffered: a terminal's line buffering
+     * needs stdio to see each newline. */
+    FILE *f = zr_stdout;
+    if (fd == 1 && f && (size_t)(f->_IO_write_end - f->_IO_write_ptr) >= n) {
+        memcpy(f->_IO_write_ptr, p, n);
+        f->_IO_write_ptr += n;
         return;
     }
-    if (zr_on + n > sizeof zr_obuf) zr_flush();
-    memcpy(zr_obuf + zr_on, p, n);
-    zr_on += n;
+#endif
+    zr_out_slow(fd, p, n);
 }
 
 /* Where text goes: a file descriptor, or the end of an array on a data stack. */
@@ -525,13 +528,8 @@ static void zr_put(zr_sink s, const void *p, size_t n) {
     }
 }
 
-static ZR_UNUSED void zr_end_line(int fd) {
-    zr_out(fd, "\n", 1);
-    if (fd == 1) {
-        if (zr_out_tty < 0) zr_out_tty = isatty(1);
-        if (zr_out_tty) zr_flush();
-    }
-}
+/* A terminal sees each line as it ends: stdio line-buffers one. */
+static ZR_UNUSED void zr_end_line(int fd) { zr_out(fd, "\n", 1); }
 
 static ZR_UNUSED void zr_w_str(zr_sink s, zr_slice t) { zr_put(s, t.p, (size_t)t.n); }
 static ZR_UNUSED void zr_w_byte(zr_sink s, uint8_t b) { zr_put(s, &b, 1); }
@@ -1112,6 +1110,12 @@ static ZR_UNUSED void zr_map_clear(zr_map *m) {
 
 static ZR_UNUSED void zr_start(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
+    /* glibc ignores the size unless it's given the buffer too. */
+    static char obuf[1 << 16];
+    if (!isatty(1)) {
+        setvbuf(stdout, obuf, _IOFBF, sizeof obuf);
+        zr_stdout = stdout;
+    }
     zr_seed_init();
     zr_slice *a = (zr_slice *)zr_stack(1);
     for (int i = 1; i < argc; i++) { a[i - 1].p = argv[i]; a[i - 1].n = (int64_t)strlen(argv[i]); }

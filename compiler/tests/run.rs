@@ -1616,9 +1616,10 @@ fn has_clang() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// Calling C (DESIGN §12.6): functions from six headers called as they are, `const char *`
-/// as text, macro constants, `FILE` handles compared with `null`, `extern.errno()`, an
-/// explicit `extern` for what a header can't say, and `extern link m`.
+/// Calling C (DESIGN §12.6): output from Zinkite and from C's `puts` in order, through one
+/// `stdout`; functions from six headers called as they are, `const char *` as text, macro
+/// constants, `FILE` handles compared with `null`, `extern.errno()`, an explicit `extern`
+/// for what a header can't say, and `extern link m`.
 #[test]
 fn calling_c() {
     if !has_clang() {
@@ -1638,6 +1639,10 @@ extern link m;
 extern("write") i64 writeBytes(i32 fd, u8[:] data, u64 n);
 
 void main() {
+    // Zinkite's output goes through C's stdout, so the two interleave in order.
+    println("from Zinkite");
+    puts("from C");
+    println("from Zinkite again");
     f64 r = sqrt(2.0);
     println("sqrt ${r.fixed(6)} pow ${pow(2.0, 10.0)} strlen ${strlen("zinkite")} atoi ${atoi("-42")}");
     println("toupper ${(u8) toupper('q')} abs ${abs(-3)} EOF ${EOF} SEEK_END ${SEEK_END} pid ${getpid() > 0}");
@@ -1670,7 +1675,10 @@ void main() {
     println("wrote ${n} bytes, removed ${remove(path)}");
 }
 "#,
-        r#"sqrt 1.414214 pow 1024.0 strlen 7 atoi -42
+        r#"from Zinkite
+from C
+from Zinkite again
+sqrt 1.414214 pow 1024.0 strlen 7 atoi -42
 toupper 81 abs 3 EOF -1 SEEK_END 2 pid true
 closed 0, read back:
 line one
