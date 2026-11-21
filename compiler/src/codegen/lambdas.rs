@@ -14,6 +14,9 @@ pub(super) struct PendingLambda {
     pub ret: Ty,
     pub class: ClassId,
     pub file: usize,
+    /// The instantiation it was made in (DESIGN §10).
+    pub subst: Vec<(String, Ty)>,
+    pub cargs: Vec<Ty>,
 }
 
 /// A lambda's parameters and body, through any parentheses.
@@ -127,11 +130,12 @@ impl<'p, 'a> Gen<'p, 'a> {
     /// A lambda used as a value: the name of the C function it becomes, generated after
     /// the current function (`drain_lambdas`).
     pub(super) fn lambda_value(&mut self, e: &Expr) -> String {
-        let k = key(e.span);
+        // One C function per lambda and instantiation of the generic code it's in.
+        let k = format!("{:?}{:?}", key(e.span), self.subst);
         if let Some(n) = self.lambda_names.get(&k) {
             return n.clone();
         }
-        if self.facts.capturing.contains(&k) {
+        if self.facts.capturing.contains(&key(e.span)) {
             return self.unsupported(
                 e.span,
                 "a lambda that captures, passed to a function of your own",
@@ -151,6 +155,8 @@ impl<'p, 'a> Gen<'p, 'a> {
             ret,
             class: self.class,
             file: self.file,
+            subst: self.subst.clone(),
+            cargs: self.cur_cargs.clone(),
         });
         name
     }
@@ -159,6 +165,8 @@ impl<'p, 'a> Gen<'p, 'a> {
     pub(super) fn drain_lambdas(&mut self) {
         while let Some(l) = self.pending_lambdas.pop() {
             self.file = l.file;
+            let saved_subst = std::mem::replace(&mut self.subst, l.subst.clone());
+            let saved_cargs = std::mem::replace(&mut self.cur_cargs, l.cargs.clone());
             self.begin_fn(l.class, l.ret.clone(), false, false, false);
             let span = l.params.first().map_or(Span::default(), |p| p.ty.span);
             let rc = self.cty(&l.ret, span);
@@ -196,6 +204,8 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
             let out = std::mem::take(&mut self.out);
             let _ = writeln!(self.bodies, "{} {{\n{}}}\n", sig, out);
+            self.subst = saved_subst;
+            self.cur_cargs = saved_cargs;
         }
     }
 

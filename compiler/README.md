@@ -102,8 +102,8 @@ It covers script files, classes, enums, constructors and methods, statuses,
 every number type including `i128` and `u128` (as `__int128`),
 references, strings and interpolation, every array kind, slices (except of cursor,
 chunked and reversed arrays on data stacks, which are undecided), every statement
-form, casts and the integer rules, lambdas and function values, hash maps and
-sets, and for-each over arrays, maps, sets and text iterators. Bugs stop the
+form, casts and the integer rules, generics, lambdas and function values, hash
+maps and sets, and for-each over arrays, maps, sets and text iterators. Bugs stop the
 program with the file and line, and exit status 1. `examples/linebuf.zn` and
 `examples/wordfreq.zn` run.
 
@@ -124,8 +124,16 @@ compacts once more than half are. String keys keep their hash. Hashing mixes wit
 128-bit multiply (wyhash's step) and a random seed per run. Keys can be integers,
 `bool`, enums and strings; class keys aren't supported yet.
 
-Not yet: generics, interfaces, a capturing lambda passed to a function of the
-program's own (which needs that function specialized per lambda), `filter`, `map`
+Generics are monomorphized (DESIGN §10): each generic function, and each method
+and constructor of a generic class, is generated once per set of type arguments it's
+used with, on demand, with every type the checker recorded substituted; each generic
+class gets a struct per instantiation, named before its fields so a type like
+`Node<K>` can refer to itself. In an instantiation, a type parameter bounded by an
+interface is a known class, so its methods are called directly. Instantiation that
+grows its type arguments without end is rejected.
+
+Not yet: interfaces (calls through an interface reference), a capturing lambda
+passed to a function of the program's own (which needs that function specialized per lambda), `filter`, `map`
 and the other methods that build a new array, iterators in variables, comparing
 class values, and the library packages that aren't written yet (`zink.io`,
 `zink.cli` and the others). Of `stdin`, only `readAll` and `nextLine` work so far.

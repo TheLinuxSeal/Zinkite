@@ -34,6 +34,8 @@ pub struct Sig {
     pub params: Vec<Ty>,
     pub ret: Ty,
     pub tparams: Vec<TParam>,
+    /// For a generic call, the type arguments inference chose, in `tparams` order.
+    pub targs: Vec<Ty>,
     pub can_fail: bool,
     pub is_mut: bool,
     pub needs: Vec<Need>,
@@ -47,6 +49,7 @@ impl Sig {
             params,
             ret,
             tparams: Vec::new(),
+            targs: Vec::new(),
             can_fail: false,
             is_mut: false,
             needs: Vec::new(),

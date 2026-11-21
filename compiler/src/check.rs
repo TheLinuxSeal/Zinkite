@@ -107,6 +107,9 @@ pub struct CallFact {
     pub params: Vec<Ty>,
     /// A free function called with method syntax: the receiver is the first argument.
     pub recv_arg: bool,
+    /// A generic method's own type arguments, as inferred (DESIGN §10); empty otherwise.
+    /// A generic class's come from the type of the receiver or of the `new`.
+    pub targs: Vec<Ty>,
 }
 
 pub fn key(s: Span) -> (u32, u32) {
@@ -4043,6 +4046,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                 params: m.params.iter().map(|p| p.subst(&map)).collect(),
                 ret: m.ret.subst(&map),
                 tparams: m.type_params.clone(),
+                targs: Vec::new(),
                 can_fail: m.can_fail,
                 is_mut: m.is_mut,
                 needs: Vec::new(),
@@ -4946,6 +4950,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                 name: chosen.name.clone(),
                 params: chosen.params.clone(),
                 recv_arg: has_recv,
+                targs: chosen.targs.clone(),
             },
         );
         chosen.ret
@@ -5342,6 +5347,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             params: c.params.iter().map(|p| p.subst(&map)).collect(),
             ret: c.ret.subst(&map),
             tparams: Vec::new(),
+            targs: map.iter().map(|(_, t)| t.clone()).collect(),
             can_fail: c.can_fail,
             is_mut: c.is_mut,
             needs: c

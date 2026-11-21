@@ -26,10 +26,12 @@ use crate::source::{SourceFile, Span};
 use crate::token::Prim;
 use crate::types::*;
 
+mod generics;
 mod lambdas;
 mod maps;
 mod sorting;
 
+use generics::{Inst, InstKind};
 use lambdas::PendingLambda;
 use maps::MapOps;
 use sorting::Order;
@@ -102,12 +104,19 @@ struct Gen<'p, 'a> {
     fn_typedefs: String,
     /// Lambdas used as values, still to generate, and the C names given to them.
     pending_lambdas: Vec<PendingLambda>,
-    lambda_names: HashMap<(u32, u32), String>,
+    lambda_names: HashMap<String, String>,
     /// Inlined lambda block bodies being generated: result, end label, result type.
     inline_ret: Vec<(String, String, Ty)>,
     /// Each `hashmap` and `hashset` type's operations, and their C text.
     maps: HashMap<String, MapOps>,
     helpers: String,
+    /// The instantiation being generated: its type parameters bound, and the type
+    /// arguments of its class (DESIGN §10).
+    subst: Vec<(String, Ty)>,
+    cur_cargs: Vec<Ty>,
+    class_insts: HashMap<String, String>,
+    fn_insts: HashMap<String, String>,
+    inst_queue: Vec<Inst>,
 }
 
 fn c_string(s: &[u8]) -> String {
@@ -251,6 +260,11 @@ impl<'p, 'a> Gen<'p, 'a> {
             inline_ret: Vec::new(),
             maps: HashMap::new(),
             helpers: String::new(),
+            subst: Vec::new(),
+            cur_cargs: Vec::new(),
+            class_insts: HashMap::new(),
+            fn_insts: HashMap::new(),
+            inst_queue: Vec::new(),
         }
     }
 
@@ -260,6 +274,16 @@ impl<'p, 'a> Gen<'p, 'a> {
                 .with_help(
                     "`zink check` accepts it; code generation for it comes in a later milestone",
                 );
+            self.errs.push((self.file, d));
+        }
+        "0".into()
+    }
+
+    /// An error in the program that only instantiating it shows, such as a runaway
+    /// instantiation (DESIGN §10).
+    fn instance_error(&mut self, span: Span, msg: &str, help: &str) -> String {
+        if self.reported.insert((span.start, span.end)) {
+            let d = Diagnostic::error(span, msg).with_help(help);
             self.errs.push((self.file, d));
         }
         "0".into()
@@ -285,11 +309,15 @@ impl<'p, 'a> Gen<'p, 'a> {
     }
 
     fn ty(&self, e: &Expr) -> Ty {
-        self.facts
-            .types
-            .get(&key(e.span))
-            .cloned()
-            .unwrap_or(Ty::Unknown)
+        self.ty_at(e.span)
+    }
+
+    /// The type the checker recorded at a span, in the current instantiation.
+    fn ty_at(&self, span: Span) -> Ty {
+        match self.facts.types.get(&key(span)) {
+            Some(t) => self.sb(t),
+            None => Ty::Unknown,
+        }
     }
 
     // ------------------------------------------------------------ types
@@ -313,7 +341,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                 match c.kind {
                     ClassKind::Enum => "int32_t".into(),
                     ClassKind::Interface => self.unsupported(span, "interfaces"),
-                    _ if !args.is_empty() => self.unsupported(span, "generic classes"),
+                    _ if !args.is_empty() => self.class_inst(*id, args, span),
                     _ => self.class_name(*id),
                 }
             }
@@ -388,13 +416,16 @@ impl<'p, 'a> Gen<'p, 'a> {
     fn deps(&mut self, t: &Ty) -> Vec<String> {
         match t {
             Ty::Class(id, args)
-                if args.is_empty()
-                    && matches!(
-                        self.prog.classes[*id].kind,
-                        ClassKind::Class | ClassKind::Root
-                    ) =>
+                if matches!(
+                    self.prog.classes[*id].kind,
+                    ClassKind::Class | ClassKind::Root
+                ) =>
             {
-                vec![self.class_name(*id)]
+                if args.is_empty() {
+                    vec![self.class_name(*id)]
+                } else {
+                    vec![self.class_inst(*id, args, Span::default())]
+                }
             }
             Ty::Array(_, k) if k.cap == CapKind::Capped => {
                 let c = self.cty(t, Span::default());
@@ -444,35 +475,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                 continue;
             }
             self.file = c.file;
-            let mut fields: Vec<(usize, &crate::program::FieldInfo)> = c
-                .fields
-                .iter()
-                .enumerate()
-                .filter(|(_, f)| !f.is_static)
-                .collect();
-            // Largest first, then by name (DESIGN §11).
-            let size = |t: &Ty| -> u32 {
-                match t {
-                    Ty::Prim(p) => bits(*p) / 8,
-                    Ty::Ref(_) | Ty::Nullable(_) => 8,
-                    _ => 16,
-                }
-            };
-            fields.sort_by(|a, b| {
-                size(&b.1.ty)
-                    .cmp(&size(&a.1.ty))
-                    .then(a.1.name.cmp(&b.1.name))
-            });
-            let mut body = String::new();
-            let mut deps = Vec::new();
-            for (_, f) in &fields {
-                let ct = self.cty(&f.ty, f.span);
-                deps.extend(self.deps(&f.ty));
-                let _ = write!(body, "{} f_{}; ", ct, f.name);
-            }
-            if fields.is_empty() {
-                body.push_str("char unused; ");
-            }
+            let (body, deps) = self.struct_body(id, &[]);
             let name = self.class_name(id);
             self.def_names.insert(name.clone(), name.clone());
             self.defs.push((name, body, deps));
@@ -512,7 +515,6 @@ impl<'p, 'a> Gen<'p, 'a> {
                     continue;
                 }
                 if !m.type_params.is_empty() {
-                    self.unsupported(m.decl.name.span, "generic functions");
                     continue;
                 }
                 self.method(id, i, m);
@@ -525,6 +527,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                 }
             }
         }
+        self.drain_insts();
     }
 
     fn site(&mut self) -> u32 {
@@ -586,17 +589,25 @@ impl<'p, 'a> Gen<'p, 'a> {
     }
 
     fn method(&mut self, id: ClassId, idx: usize, m: &MethodInfo) {
+        let name = self.fn_name(id, idx);
+        self.method_as(id, idx, m, name);
+    }
+
+    /// Method `idx` of class `id` as the C function `name`, in the current instantiation.
+    fn method_as(&mut self, id: ClassId, _idx: usize, m: &MethodInfo, name: String) {
         let c = &self.prog.classes[id];
         let span = m.decl.name.span;
-        self.begin_fn(id, m.ret.clone(), m.can_fail, !m.is_static, false);
+        let m_ret = self.sb(&m.ret);
+        self.begin_fn(id, m_ret.clone(), m.can_fail, !m.is_static, false);
         self.is_main = c.kind == ClassKind::Script && m.name == "main";
-        let ret = self.ret_c(&m.ret, m.can_fail, span);
+        let ret = self.ret_c(&m_ret, m.can_fail, span);
         let mut params = Vec::new();
         if !m.is_static {
-            params.push(format!("{}* self", self.class_name(id)));
+            let st = self.cty(&self.this_class(), span);
+            params.push(format!("{}* self", st));
         }
-        params.extend(self.params_c(&m.decl.params, &m.params));
-        let name = self.fn_name(id, idx);
+        let ptys: Vec<Ty> = m.params.iter().map(|t| self.sb(t)).collect();
+        params.extend(self.params_c(&m.decl.params, &ptys));
         let sig = format!(
             "static {} {}({})",
             ret,
@@ -611,7 +622,7 @@ impl<'p, 'a> Gen<'p, 'a> {
         let body = m.decl.body.as_ref().expect("a body");
         self.block_stmts(&body.stmts);
         // Falling off the end returns status 0, and 0 from `u8 main` (DESIGN §7.2, §8.6).
-        if (self.fails && m.ret == Ty::Void) || (self.is_main && m.ret == Ty::u8()) {
+        if (self.fails && m_ret == Ty::Void) || (self.is_main && m_ret == Ty::u8()) {
             self.line("return 0;");
         }
         let out = std::mem::take(&mut self.out);
@@ -636,27 +647,37 @@ impl<'p, 'a> Gen<'p, 'a> {
     }
 
     fn ctor(&mut self, id: ClassId, idx: usize, k: &crate::program::CtorInfo) {
+        let name = self.ctor_name(id, idx);
+        self.ctor_as(id, idx, k, name);
+    }
+
+    /// Constructor `idx` of class `id` as the C function `name`, in the current
+    /// instantiation.
+    fn ctor_as(&mut self, id: ClassId, _idx: usize, k: &crate::program::CtorInfo, name: String) {
         let c = &self.prog.classes[id];
         let span = c.span;
         self.begin_fn(id, Ty::Void, k.can_fail, true, true);
         let ret = if k.can_fail { "uint8_t" } else { "void" };
-        let mut params = vec![format!("{}* self", self.class_name(id))];
+        let st = self.cty(&self.this_class(), span);
+        let mut params = vec![format!("{}* self", st)];
+        let cargs = self.cur_cargs.clone();
         let fields: Vec<(String, Ty, Option<&Expr>)> = c
             .fields
             .iter()
-            .filter(|f| !f.is_static)
-            .map(|f| (f.name.clone(), f.ty.clone(), f.init))
+            .enumerate()
+            .filter(|(_, f)| !f.is_static)
+            .map(|(i, f)| (f.name.clone(), self.field_ty(id, i, &cargs), f.init))
             .collect();
+        let kparams: Vec<Ty> = k.params.iter().map(|t| self.sb(t)).collect();
         match k.decl {
-            Some(d) => params.extend(self.params_c(&d.params, &k.params)),
+            Some(d) => params.extend(self.params_c(&d.params, &kparams)),
             None => {
-                for (i, t) in k.params.iter().enumerate() {
+                for (i, t) in kparams.iter().enumerate() {
                     let ct = self.cty(t, span);
                     params.push(format!("{} a{}", ct, i));
                 }
             }
         }
-        let name = self.ctor_name(id, idx);
         let sig = format!("static {} {}({})", ret, name, params.join(", "));
         let _ = writeln!(self.protos, "{};", sig);
         // Field initializers run first; growable fields start empty, set up by whoever
@@ -988,7 +1009,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             .facts
             .locals
             .get(&key(name.span))
-            .cloned()
+            .map(|t| self.sb(t))
             .unwrap_or(Ty::Unknown);
         let c = self.tmp(&format!("l_{}_", name.name));
         self.locals.insert(key(name.span), (c.clone(), ty.clone()));
@@ -1120,13 +1141,22 @@ impl<'p, 'a> Gen<'p, 'a> {
         let Origin::Ctor(c, i) = fact.origin else {
             return self.unsupported(span, "this constructor");
         };
-        let params = fact.params.clone();
+        let params: Vec<Ty> = fact.params.iter().map(|t| self.sb(t)).collect();
         let mut cargs = vec![format!("&{}", place)];
         for (a, p) in args.iter().zip(&params) {
             cargs.push(self.expr(&a.expr, p));
         }
         let fails = self.prog.classes[c].ctors[i].can_fail;
-        let call = format!("{}({})", self.ctor_name(c, i), cargs.join(", "));
+        let fname = if self.prog.classes[c].type_params.is_empty() {
+            self.ctor_name(c, i)
+        } else {
+            let targs = match settle(self.ty_at(span).unref()) {
+                Ty::Class(_, a) => a,
+                _ => Vec::new(),
+            };
+            self.fn_inst(InstKind::Ctor(c, i), targs, Vec::new(), span)
+        };
+        let call = format!("{}({})", fname, cargs.join(", "));
         if fails {
             call
         } else {
@@ -2161,13 +2191,13 @@ impl<'p, 'a> Gen<'p, 'a> {
 
     fn this_class(&self) -> Ty {
         let c = &self.prog.classes[self.class];
-        Ty::Class(
+        self.sb(&Ty::Class(
             self.class,
             c.type_params
                 .iter()
                 .map(|p| Ty::Param(p.name.clone()))
                 .collect(),
-        )
+        ))
     }
 
     fn ident(&mut self, n: &str, span: Span, t: Ty) -> (String, Ty) {
@@ -2188,11 +2218,12 @@ impl<'p, 'a> Gen<'p, 'a> {
                 ),
             },
             Some(NameRes::Field(c, i)) => {
+                let fty = self.field_ty(*c, *i, &self.cur_cargs.clone());
                 let f = &self.prog.classes[*c].fields[*i];
-                let ty = if matches!(f.ty, Ty::Nullable(_)) && is_ref(&t) {
+                let ty = if matches!(fty, Ty::Nullable(_)) && is_ref(&t) {
                     t.clone()
                 } else {
-                    f.ty.clone()
+                    fty
                 };
                 if f.is_static {
                     (format!("zs{}_{}", c, i), ty)
@@ -2210,6 +2241,17 @@ impl<'p, 'a> Gen<'p, 'a> {
     fn member(&mut self, base: &Expr, name: &ast::Ident, span: Span, t: Ty) -> (String, Ty) {
         let bt = self.ty(base);
         if let Ty::TypeName(inner) = &bt {
+            // `T.MAX` in an instantiation where `T` is a number type: as `u8.MAX`.
+            if let Ty::Prim(p) = **inner {
+                let as_prim = Expr {
+                    kind: E::PrimMember {
+                        prim: p,
+                        name: name.clone(),
+                    },
+                    span,
+                };
+                return self.rv(&as_prim);
+            }
             if let Ty::Class(c, _) = &**inner {
                 let ci = &self.prog.classes[*c];
                 if ci.kind == ClassKind::Enum {
@@ -2247,12 +2289,12 @@ impl<'p, 'a> Gen<'p, 'a> {
             format!("({}).", b)
         };
         match &deref {
-            Ty::Class(c, _) => {
+            Ty::Class(c, cargs) => {
                 let f = self.prog.classes[*c]
                     .fields
                     .iter()
-                    .find(|f| f.name == name.name)
-                    .map(|f| f.ty.clone());
+                    .position(|f| f.name == name.name)
+                    .map(|i| self.field_ty(*c, i, cargs));
                 match f {
                     Some(ft) => {
                         let ty = if matches!(ft, Ty::Nullable(_)) && is_ref(&t) {
@@ -2808,12 +2850,19 @@ impl<'p, 'a> Gen<'p, 'a> {
         x: &Expr,
         span: Span,
     ) -> (String, Ty) {
-        let ast::CastTarget::Prim(to) = ty else {
-            return (
-                self.unsupported(span, "casts to a type parameter"),
-                Ty::Unknown,
-            );
+        let to = match ty {
+            ast::CastTarget::Prim(p) => *p,
+            ast::CastTarget::Param(id) => match self.sb(&Ty::Param(id.name.clone())) {
+                Ty::Prim(p) => p,
+                _ => {
+                    return (
+                        self.unsupported(span, "casts to a type parameter"),
+                        Ty::Unknown,
+                    );
+                }
+            },
         };
+        let to = &to;
         let from = settle(self.ty(x).unref());
         let v = self.expr(x, &from);
         let tc = prim_c(*to);
@@ -3285,7 +3334,31 @@ impl<'p, 'a> Gen<'p, 'a> {
         };
         match &fact.origin {
             Origin::Method(c, i) => {
-                let (c, i) = (*c, *i);
+                let (mut c, mut i) = (*c, *i);
+                // In an instantiation, a type parameter bounded by an interface is a
+                // known class, so its method is called directly, with no dispatch.
+                if self.prog.classes[c].kind == ClassKind::Interface
+                    && let E::Member { expr: base, .. } = &callee.kind
+                    && let Ty::Class(k, _) = settle(self.ty(base).unref())
+                    && self.prog.classes[k].kind != ClassKind::Interface
+                {
+                    let im = &self.prog.classes[c].methods[i];
+                    let same: Vec<usize> = self.prog.classes[k]
+                        .methods
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, m)| m.name == im.name && m.params.len() == im.params.len())
+                        .map(|(j, _)| j)
+                        .collect();
+                    let pick = same
+                        .iter()
+                        .copied()
+                        .find(|&j| self.prog.classes[k].methods[j].params == im.params)
+                        .or_else(|| same.first().copied());
+                    if let Some(j) = pick {
+                        (c, i) = (k, j);
+                    }
+                }
                 let m = &self.prog.classes[c].methods[i];
                 if self.prog.classes[c].kind == ClassKind::Interface {
                     let u = self.unsupported(e.span, "calls through interfaces");
@@ -3297,8 +3370,15 @@ impl<'p, 'a> Gen<'p, 'a> {
                 }
                 let fails = m.can_fail;
                 let is_static = m.is_static;
-                let params = fact.params.clone();
+                let params: Vec<Ty> = fact.params.iter().map(|t| self.sb(t)).collect();
                 let recv_arg = fact.recv_arg;
+                // A generic class's type arguments come from the receiver's type.
+                let recv = match &callee.kind {
+                    E::Member { expr: base, .. } if !recv_arg => Some(self.ty(base)),
+                    _ => None,
+                };
+                let targs = fact.targs.clone();
+                let (fname, map) = self.method_ref(c, i, recv.as_ref(), &targs, e.span);
                 let mut cargs = Vec::new();
                 let mut rest: &[Ty] = &params;
                 if let E::Member { expr: base, .. } = &callee.kind {
@@ -3315,17 +3395,22 @@ impl<'p, 'a> Gen<'p, 'a> {
                 for (a, p) in args.iter().zip(rest) {
                     cargs.push(self.expr(&a.expr, p));
                 }
-                let code = format!("{}({})", self.fn_name(c, i), cargs.join(", "));
+                let code = format!("{}({})", fname, cargs.join(", "));
+                let r = if map.is_empty() {
+                    self.sb(&m.ret)
+                } else {
+                    m.ret.subst(&map)
+                };
                 CallOut {
                     code,
-                    ret: settle(&m.ret.clone()),
+                    ret: settle(&r),
                     fails,
                 }
             }
             Origin::Value => {
                 let ft = settle(&self.ty(callee));
                 let f = self.expr(callee, &ft);
-                let params = fact.params.clone();
+                let params: Vec<Ty> = fact.params.iter().map(|t| self.sb(t)).collect();
                 let cargs: Vec<String> = args
                     .iter()
                     .zip(&params)
@@ -3339,7 +3424,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
             Origin::Builtin => {
                 let name = fact.name.clone();
-                let params = fact.params.clone();
+                let params: Vec<Ty> = fact.params.iter().map(|t| self.sb(t)).collect();
                 self.builtin(e, callee, &name, args, &params, ret)
             }
             _ => {
@@ -3463,7 +3548,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                         let p = *prim;
                         let code = if p.is_float() {
                             format!(
-                                "({{ zr_res_f64 _r = zr_parse_f64({}); {} }})",
+                                "({{ zr_res_f64 _r = zr_parse_f64({}); {}; }})",
                                 s,
                                 if p == Prim::F32 {
                                     "(zr_r_float){(float)_r.v, _r.s}"
@@ -3570,6 +3655,19 @@ impl<'p, 'a> Gen<'p, 'a> {
             return ok(self.unsupported(span, "this call"), ret);
         };
         let bt = self.ty(base);
+        // `T.parse(s)` in an instantiation where `T` is a number type: as `u8.parse(s)`.
+        if let Ty::TypeName(inner) = &bt
+            && let Ty::Prim(p) = **inner
+        {
+            let as_prim = Expr {
+                kind: E::PrimMember {
+                    prim: p,
+                    name: mname.clone(),
+                },
+                span: callee.span,
+            };
+            return self.builtin(e, &as_prim, name, args, params, ret);
+        }
         if let Ty::Namespace(ns) = &bt {
             if *ns == "status" && (name == "message" || name == "name") {
                 return ok(format!("zr_status_message({})", arg(self, 0)), Ty::string());

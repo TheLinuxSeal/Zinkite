@@ -1384,3 +1384,226 @@ A cat
     );
     assert_eq!(out.status.code(), Some(0));
 }
+
+/// Generics, monomorphized (DESIGN §10): DESIGN's `sum`, `clamp` and `countDistinct` at
+/// several types, a generic function calling another, a cast to `T`, generic classes
+/// with a generic method, a recursive `Node<K>`, nested `Box<Box<i64>>` (copied by
+/// value), an inlined lambda and a lambda value inside generic functions.
+#[test]
+fn generic_functions_and_classes() {
+    prints(
+        r#"<T implements number> T sum(T[:] xs) {
+    T total = 0;
+    for (T x : xs) { total += x; }
+    return total;
+}
+
+<T implements ordered> T clamp(T x, T lo, T hi) { return x < lo ? lo : (hi < x ? hi : x); }
+
+<K implements hashable> i64 countDistinct(K[:] xs) {
+    hashset<K> seen = [];
+    for (K x : xs) { seen.add(x); }
+    return seen.len;
+}
+
+<T implements number> f64 mean(T[:] xs) {
+    return (f64) sum(xs) / (f64) xs.len;
+}
+
+<T implements ordered> T largest(T[:] xs) {
+    T best = xs[0];
+    for (T x : xs) { if (best < x) { best = x; } }
+    return best;
+}
+
+<T implements int> T scaled(T x, i64 k) {
+    return x * (T) k;
+}
+
+<T implements number> T applyTwice(T x) {
+    func(T => T) f = (T y) => y + y;
+    return f(f(x));
+}
+
+class Pair<A, B> {
+    A first;
+    B second;
+
+    <C> Pair<A, C> withSecond(C c) {
+        return new Pair<A, C>(first, c);
+    }
+
+    void show() {
+        print("(${first}, ${second}) ");
+    }
+}
+
+class Node<K> {
+    K key;
+    Node<K>&? next;
+}
+
+class Box<T> {
+    T value;
+
+    T get() { return value; }
+
+    mut void set(T v) { value = v; }
+}
+
+<T implements ordered> void sortDesc(T[..~]& xs) {
+    xs.sort((T a, T b) => b < a);
+}
+
+void main() {
+    i64[..>] ints = [3, 1, 4, 1, 5, 9, 2, 6];
+    f64[..>] floats = [0.5, 0.25, 2.0];
+    u8[..>] bytes = [20, 10];
+    string[..>] words = ["b", "a", "b", "c", "a"];
+    println("sums ${sum(ints)} ${sum(floats)} ${sum(bytes)}");
+    println("clamp ${clamp(15, 0, 10)} ${clamp(-2.5, -1.0, 1.0)} ${clamp("m", "a", "k")}");
+    println("distinct ${countDistinct(ints)} ${countDistinct(words)}");
+    println("mean ${mean(ints)} largest ${largest(ints)} ${largest(words)}");
+    println("scaled ${scaled(7, 3)} ${scaled((u8) 20, 2)}");
+
+    Pair<i64, string> p = new Pair<i64, string>(1, "one");
+    Pair<i64, f64> q = p.withSecond(2.5);
+    p.show();
+    q.show();
+    println("first+1 ${q.first + 1}");
+
+    Node<string>[..>] nodes = [];
+    Node<string>& c = nodes.push(new Node<string>("c", null));
+    Node<string>& b = nodes.push(new Node<string>("b", c));
+    Node<string>& a = nodes.push(new Node<string>("a", b));
+    Node<string>&? cur = a;
+    while (cur != null) { print(cur.key); cur .= cur.next; }
+    println("");
+
+    Box<Box<i64>> nested = new Box<Box<i64>>(new Box<i64>(41));
+    Box<i64> inner = nested.get();
+    inner.set(inner.get() + 1);
+    println("nested ${nested.get().get()} copy ${inner.get()}");
+    Box<string> bs = new Box<string>("hi");
+    bs.set("there");
+    println("box ${bs.get()}");
+
+    i64[..~] ys = [3, 8, 1];
+    sortDesc(ys);
+    string[..~] zs = ["x", "z", "y"];
+    sortDesc(zs);
+    println("desc ${ys} ${zs[0]}${zs[1]}${zs[2]}");
+    println("twice ${applyTwice(3)} ${applyTwice(1.25)}");
+}
+"#,
+        r#"sums 31 2.75 30
+clamp 10 -1.0 k
+distinct 7 3
+mean 3.875 largest 9 c
+scaled 21 40
+(1, one) (1, 2.5) first+1 2
+abc
+nested 41 copy 42
+box there
+desc [8, 3, 1] zyx
+twice 12 5.0
+"#,
+    );
+}
+
+/// In an instantiation, a type parameter bounded by an interface is a known class, so
+/// its method is called directly; `T.MIN`, `T.MAX` and `T.parse` follow `T`; a generic
+/// root keeps its growable field.
+#[test]
+fn generic_bounds_and_roots() {
+    prints(
+        r#"interface Shape {
+    f64 area();
+}
+
+class Square implements Shape {
+    f64 side;
+    f64 area() { return side * side; }
+}
+
+class Circle implements Shape {
+    f64 r;
+    f64 area() { return 3.0 * r * r; }
+}
+
+<S implements Shape> f64 total(S[:] shapes) {
+    f64 t = 0.0;
+    for (S s : shapes) { t += s.area(); }
+    return t;
+}
+
+<T implements int> string limits(T x) {
+    return x == T.MIN ? "min" : x == T.MAX ? "max" : "neither";
+}
+
+<T implements number> T parsed(string s, T fallback) {
+    T v @bad = T.parse(s);
+    return bad ? fallback : v;
+}
+
+root Stack<T> {
+    T[..~] items;
+
+    new() {}
+
+    mut void push(T x) { items +> x; }
+
+    mut T pop() {
+        T x @_ = items ->;
+        return x;
+    }
+
+    i64 size() { return items.len; }
+}
+
+void main() {
+    Square[..>] sq = [];
+    sq +> new Square(2.0) +> new Square(3.0);
+    Circle[..>] ci = [];
+    ci +> new Circle(1.0);
+    println("areas ${total(sq)} ${total(ci)}");
+    println("limits ${limits((u8) 255)} ${limits(i64.MIN)} ${limits(5)}");
+    println("parsed ${parsed("12", 0)} ${parsed("x", -1)} ${parsed("2.5", 0.0)} ${parsed("300", (u8) 7)}");
+    Stack<string> st = new Stack<string>();
+    st.push("a");
+    st.push("b");
+    Stack<i128> wide = new Stack<i128>();
+    wide.push(i128.MAX);
+    string b = st.pop();
+    println("stack ${b} ${st.size()} ${wide.pop()} ${wide.size()}");
+}
+"#,
+        r#"areas 13.0 3.0
+limits max min neither
+parsed 12 -1 2.5 7
+stack b 1 170141183460469231731687303715884105727 0
+"#,
+    );
+}
+
+/// Polymorphic recursion that grows its type arguments without end is rejected when
+/// instantiating (DESIGN §10), rather than generating forever.
+#[test]
+fn runaway_instantiation_is_an_error() {
+    let file = SourceFile::new(
+        "prog.zn",
+        r#"class Pair<A, B> { A first; B second; }
+<T> i64 grow(T x, i64 n) {
+  if (n == 0) { return 0; }
+  return 1 + grow(new Pair<T, T>(x, x), n - 1);
+}
+void main() { println("${grow(1, 3)}"); }
+"#,
+    );
+    let (diags, c) = zink::compile_c(std::slice::from_ref(&file));
+    assert!(c.is_none());
+    assert!(diags[0].iter().any(|d| {
+        d.message
+            .contains("instantiates generic code with ever larger type arguments")
+    }));
+}
