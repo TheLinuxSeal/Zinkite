@@ -98,9 +98,18 @@ struct Gen<'p, 'a> {
     switches: Vec<SwitchCtx>,
     pending_label: Option<String>,
     used_scratch: bool,
-    /// The call about to be generated has its array result copied into a variable at once,
-    /// so it needn't be kept on the scratch stack (see `call`).
-    direct_result: bool,
+    /// For the call about to be generated, when its array result goes straight into a
+    /// variable: where to build it (DESIGN §3.3), as C, or `NULL` for the callee's own
+    /// data stack. `None` makes the result a temporary, kept on the scratch stack.
+    direct_result: Option<String>,
+    /// The declaration about to be generated is of a new variable, so a call's array
+    /// result can be built in its storage: nothing else can be reading it.
+    fresh_dst: bool,
+    /// The current function returns an array of the plain layout, built where its
+    /// caller's `_dst` says (DESIGN §3.3).
+    dst_fn: bool,
+    /// The local array the current function returns by name, built in `_dst`.
+    result_local: Option<(u32, u32)>,
     /// The type of the value the last `with_status` evaluated.
     last_status_ret: Ty,
     /// Function-pointer typedefs, by signature, and their text.
@@ -260,7 +269,10 @@ impl<'p, 'a> Gen<'p, 'a> {
             switches: Vec::new(),
             pending_label: None,
             used_scratch: false,
-            direct_result: false,
+            direct_result: None,
+            fresh_dst: false,
+            dst_fn: false,
+            result_local: None,
             last_status_ret: Ty::Void,
             fn_types: HashMap::new(),
             fn_typedefs: String::new(),
@@ -337,6 +349,90 @@ impl<'p, 'a> Gen<'p, 'a> {
             self.result_ty(&Ty::Prim(Prim::F32), span);
         }
         code
+    }
+
+    /// A call's array result. One built where it goes needs nothing more. A temporary was
+    /// built on the callee's own data stack, which its next call reuses, so it is copied to
+    /// the scratch stack, where it lasts to the end of its statement:
+    /// `path.relative(path.absolute(a), path.absolute(b))`.
+    pub(super) fn array_result(
+        &mut self,
+        code: String,
+        r: &Ty,
+        fails: bool,
+        direct: &Option<String>,
+        span: Span,
+    ) -> String {
+        if direct.is_some() {
+            return code;
+        }
+        let el = r.elem().cloned().unwrap_or(Ty::u8());
+        let sz = self.elem_size(&el, span);
+        self.used_scratch = true;
+        if fails {
+            format!(
+                "({{ __typeof__({c}) _rv = {c}; _rv.v = zr_vec_scratch(_rv.v, {sz}); _rv; }})",
+                c = code,
+                sz = sz
+            )
+        } else {
+            format!("zr_vec_scratch({}, {})", code, sz)
+        }
+    }
+
+    /// The local array a function returns by name, to build in its caller's `_dst`: the
+    /// first one a `return` names, if it isn't a parameter. Only one, since two arrays
+    /// can't share the space.
+    fn result_local_of(&self, stmts: &[Stmt], params: &[ast::Param]) -> Option<(u32, u32)> {
+        fn returns<'e>(s: &'e Stmt, out: &mut Vec<&'e Expr>) {
+            match &s.kind {
+                S::Return { value: Some(v), .. } => out.push(v),
+                S::Block(b) => b.stmts.iter().for_each(|s| returns(s, out)),
+                S::If { then, els, .. } => {
+                    returns(then, out);
+                    if let Some(e) = els {
+                        returns(e, out);
+                    }
+                }
+                S::While { body, .. }
+                | S::Repeat { body, .. }
+                | S::DoWhile { body, .. }
+                | S::For { body, .. }
+                | S::ForEach { body, .. } => returns(body, out),
+                S::Switch(sw) => {
+                    for r in &sw.rules {
+                        if let ast::SwitchBody::Block(b) = &r.body {
+                            b.stmts.iter().for_each(|s| returns(s, out));
+                        }
+                    }
+                }
+                S::Labeled { stmt, .. } => returns(stmt, out),
+                S::If_(b) => active(b).iter().for_each(|s| returns(s, out)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        stmts.iter().for_each(|s| returns(s, &mut found));
+        let params: Vec<(u32, u32)> = params
+            .iter()
+            .filter_map(|p| match &p.name {
+                Name::Ident(id) => Some(key(id.span)),
+                Name::Discard(_) => None,
+            })
+            .collect();
+        found.into_iter().find_map(|v| {
+            let v = strip_paren(v);
+            let E::Ident(_) = &v.kind else {
+                return None;
+            };
+            match self.facts.names.get(&key(v.span)) {
+                Some(NameRes::Local(d)) if !params.contains(d) => {
+                    let t = self.facts.locals.get(d).map(|t| self.sb(t))?;
+                    (layout(&t) == Some(Layout::Vec)).then_some(*d)
+                }
+                _ => None,
+            }
+        })
     }
 
     /// An argument as it crosses into C (DESIGN §12.6): text C reads as NUL-terminated
@@ -676,6 +772,8 @@ impl<'p, 'a> Gen<'p, 'a> {
         self.loops.clear();
         self.switches.clear();
         self.used_scratch = false;
+        self.dst_fn = false;
+        self.result_local = None;
     }
 
     fn fn_name(&self, class: ClassId, idx: usize) -> String {
@@ -728,6 +826,14 @@ impl<'p, 'a> Gen<'p, 'a> {
         self.is_main = c.kind == ClassKind::Script && m.name == "main";
         let ret = self.ret_c(&m_ret, m.can_fail, span);
         let mut params = Vec::new();
+        // An array result is built where the caller says (DESIGN §3.3).
+        if dst_ret(&m_ret) {
+            self.dst_fn = true;
+            params.push("void *_dst".to_string());
+            if let Some(body) = &m.decl.body {
+                self.result_local = self.result_local_of(&body.stmts, &m.decl.params);
+            }
+        }
         if !m.is_static {
             let st = self.cty(&self.this_class(), span);
             params.push(format!("{}* self", st));
@@ -1171,7 +1277,15 @@ impl<'p, 'a> Gen<'p, 'a> {
             let (name, ty) = self.new_local(&v.name);
             let ct = self.cty(&ty, v.name.span);
             if on_stack(&ty) {
-                let init = self.stack_init(&ty);
+                // The array the function returns starts in its caller's storage.
+                let init = if self.result_local == Some(key(v.name.span))
+                    && layout(&ty) == Some(Layout::Vec)
+                {
+                    let s = self.site();
+                    format!("((zr_vec){{_dst ? _dst : zr_stack({}), 0}})", s)
+                } else {
+                    self.stack_init(&ty)
+                };
                 self.line(&format!("{} {} = {};", ct, name, init));
                 match (&v.init, &v.capture) {
                     (Some(init), Some(Name::Ident(c))) => match (&ty, layout(&ty)) {
@@ -1180,13 +1294,15 @@ impl<'p, 'a> Gen<'p, 'a> {
                         (Ty::Array(el, _), Some(Layout::Vec)) => {
                             let el = (**el).clone();
                             let (cn, _) = self.new_local(c);
-                            self.direct_result = matches!(strip_paren(init).kind, E::Call { .. });
+                            self.direct_result = matches!(strip_paren(init).kind, E::Call { .. })
+                                .then(|| format!("{}.p", name));
                             let (val, st) =
                                 self.with_status(init, &Ty::Slice(Box::new(el.clone())));
+                            self.direct_result = None;
                             let sz = self.elem_size(&el, init.span);
                             self.line(&format!("uint8_t {};", cn));
                             self.line(&format!(
-                                "({{ {} zr_slice _s = {}; {} = {}; memmove({n}.p, _s.p, (size_t)_s.n * {}); {n}.n = _s.n; }});",
+                                "({{ {} zr_slice _s = {}; {} = {}; if (_s.p != {n}.p) memmove({n}.p, _s.p, (size_t)_s.n * {}); {n}.n = _s.n; }});",
                                 st.0,
                                 val,
                                 cn,
@@ -1200,7 +1316,9 @@ impl<'p, 'a> Gen<'p, 'a> {
                         }
                     },
                     (Some(init), _) => {
+                        self.fresh_dst = true;
                         let code = self.store_into(&name, &ty, init);
+                        self.fresh_dst = false;
                         self.line(&format!("{};", code));
                     }
                     (None, _) => {}
@@ -1345,6 +1463,7 @@ impl<'p, 'a> Gen<'p, 'a> {
     /// The code that stores `init` into `place`, of type `ty`: arrays on data stacks are
     /// filled in place, text is built in place (DESIGN §3.3, §4.11).
     fn store_into(&mut self, place: &str, ty: &Ty, init: &Expr) -> String {
+        let fresh = std::mem::take(&mut self.fresh_dst);
         // A map or set starts empty on its data stack; `[]` is all that makes one.
         if matches!(ty, Ty::Map(..) | Ty::Set(_)) {
             if matches!(&init.kind, E::ArrayLit(items) if items.is_empty()) {
@@ -1419,13 +1538,25 @@ impl<'p, 'a> Gen<'p, 'a> {
                     );
                 }
                 _ => {
-                    self.direct_result = matches!(strip_paren(init).kind, E::Call { .. });
+                    // A call builds its array in a new variable's storage (DESIGN §3.3).
+                    // An existing one may be what the arguments read, so the call builds
+                    // on its own stack and the result is copied.
+                    self.direct_result =
+                        matches!(strip_paren(init).kind, E::Call { .. }).then(|| {
+                            if fresh {
+                                format!("{}.p", place)
+                            } else {
+                                "NULL".to_string()
+                            }
+                        });
                     let src = self.expr(init, &Ty::Slice(Box::new(el.clone())));
-                    self.direct_result = false;
+                    self.direct_result = None;
                     let sz = self.elem_size(&el, init.span);
                     return format!(
-                        "({{ zr_slice _s = {}; memmove({}.p, _s.p, (size_t)_s.n * {}); {}.n = _s.n; }})",
-                        src, place, sz, place
+                        "({{ zr_slice _s = {}; if (_s.p != {p}.p) memmove({p}.p, _s.p, (size_t)_s.n * {}); {p}.n = _s.n; }})",
+                        src,
+                        sz,
+                        p = place
                     );
                 }
             }
@@ -1468,7 +1599,34 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
             return;
         }
-        let val = value.map(|v| self.expr(v, &ret));
+        let val = value.map(|v| {
+            if !self.dst_fn {
+                return self.expr(v, &ret);
+            }
+            // Into the caller's destination, when it gave one: the result local is already
+            // there, and a call is passed it, unless the result local is in use, which the
+            // call's arguments could be reading.
+            let is_call = matches!(strip_paren(v).kind, E::Call { .. });
+            if is_call && self.result_local.is_none() {
+                self.direct_result = Some("_dst".into());
+            }
+            let el = ret.elem().cloned().unwrap_or(Ty::u8());
+            // A slice or a literal is copied in too; with no destination, it is returned as
+            // it is, since a caller without one copies the result at once.
+            let code = if matches!(settle(&self.ty(v)).unref(), Ty::Array(..)) {
+                self.expr(v, &ret)
+            } else {
+                let s = self.expr(v, &Ty::Slice(Box::new(el.clone())));
+                format!("({{ zr_slice _rs = {}; (zr_vec){{_rs.p, _rs.n}}; }})", s)
+            };
+            self.direct_result = None;
+            let sz = self.elem_size(&el, span);
+            format!(
+                "({{ __typeof__({c}) _rv = {c}; if (_dst && _dst != _rv.p) {{ memmove(_dst, _rv.p, (size_t)_rv.n * {sz}); _rv.p = _dst; }} _rv; }})",
+                c = code,
+                sz = sz
+            )
+        });
         let rc = self.ret_c(&ret, self.fails, span);
         match (self.fails, val) {
             (true, Some(v)) => {
@@ -1664,7 +1822,13 @@ impl<'p, 'a> Gen<'p, 'a> {
         self.loops.push(lp);
         self.line("for (;;) {");
         self.indent += 1;
+        // Each pass's value is gone when the next call runs (REFERENCES §9), so an array
+        // result can stay on the callee's stack rather than pile up on the scratch stack.
+        if matches!(strip_paren(source).kind, E::Call { .. }) {
+            self.direct_result = Some("NULL".into());
+        }
         let (val, status) = self.with_status(source, &st);
+        self.direct_result = None;
         let st = if st.is_unknown() {
             self.last_status_ret.clone()
         } else {
@@ -3450,8 +3614,38 @@ impl<'p, 'a> Gen<'p, 'a> {
 
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[ast::Arg]) -> CallOut {
         // Taken first, so the calls in the arguments don't see it.
-        let direct = std::mem::take(&mut self.direct_result);
+        let direct = self.direct_result.take();
         let ret = settle(&self.ty(e));
+        // `stdin.readAll()`, which returns the input: built where the caller keeps it
+        // (DESIGN §3.3), or for a temporary or an assignment, on the scratch stack, where
+        // nothing else grows while `zr_read_all` runs.
+        if let E::Member { expr: base, name } = &callee.kind
+            && matches!(&base.kind, E::Ident(n) if n == "stdin")
+            && !self.facts.names.contains_key(&key(base.span))
+            && args.is_empty()
+            && name.name == "readAll"
+        {
+            let t = Ty::Array(Box::new(Ty::u8()), ArrayKind::frozen());
+            let rt = self.result_ty(&t, e.span);
+            let code = match direct.as_deref() {
+                Some(d) if d != "NULL" => format!(
+                    "({{ zr_vec _v = {{{}, 0}}; uint8_t _s = zr_read_all(0, &_v); if (_s) _v.n = 0; ({}){{_v, _s}}; }})",
+                    d, rt
+                ),
+                _ => {
+                    self.used_scratch = true;
+                    format!(
+                        "({{ zr_vec _v = zr_scratch_begin(); uint8_t _s = zr_read_all(0, &_v); if (_s) _v.n = 0; zr_scratch_end(_v); ({}){{_v, _s}}; }})",
+                        rt
+                    )
+                }
+            };
+            return CallOut {
+                code,
+                ret: t,
+                fails: true,
+            };
+        }
         // `stdin.readAll(buf)` and `stdin.nextLine(buf)`: the first of the library (STDLIB §4.1),
         // known by name until the checker models `File`.
         if let E::Member { expr: base, name } = &callee.kind
@@ -3518,7 +3712,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                 if self.prog.classes[c].kind == ClassKind::Interface {
                     let params: Vec<Ty> = fact.params.iter().map(|t| self.sb(t)).collect();
                     if let E::Member { expr: base, .. } = &callee.kind {
-                        return self.iface_call(base, c, i, args, &params, e.span);
+                        return self.iface_call(base, c, i, args, &params, direct, e.span);
                     }
                     let u = self.unsupported(e.span, "this call through an interface");
                     return CallOut {
@@ -3575,33 +3769,20 @@ impl<'p, 'a> Gen<'p, 'a> {
                     }
                 }
                 let fname = runtime_c.map_or(fname, str::to_string);
-                let mut code = format!("{}({})", fname, cargs.join(", "));
                 let r = if map.is_empty() {
                     self.sb(&m.ret)
                 } else {
                     m.ret.subst(&map)
                 };
                 let r = settle(&r);
-                // A returned array points into the callee's data stack, which its next call
-                // reuses. Unless it goes straight into a variable, it is copied to the
-                // scratch stack, where a temporary lasts to the end of its statement:
-                // `path.relative(path.absolute(a), path.absolute(b))` (DESIGN §3.3).
-                if !direct
-                    && m.c_name.is_none()
-                    && layout(&r) == Some(Layout::Vec)
-                    && let Ty::Array(el, _) = &r
-                {
-                    let sz = self.elem_size(&el.clone(), e.span);
-                    self.used_scratch = true;
-                    code = if fails {
-                        format!(
-                            "({{ __typeof__({c}) _rv = {c}; _rv.v = zr_vec_scratch(_rv.v, {sz}); _rv; }})",
-                            c = code,
-                            sz = sz
-                        )
-                    } else {
-                        format!("zr_vec_scratch({}, {})", code, sz)
-                    };
+                // Where to build an array result (DESIGN §3.3).
+                let into = m.c_name.is_none() && dst_ret(&r);
+                if into {
+                    cargs.insert(0, direct.clone().unwrap_or_else(|| "NULL".into()));
+                }
+                let mut code = format!("{}({})", fname, cargs.join(", "));
+                if into {
+                    code = self.array_result(code, &r, fails, &direct, e.span);
                 }
                 CallOut {
                     code,
@@ -4652,6 +4833,12 @@ enum Layout {
     Gap,
     /// A slice or a view: `zr_slice`.
     Slice,
+}
+
+/// An array a function returns into its caller's storage (DESIGN §3.3): one on a data
+/// stack with the plain `{p, n}` layout.
+pub(super) fn dst_ret(t: &Ty) -> bool {
+    matches!(t, Ty::Array(..)) && layout(t) == Some(Layout::Vec)
 }
 
 fn layout(t: &Ty) -> Option<Layout> {

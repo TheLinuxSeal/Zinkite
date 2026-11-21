@@ -89,6 +89,16 @@ public class File {
         return #err buf;
     }
 
+    // The rest of the file, built where the caller keeps it (DESIGN §3.3).
+    public u8[.] readAll() {
+        u8[..~] out = [];
+        u8 err = cReadAll(h, out);
+        if (err != 0) {
+            out.clear();
+        }
+        return #err out;
+    }
+
     // Appends the rest of the file to buf.
     public void readAll(u8[..>]& buf) {
         u8 err = cReadAll(h, buf);
@@ -150,7 +160,18 @@ public class File {
         return cInfo(h, 1) == 1;
     }
 
-    // Opens, reads to the end and closes.
+    // The whole file, built where the caller keeps it (DESIGN §3.3):
+    // `u8[.] text @err = File.readAll(path);`. NOT_FOUND, PERMISSION, IS_DIRECTORY.
+    public static u8[.] readAll(string path) {
+        u8[..~] out = [];
+        u8 err = cReadPath(path, out);
+        if (err != 0) {
+            out.clear();
+        }
+        return #err out;
+    }
+
+    // Opens, reads to the end and closes, appending to buf.
     public static void readAll(string path, u8[..>]& buf) {
         u8 err = cReadPath(path, buf);
         return #err;

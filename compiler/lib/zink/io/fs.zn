@@ -189,6 +189,16 @@ public class fs {
         return #err;
     }
 
+    // Where the link points.
+    public static u8[.] readLink(string path) {
+        u8[..~] out = [];
+        u8 err = cReadInto(path, out, 0);
+        if (err != 0) {
+            out.clear();
+        }
+        return #err out;
+    }
+
     // Appends where the link points to buf.
     public static void readLink(string path, u8[..>]& buf) {
         u8 err = cReadInto(path, buf, 0);

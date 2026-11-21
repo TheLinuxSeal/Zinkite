@@ -31,8 +31,8 @@ u8 main(string[.] args) {
     cli.parseOrExit(args);
     string word = cli.get("word", "");
 
-    u8[..>] text = [];                          // grows on a data stack, freed at the end of main
-    u8 err = @File.readAll(cli.get("file", ""), text);
+    // Read straight into text's own storage, freed at the end of main.
+    u8[.] text @err = File.readAll(cli.get("file", ""));
     if (err != 0) {
         errprintln("grepish: ${status.message(err)}");
         return 2;

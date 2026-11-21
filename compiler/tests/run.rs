@@ -2766,3 +2766,213 @@ lines: [<128><255><195>A] words: [<128><255><195>A] split,: [<128><255><195>A] s
 "##,
     );
 }
+
+/// A function's array result is built where the caller keeps it (DESIGN §3.3): in a new
+/// variable, through two levels of `return`, beside other returns (a call on the result,
+/// a slice of it, a literal, another local), with a status, from a loop, in generic code,
+/// through an interface, and from `next()`. An assignment `x = rev(x)` reads its own
+/// target, so it copies.
+#[test]
+fn arrays_built_where_they_are_kept() {
+    prints(
+        r##"u8[.] word(string s) {
+    u8[..>] out = [];
+    out.append(s);
+    out.append("!");
+    return out;
+}
+
+// Two levels: the destination is passed on.
+u8[.] twice(string s) { return word(s); }
+u8[.] thrice(string s) {
+    u8[..>] out = word(s);
+    out.append("?");
+    return out;
+}
+
+u8[.] rev(string s) {
+    u8[..>] out = [];
+    for (i64 i = s.len - 1; i >= 0; i--) { out +> s[i]; }
+    return out;
+}
+
+// The result local beside other returns.
+u8[.] pick(string s, i64 how) {
+    u8[..>] out = [];
+    out.append(s);
+    if (how == 1) { return rev(out); }
+    if (how == 2) { return out[1:]; }
+    if (how == 3) { return "literal"; }
+    u8[..>] other = [];
+    other.append("other");
+    if (how == 4) { return other; }
+    return out;
+}
+
+u8[.] check(string s) {
+    u8[..>] out = [];
+    if (s.len == 0) { return #status.INVALID out; }
+    out.append(s);
+    return out;
+}
+
+u8[.] firstLong(string[:] words) {
+    for (string w : words) {
+        u8[..>] out = [];
+        out.append(w);
+        if (out.len > 3) { return out; }
+    }
+    return "none";
+}
+
+<T> T[..>] doubled(T[:] xs) {
+    T[..>] out = [];
+    for (T x : xs) { out +> x; out +> x; }
+    return out;
+}
+
+interface Render { u8[.] render(); }
+class Box implements Render {
+    string label;
+    u8[.] render() {
+        u8[..>] out = [];
+        out +> '[';
+        out.append(label);
+        out +> ']';
+        return out;
+    }
+}
+
+class Pieces {
+    i64 n = 0;
+    mut u8[.] next() {
+        n++;
+        if (n > 3) { return #status.END ""; }
+        u8[..>] out = [];
+        for (i64 i = 0; i < n; i++) { out +> 'x'; }
+        return out;
+    }
+}
+
+void main() {
+    u8[.] a = word("hi");
+    u8[.] b = twice("yo");
+    u8[.] c = thrice("ok");
+    println("${a} ${b} ${c} ${word("t1")}${word("t2")}");
+    u8[..>] x = [];
+    x.append("abc");
+    x = rev(x);
+    println("assigned ${x}");
+    for (i64 how = 0; how <= 4; how++) {
+        u8[.] p = pick("hello", how);
+        print("${p} ");
+    }
+    println("");
+    u8[.] ok @e1 = check("fine");
+    u8[.] bad @e2 = check("");
+    println("${ok} ${e1} '${bad}' ${e2}");
+    string[..>] ws = ["a", "bb", "cccc", "ddddd"];
+    u8[.] fl = firstLong(ws);
+    println("first long ${fl}");
+    i64[..>] nums = [1, 2, 3];
+    i64[..>] dd = doubled(nums);
+    println("doubled ${dd.len} ${dd[0]} ${dd[5]}");
+    Box b1 = new Box("one");
+    Box b2 = new Box("two");
+    Render& r1 = b1;
+    Render& r2 = b2;
+    println("${r1.render()}${r2.render()}");
+    u8[.] kept = r1.render();
+    println("kept ${kept}");
+    Pieces ps = new Pieces();
+    while (u8[.] p : ps.next()) { print("${p} "); }
+    for (u8[.] p : new Pieces()) { print("<${p}>"); }
+    println("");
+    u8[..>] grow = word("g");
+    grow.append("rows");
+    println(grow);
+}
+"##,
+        "hi! yo! ok!? t1!t2!
+assigned cba
+hello olleh ello literal other 
+fine 0 '' 22
+first long cccc
+doubled 6 1 3
+[one][two]
+kept [one]
+x xx xxx <x><xx><xxx>
+g!rows
+",
+    );
+}
+
+/// Reads in one go return the text, built where the caller keeps it (STDLIB §1.3):
+/// `File.readAll(path)`, `f.readAll()`, `fs.readLink(path)`, `path.cwd()` and
+/// `stdin.readAll()`, also assigned to an array that exists. A failure gives an empty one.
+#[test]
+fn one_shot_reads_return_text() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("zink-oneshot");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let exe = build(
+        r##"import zink.io.*;
+
+string at(u8[..>]& buf, string dir, string name) {
+    i64 start = buf.len;
+    buf.append(dir);
+    buf +> '/';
+    buf.append(name);
+    return buf[start:];
+}
+
+void main(string[.] args) {
+    u8[..>] names = [];
+    string f = at(names, args[0], "f.txt");
+    string l = at(names, args[0], "link");
+    string missing = at(names, args[0], "missing");
+    @_ = File.writeAll(f, "alpha\nbeta\n");
+    @_ = fs.symlink("f.txt", l);
+    u8[.] whole @e1 = File.readAll(f);
+    u8[.] none @e2 = File.readAll(missing);
+    File h @_ = File.open(f);
+    @_ = h.seek(6);
+    u8[.] rest @e3 = h.readAll();
+    @_ = h.close();
+    u8[.] target @e4 = fs.readLink(l);
+    u8[.] gone @e5 = fs.readLink(missing);
+    u8[.] here @e6 = path.cwd();
+    println("whole ${whole.len} ${e1}, missing ${none.len} ${e2 == status.NOT_FOUND}, rest ${rest.trim()} ${e3}");
+    println("link ${target} ${e4}, gone ${gone.len} ${e5 == status.NOT_FOUND}, cwd ${path.isAbsolute(here)} ${e6}");
+    u8[.] input @e7 = stdin.readAll();
+    println("stdin ${input.len} ${e7}: ${input.trim()}");
+    u8[..>] again = [];
+    again.append("old");
+    again = stdin.readAll();
+    println("again ${again.len}");
+}
+"##,
+    );
+    use std::io::Write;
+    let mut child = Command::new(&exe)
+        .arg(&dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"from stdin\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "whole 11 0, missing 0 true, rest beta 0
+link f.txt 0, gone 0 true, cwd true 0
+stdin 11 0: from stdin
+again 0
+"
+    );
+}

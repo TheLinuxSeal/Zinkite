@@ -210,6 +210,16 @@ public class path {
         return p.len > 0 && p[0] == '/';
     }
 
+    // The working directory.
+    public static u8[.] cwd() {
+        u8[..~] out = [];
+        u8 err = cReadInto("", out, 1);
+        if (err != 0) {
+            out.clear();
+        }
+        return #err out;
+    }
+
     // Appends the working directory to buf.
     public static void cwd(u8[..>]& buf) {
         u8 err = cReadInto("", buf, 1);

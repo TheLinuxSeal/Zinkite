@@ -58,6 +58,10 @@ impl<'p, 'a> Gen<'p, 'a> {
             let ret = m.ret.subst(&map);
             let rc = self.ret_c(&ret, m.can_fail, span);
             let mut ps = vec!["void *".to_string()];
+            // Where an array result goes (DESIGN §3.3), before the value.
+            if dst_ret(&settle(&ret)) {
+                ps.insert(0, "void *".to_string());
+            }
             for p in &m.params {
                 ps.push(self.cty(&p.subst(&map), span));
             }
@@ -129,6 +133,10 @@ impl<'p, 'a> Gen<'p, 'a> {
             let thunk = format!("{}_m{}", name, j);
             let mut ps = vec!["void *self".to_string()];
             let mut call = vec![format!("({}*)self", cc)];
+            if dst_ret(&settle(&ret)) {
+                ps.insert(0, "void *_dst".to_string());
+                call.insert(0, "_dst".to_string());
+            }
             for (n, p) in want.iter().enumerate() {
                 let pc = self.cty(p, span);
                 ps.push(format!("{} a{}", pc, n));
@@ -228,7 +236,8 @@ impl<'p, 'a> Gen<'p, 'a> {
     }
 
     /// A call through an interface reference: the function from its table, given the
-    /// value's pointer.
+    /// value's pointer, and for an array result, where to build it.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn iface_call(
         &mut self,
         base: &Expr,
@@ -236,6 +245,7 @@ impl<'p, 'a> Gen<'p, 'a> {
         i: usize,
         args: &[ast::Arg],
         params: &[Ty],
+        direct: Option<String>,
         span: Span,
     ) -> CallOut {
         let bt = settle(&self.ty(base));
@@ -256,19 +266,24 @@ impl<'p, 'a> Gen<'p, 'a> {
         let m = &self.prog.classes[id].methods[i];
         let map = self.class_map(id, &iargs);
         let ret = settle(&m.ret.subst(&map));
-        CallOut {
-            code: format!(
-                "({{ {} {} = {}; {}.t->m{}({}); }})",
-                zi,
-                r,
-                recv,
-                r,
-                i,
-                cargs.join(", ")
-            ),
-            ret,
-            fails: m.can_fail,
+        let fails = m.can_fail;
+        let into = dst_ret(&ret);
+        if into {
+            cargs.insert(0, direct.clone().unwrap_or_else(|| "NULL".into()));
         }
+        let mut code = format!(
+            "({{ {} {} = {}; {}.t->m{}({}); }})",
+            zi,
+            r,
+            recv,
+            r,
+            i,
+            cargs.join(", ")
+        );
+        if into {
+            code = self.array_result(code, &ret, fails, &direct, span);
+        }
+        CallOut { code, ret, fails }
     }
 
     /// `x instanceof C c`: whether the reference's table is `C`'s for that interface,
@@ -319,7 +334,12 @@ impl<'p, 'a> Gen<'p, 'a> {
             let m = &prog.classes[id].methods[j];
             let map = self.class_map(id, &args);
             let ret = settle(&m.ret.subst(&map));
-            return Some((format!("{}.t->m{}({}.p)", it, j, it), ret, m.can_fail));
+            let dst = if dst_ret(&ret) { "NULL, " } else { "" };
+            return Some((
+                format!("{}.t->m{}({}{}.p)", it, j, dst, it),
+                ret,
+                m.can_fail,
+            ));
         }
         let Ty::Class(c, cargs) = settle(t.unref()) else {
             return None;
@@ -333,7 +353,9 @@ impl<'p, 'a> Gen<'p, 'a> {
         let m = &prog.classes[c].methods[j];
         let map = self.class_map(c, &cargs);
         let ret = settle(&m.ret.subst(&map));
-        Some((format!("{}(&{})", fname, it), ret, m.can_fail))
+        // A value lasts until the next call, so an array stays on the callee's stack.
+        let dst = if dst_ret(&ret) { "NULL, " } else { "" };
+        Some((format!("{}({}&{})", fname, dst, it), ret, m.can_fail))
     }
 
     /// A for-each over an iterator: a repeat loop on a hidden local, `var it = e;` then

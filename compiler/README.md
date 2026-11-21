@@ -112,11 +112,20 @@ program with the file and line, and exit status 1. Six of the eight examples run
 `csvsort`, `dirwalk`, `linebuf`, `sortlines`, `stats` and `wordfreq`. `cachesim`
 needs pools, and `jsonfmt` needs `zink.json`.
 
-A function's array result is built on the callee's own data stack. One that goes
-straight into a variable is copied from there; one used as a temporary, as in
-`path.relative(path.absolute(a), path.absolute(b))`, is copied to the scratch
-stack first, so it lasts to the end of its statement. Building it in the caller's
-storage, as DESIGN §3.3 says, would save that copy.
+A function's array result is built where the caller keeps it (DESIGN §3.3). A
+function returning a `T[.]`, `T[..>]` or `T[..~]` takes a hidden first argument: the
+storage to build it in, or `NULL`. The local it returns by name starts there instead
+of on a data stack of its own, so a declaration such as `u8[.] text = f(x);` is
+written once. `return g(x);` passes the storage on, and any other `return` copies into
+it. Two cases still copy, once:
+- an assignment to an array that already exists, `x = rev(x)`, since the arguments
+  may be reading it: the call builds on its own stack and the result is copied in;
+- a temporary, as in `path.relative(path.absolute(a), path.absolute(b))`: it is
+  built on the callee's stack and copied to the scratch stack, where it lasts to the
+  end of its statement.
+
+Building a 200 MB array this way takes 0.26 s and 197 MB, against 0.39 s and 392 MB
+when it is copied.
 
 Lambdas (DESIGN §9.3): one passed to a built-in, such as a comparator, key or
 predicate, is inlined where the built-in uses it, its parameters pointing at the
@@ -175,7 +184,8 @@ representations as they are. Written so far:
 - `zink.io`: `File` (open, create, append, createNew, update; read, readLine,
   nextLine, readAll; write, print, println; seek, position, size, isTerminal,
   sync, close; readAll, writeAll and appendAll of whole files, writeAll by a
-  temporary file and a rename), `Dir` and `DirEntry`, `Stat`, `fs` (exists,
+  temporary file and a rename; each `readAll` both returning the text and appending
+  it to a buffer), `Dir` and `DirEntry`, `Stat`, `fs` (exists,
   stat, lstat, remove, removeAll, rename, move, copy, mkdir, mkdirAll, chmod,
   symlink, readLink, tempFile, tempDir) and `path` (join, base, dir, ext, stem,
   isAbsolute, normalize, absolute, relative, resolve, cwd, chdir);
@@ -203,7 +213,7 @@ caller's.
 Not yet: a capturing lambda
 passed to a function of the program's own (which needs that function specialized per lambda), `filter`, `map`
 and the other methods that build a new array, comparing class values, and the library packages that aren't written yet (`zink.json`,
-`zink.time` and the others). Of `stdin`, only `readAll` and `nextLine` work so far.
+`zink.time` and the others). Of `stdin`, only `readAll()`, `readAll(buf)` and `nextLine(buf)` work so far.
 Using any of the rest is a clear error, not wrong code.
 
 Arrays on data stacks, by layout:

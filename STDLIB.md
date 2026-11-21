@@ -47,8 +47,9 @@
 ### 1.3 Conventions
 These follow from the memory model and the status code. Every section below keeps to them.
 
-1. **Text that is read goes into a buffer the caller passes.** The parameter is a `u8[..>]&`, and the text is appended at the buffer's end (`stdin.readLine(line)`, `File.readAll(path, text)`).
-   - The caller decides how long the text lives, and can reuse the buffer by clearing it.
+1. **Text that is read in one go is returned as a `u8[.]`, built in place** where the caller keeps it (DESIGN §3.3), as computed text is (2): `u8[.] text @err = File.readAll(path);`. On failure it is empty.
+   - **A reader called again and again takes a buffer the caller passes** instead: a `u8[..>]&` the text is appended to (`stdin.nextLine(line)`, `d.next(names)`). The caller decides how long the text lives, and can reuse the buffer by clearing it.
+   - **Each one-shot read has that form too**, for appending to text already there or reusing a buffer: `File.readAll(path, text)`.
    - Such a parameter accepts any `u8` array that can grow at its end, a `u8[..~]` included (DESIGN §6.1).
 2. **Text that is computed is returned as a `u8[.]`, built in place** where the caller keeps it (DESIGN §3.3).
    - `u8[.] up = name.toUpper();` writes the text once, into `up`.
@@ -299,12 +300,13 @@ A `File` is a handle (DESIGN §6.4).
 | `File.createNew(string path)` | for writing; it must not exist yet (`O_EXCL`), so it works as a lock file | `EXISTS`, and as `create` |
 | `File.update(string path)` | for reading and writing, without truncating | `NOT_FOUND`, `PERMISSION` |
 
-Reading appends to the buffer:
+Reading:
 ```
-i64 f.read(u8[..>]& buf, i64 max)     // up to max bytes; returns how many; END at the end of the file
-void f.readLine(u8[..>]& buf)         // one line, without its \n or \r\n; END when nothing was left
+u8[.] f.readAll()                     // the rest of the file
+void f.readAll(u8[..>]& buf)          // the same, appended to buf
+i64 f.read(u8[..>]& buf, i64 max)     // up to max bytes, appended; returns how many; END at the end of the file
+void f.readLine(u8[..>]& buf)         // one line, appended, without its \n or \r\n; END when nothing was left
 string f.nextLine(u8[..~]& buf)       // clears buf, reads one line into it, and returns a view of it; END as readLine
-void f.readAll(u8[..>]& buf)          // to the end of the file
 ```
 
 Writing:
@@ -327,7 +329,8 @@ bool f.isTerminal()
 
 Whole files in one call:
 ```
-void File.readAll(string path, u8[..>]& buf)    // open, read to the end, close
+u8[.] File.readAll(string path)                 // open, read to the end, close
+void File.readAll(string path, u8[..>]& buf)    // the same, appended to buf
 void File.writeAll(string path, string bytes)   // replaces the file atomically
 void File.appendAll(string path, string bytes)
 ```
@@ -398,7 +401,8 @@ void fs.copy(string from, string to)     // contents and mode; copy_file_range w
 void fs.mkdir(string path)               // EXISTS, NOT_FOUND (a missing parent)
 void fs.mkdirAll(string path)            // creates missing parents; an existing directory is success
 void fs.symlink(string target, string link)
-void fs.readLink(string path, u8[..>]& buf)
+u8[.] fs.readLink(string path)
+void fs.readLink(string path, u8[..>]& buf)      // appended to buf
 void fs.chmod(string path, u32 mode)
 File fs.tempFile(u8[..>]& path)          // a new file in $TMPDIR, or /tmp; its path is appended to path
 void fs.tempDir(u8[..>]& path)           // a new directory there, mode 0700
@@ -421,7 +425,8 @@ u8[.] path.normalize(string p)             // removes ".", "..", repeated and tr
 u8[.] path.absolute(string p)              // joined to the working directory, then normalized
 u8[.] path.relative(string from, string to)
 u8[.] path.resolve(string p)               // follows symbolic links (realpath); NOT_FOUND
-void path.cwd(u8[..>]& buf)
+u8[.] path.cwd()
+void path.cwd(u8[..>]& buf)                // appended to buf
 void path.chdir(string p)                  // NOT_FOUND, NOT_DIRECTORY, PERMISSION
 ```
 
@@ -1315,8 +1320,7 @@ import zink.json.*;
 import zink.yaml.*;
 
 u8 main() {
-    u8[..>] text = [];
-    u8 err = @stdin.readAll(text);
+    u8[.] text @err = stdin.readAll();
     if (err) {
         errprintln("yaml2json: ${status.message(err)}");
         return err;
