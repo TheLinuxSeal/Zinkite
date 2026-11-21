@@ -32,6 +32,12 @@ lib! {
     "zink.io", "zink/io/Dir.zn";
     "zink.cli", "zink/cli/Args.zn";
     "zink.lang", "zink/lang/Iterator.zn";
+    "zink.lang", "zink/lang/LineIterator.zn";
+    "zink.lang", "zink/lang/WordIterator.zn";
+    "zink.lang", "zink/lang/SplitIterator.zn";
+    "zink.lang", "zink/lang/CodePointIterator.zn";
+    "zink.lang", "zink/lang/ChunkIterator.zn";
+    "zink.lang", "zink/lang/WindowIterator.zn";
 }
 
 /// `zink` and `zink.*`, which only the library's own files may declare.

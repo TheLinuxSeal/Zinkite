@@ -755,7 +755,7 @@ Scratch space is taken on a scratch data stack and released when the call return
 | `ChunkIterator chunks(i64 n)` | slices of `n` elements, the last one shorter |
 | `WindowIterator windows(i64 n)` | every run of `n` consecutive elements |
 
-Both yield slices, so on cursor arrays they wait for cursor-array slices (DESIGN §17).
+Both yield slices, so on cursor arrays they wait for cursor-array slices (DESIGN §17). A size below 1 is a bug.
 
 ### 7.2 Heaps (v1)
 On arrays that can grow and shrink at the end (`T[..~]`):

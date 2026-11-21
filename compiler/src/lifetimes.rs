@@ -369,7 +369,6 @@ impl<'p, 'a> Analysis<'p, 'a> {
             | Ty::Slice(_)
             | Ty::View(_)
             | Ty::Func(..)
-            | Ty::Iter(_)
             | Ty::MapEntry(..) => true,
             Ty::Param(_) | Ty::Unknown => true,
             Ty::Array(e, _) | Ty::Set(e) | Ty::Pool(e) => self.holds_refs(e),
@@ -1976,7 +1975,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 let iv = self.expr(iter);
                 let it = self.ty(iter);
                 let (held, holder) = match it.unref() {
-                    Ty::Iter(_) | Ty::Class(..) | Ty::Unknown => (iv.refs.clone(), iv.refs.clone()),
+                    Ty::Class(..) | Ty::Unknown => (iv.refs.clone(), iv.refs.clone()),
                     _ => {
                         let st = R::Elems(Box::new(self.storage(&it, &iv, iter.span)));
                         (st.clone(), st)
@@ -1988,9 +1987,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 let pre = self.sub(|me| {
                     if let Name::Ident(n) = name {
                         let var = me.declare(n);
-                        let elem = if by_ref
-                            || matches!(it.unref(), Ty::Iter(_) | Ty::Class(..) | Ty::Unknown)
-                        {
+                        let elem = if by_ref || matches!(it.unref(), Ty::Class(..) | Ty::Unknown) {
                             held.clone()
                         } else {
                             R::stored(held.clone())

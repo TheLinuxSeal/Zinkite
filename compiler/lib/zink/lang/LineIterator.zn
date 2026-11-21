@@ -1,0 +1,29 @@
+package zink.lang;
+
+// The lines of a text, without their \n or \r\n (STDLIB §3.2): `for (string l : text.lines())`.
+// Each is a view into the text. A last line with no newline counts; an empty text has none.
+public class LineIterator implements Iterator<string> {
+    private string text;
+    private i64 at = 0;
+
+    static LineIterator lines(string text) {
+        return new LineIterator(text);
+    }
+
+    public mut string next() {
+        if (at >= text.len) {
+            return #status.END "";
+        }
+        string rest = text[at:];
+        i64 end = rest.len;
+        i64 nl @none = rest.find("\n");
+        if (!none) {
+            end = nl;
+        }
+        at += end + 1;
+        if (end > 0 && rest[end - 1] == '\r') {
+            end--;
+        }
+        return rest[0:end];
+    }
+}

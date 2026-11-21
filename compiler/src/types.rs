@@ -40,8 +40,6 @@ pub enum Ty {
     Handle(Box<Ty>),
     /// What a for-each over a `hashmap` gives: `key` and `value`.
     MapEntry(Box<Ty>, Box<Ty>),
-    /// A library iterator yielding the type: `lines()`, `codePoints()`.
-    Iter(Box<Ty>),
     /// A class or number type named as a value, before `.`: `Kind.OBJECT`, `File.open`.
     TypeName(Box<Ty>),
     /// A static-only namespace: `status`, `math`.
@@ -283,7 +281,6 @@ impl Ty {
             Ty::Pool(e) => Ty::Pool(s(e)),
             Ty::Handle(e) => Ty::Handle(s(e)),
             Ty::MapEntry(k, v) => Ty::MapEntry(s(k), s(v)),
-            Ty::Iter(e) => Ty::Iter(s(e)),
             Ty::TypeName(e) => Ty::TypeName(s(e)),
             _ => self.clone(),
         }
@@ -301,7 +298,6 @@ impl Ty {
             | Ty::Set(e)
             | Ty::Pool(e)
             | Ty::Handle(e)
-            | Ty::Iter(e)
             | Ty::TypeName(e) => e.mentions_param(),
             Ty::Func(ps, r) => ps.iter().any(Ty::mentions_param) || r.mentions_param(),
             Ty::Tuple(ts) => ts.iter().any(Ty::mentions_param),

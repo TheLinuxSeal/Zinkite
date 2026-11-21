@@ -2627,3 +2627,142 @@ void main(string[.] args) {
     );
     assert_eq!(r.stdout, "sum 10\n<a><bb><c>\ncount 3\n", "{}", r.stderr);
 }
+
+/// The library's iterators over text and arrays are `zink.lang` classes that implement
+/// `Iterator<T>`: kept in variables, stepped by hand, given to generic code and passed as
+/// an `Iterator<string>&`.
+#[test]
+fn library_iterators_are_classes() {
+    prints(
+        r##"i64 count(Iterator<string>& it) {
+    i64 n = 0;
+    while (string s : it.next()) { n++; }
+    return n;
+}
+
+<I implements Iterator<string>> string longest(I& it) {
+    string best = "";
+    while (string s : it.next()) {
+        if (s.len > best.len) { best = s; }
+    }
+    return best;
+}
+
+void main() {
+    string text = "one two\nthree four five\n\nsix";
+    LineIterator lines = text.lines();
+    string first @_ = lines.next();
+    println("first '${first}'");
+    while (string l : lines.next()) { println("then '${l}'"); }
+    WordIterator ws = text.words();
+    println("longest ${longest(ws)}");
+    SplitIterator parts = "a,b,c".splitBy(",");
+    println("parts ${count(parts)}");
+    WordIterator all = text.words();
+    println("words ${count(all)}");
+    CodePointIterator cps = "héllo".codePoints();
+    u32 h @_ = cps.next();
+    u32 e @_ = cps.next();
+    println("cps ${h} ${e}");
+}
+"##,
+        "first 'one two'\nthen 'three four five'\nthen ''\nthen 'six'\nlongest three\nparts 3\nwords 6\ncps 104 233\n",
+    );
+    prints(
+        r##"void main() {
+    i64[..>] xs = [1, 2, 3, 4, 5, 6, 7];
+    for (i64[:] c : xs.chunks(3)) { print("${c.len}:${c[0]} "); }
+    println("");
+    i64 best = 0;
+    for (i64[:] w : xs.windows(3)) { best = max(best, w[0] + w[1] + w[2]); }
+    println("best window ${best}");
+    u8[..>] none = [];
+    i64 n = 0;
+    for (u8[:] c : none.chunks(2)) { n++; }
+    for (i64[:] w : xs.windows(8)) { n++; }
+    println("empty ${n}");
+    string[..>] names = ["ann", "bo", "cy"];
+    for (string[:] pair : names.windows(2)) { print("${pair[0]}-${pair[1]} "); }
+    println("");
+}
+"##,
+        "3:1 3:4 1:7 \nbest window 18\nempty 0\nann-bo bo-cy \n",
+    );
+}
+
+/// lines(), words(), splitBy() and codePoints() at their edges: empty text, a lone `\r`,
+/// `\r\n`, no newline at the end, separators at either end and empty ones, every ASCII
+/// space, and invalid, cut-off and 4-byte UTF-8. The parts are what the runtime's C
+/// versions gave before these were written in Zinkite.
+#[test]
+fn text_iterator_edges() {
+    prints(
+        r##"// A part in brackets, with bytes outside printable ASCII as <n>.
+void part(string s) {
+    print(" [");
+    for (i64 i = 0; i < s.len; i++) {
+        u8 b = s[i];
+        if (b >= 32 && b < 127) {
+            print(s[i:i + 1]);
+        } else {
+            print("<${b}>");
+        }
+    }
+    print("]");
+}
+
+void show(string t) {
+    print("lines:");
+    for (string l : t.lines()) { part(l); }
+    print(" words:");
+    for (string w : t.words()) { part(w); }
+    print(" split,:");
+    for (string p : t.splitBy(",")) { part(p); }
+    print(" split<>:");
+    for (string p : t.splitBy("<>")) { part(p); }
+    print(" split'':");
+    for (string p : t.splitBy("")) { part(p); }
+    print(" cps:");
+    for (u32 c : t.codePoints()) { print(" ${c}"); }
+    println("");
+}
+
+void main() {
+    u8[..>] b = [];
+    show("");
+    show("\n");
+    show("\r\n");
+    show("\r");
+    show("a\r");
+    show("a\nb");
+    show("a\r\nb\r\n\n");
+    show(",");
+    show("a,,b,");
+    show("<>a<><>b<");
+    show(" \t\u{0b}\u{0c}x\ry\n z ");
+    show("déjà 😀");
+    b.clear(); b +> 0xC3; show(b);
+    b.clear(); b +> 0xE2; b +> 0x82; show(b);
+    b.clear(); b +> 0xF0; b +> 0x9F; b +> 0x98; b +> 0x80; b +> 0x41; show(b);
+    b.clear(); b +> 0x80; b +> 0xFF; b +> 0xC3; b +> 0x41; show(b);
+}
+"##,
+        r##"lines: words: split,: [] split<>: [] split'': [] cps:
+lines: [] words: split,: [<10>] split<>: [<10>] split'': [<10>] cps: 10
+lines: [] words: split,: [<13><10>] split<>: [<13><10>] split'': [<13><10>] cps: 13 10
+lines: [] words: split,: [<13>] split<>: [<13>] split'': [<13>] cps: 13
+lines: [a] words: [a] split,: [a<13>] split<>: [a<13>] split'': [a<13>] cps: 97 13
+lines: [a] [b] words: [a] [b] split,: [a<10>b] split<>: [a<10>b] split'': [a<10>b] cps: 97 10 98
+lines: [a] [b] [] words: [a] [b] split,: [a<13><10>b<13><10><10>] split<>: [a<13><10>b<13><10><10>] split'': [a<13><10>b<13><10><10>] cps: 97 13 10 98 13 10 10
+lines: [,] words: [,] split,: [] [] split<>: [,] split'': [,] cps: 44
+lines: [a,,b,] words: [a,,b,] split,: [a] [] [b] [] split<>: [a,,b,] split'': [a,,b,] cps: 97 44 44 98 44
+lines: [<>a<><>b<] words: [<>a<><>b<] split,: [<>a<><>b<] split<>: [] [a] [] [b<] split'': [<>a<><>b<] cps: 60 62 97 60 62 60 62 98 60
+lines: [ <9><11><12>x<13>y] [ z ] words: [x] [y] [z] split,: [ <9><11><12>x<13>y<10> z ] split<>: [ <9><11><12>x<13>y<10> z ] split'': [ <9><11><12>x<13>y<10> z ] cps: 32 9 11 12 120 13 121 10 32 122 32
+lines: [d<195><169>j<195><160> <240><159><152><128>] words: [d<195><169>j<195><160>] [<240><159><152><128>] split,: [d<195><169>j<195><160> <240><159><152><128>] split<>: [d<195><169>j<195><160> <240><159><152><128>] split'': [d<195><169>j<195><160> <240><159><152><128>] cps: 100 233 106 224 32 128512
+lines: [<195>] words: [<195>] split,: [<195>] split<>: [<195>] split'': [<195>] cps: 65533
+lines: [<226><130>] words: [<226><130>] split,: [<226><130>] split<>: [<226><130>] split'': [<226><130>] cps: 65533 65533
+lines: [<240><159><152><128>A] words: [<240><159><152><128>A] split,: [<240><159><152><128>A] split<>: [<240><159><152><128>A] split'': [<240><159><152><128>A] cps: 128512 65
+lines: [<128><255><195>A] words: [<128><255><195>A] split,: [<128><255><195>A] split<>: [<128><255><195>A] split'': [<128><255><195>A] cps: 65533 65533 65533 65
+"##,
+    );
+}

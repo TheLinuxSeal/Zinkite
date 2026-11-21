@@ -40,8 +40,7 @@ fn too_big<'t>(ts: impl IntoIterator<Item = &'t Ty>) -> bool {
             | Ty::Array(x, _)
             | Ty::Set(x)
             | Ty::Pool(x)
-            | Ty::Handle(x)
-            | Ty::Iter(x) => count(x, n),
+            | Ty::Handle(x) => count(x, n),
             Ty::Map(k, v) | Ty::MapEntry(k, v) => {
                 count(k, n);
                 count(v, n);

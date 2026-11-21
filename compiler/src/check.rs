@@ -829,7 +829,6 @@ impl<'p, 'a> Checker<'p, 'a> {
             | (Set(x), Set(y))
             | (Pool(x), Pool(y))
             | (Handle(x), Handle(y))
-            | (Iter(x), Iter(y))
             | (TypeName(x), TypeName(y)) => self.same(x, y),
             (Func(p1, r1), Func(p2, r2)) => all(p1, p2) && self.same(r1, r2),
             (Tuple(x), Tuple(y)) => all(x, y),
@@ -1846,7 +1845,6 @@ impl<'p, 'a> Checker<'p, 'a> {
             Ty::Map(k, v) => (Ty::MapEntry(k.clone(), v.clone()), true),
             Ty::Set(e) => ((**e).clone(), false),
             Ty::Pool(e) => ((**e).clone(), true),
-            Ty::Iter(e) => ((**e).clone(), false),
             Ty::Unknown => (Ty::Unknown, true),
             Ty::Class(id, args) => {
                 let c = &prog.classes[*id];
@@ -2603,7 +2601,6 @@ impl<'p, 'a> Checker<'p, 'a> {
             | Ty::Set(_)
             | Ty::Pool(_)
             | Ty::Func(..)
-            | Ty::Iter(_)
             | Ty::MapEntry(..)
             | Ty::Handle(_) => self.err(x.span, format!("{} can't be printed", self.show(&t))),
             Ty::TypeName(_) | Ty::Namespace(_) => self.err(
@@ -3979,8 +3976,8 @@ impl<'p, 'a> Checker<'p, 'a> {
                     return bad();
                 }
                 match a {
-                    Func(..) | Map(..) | Set(_) | Pool(_) | Iter(_) | TypeName(_)
-                    | Namespace(_) | Tuple(_) | Void => bad(),
+                    Func(..) | Map(..) | Set(_) | Pool(_) | TypeName(_) | Namespace(_)
+                    | Tuple(_) | Void => bad(),
                     _ => Ok(()),
                 }
             }
@@ -4512,6 +4509,9 @@ impl<'p, 'a> Checker<'p, 'a> {
         span: Span,
         consumed: bool,
     ) -> Ty {
+        if let Some(t) = self.text_iterator(t, e, kind, base, name, args, span, consumed) {
+            return t;
+        }
         match builtins::seq_method(e, kind, &name.name) {
             Err(need) => {
                 self.type_args(args);
@@ -4551,6 +4551,59 @@ impl<'p, 'a> Checker<'p, 'a> {
             let private = ms.iter().all(|m| m.is_private);
             self.hidden(owner, &ms[0].name, private, span);
         }
+    }
+
+    /// The library's iterators over text and arrays are classes of `zink.lang` (STDLIB
+    /// §3.2, §7.1), so they are iterators like any other: they can be kept in a variable,
+    /// passed as an `Iterator<string>&`, or given to generic code. `s.lines()` calls the
+    /// package-private `LineIterator.lines(s)`, with the text as its first argument.
+    #[allow(clippy::too_many_arguments)]
+    fn text_iterator(
+        &mut self,
+        t: &Ty,
+        e: &Ty,
+        kind: SeqKind,
+        base: &Expr,
+        name: &ast::Ident,
+        args: &[ast::Arg],
+        span: Span,
+        consumed: bool,
+    ) -> Option<Ty> {
+        let (cls, text_only) = match name.name.as_str() {
+            "lines" => ("LineIterator", true),
+            "words" => ("WordIterator", true),
+            "splitBy" => ("SplitIterator", true),
+            "codePoints" => ("CodePointIterator", true),
+            "chunks" => ("ChunkIterator", false),
+            "windows" => ("WindowIterator", false),
+            _ => return None,
+        };
+        let sliceable = match kind {
+            SeqKind::Array(k) => k.sliceable(),
+            _ => true,
+        };
+        if text_only && (*e != Ty::u8() || !sliceable) {
+            return None;
+        }
+        let prog = self.prog;
+        let id = prog
+            .classes
+            .iter()
+            .position(|c| c.name == cls && c.package == "zink.lang")?;
+        let ms: Vec<&MethodInfo> = prog.classes[id]
+            .methods
+            .iter()
+            .filter(|m| m.name == name.name && m.is_static)
+            .collect();
+        let sigs = self.method_sigs(id, &[], &ms);
+        Some(self.resolve_call(
+            &name.name,
+            sigs,
+            Some((t.clone(), base)),
+            args,
+            span,
+            consumed,
+        ))
     }
 
     /// A free function called with method syntax: `x.helper()` (DESIGN §6.1).
@@ -5644,7 +5697,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                 self.unify_infer(k, xk, names, binds)?;
                 self.unify_infer(v, xv, names, binds)
             }
-            (Set(p), Set(x)) | (Pool(p), Pool(x)) | (Handle(p), Handle(x)) | (Iter(p), Iter(x)) => {
+            (Set(p), Set(x)) | (Pool(p), Pool(x)) | (Handle(p), Handle(x)) => {
                 self.unify_infer(p, x, names, binds)
             }
             (Tuple(ps), Tuple(xs)) if ps.len() == xs.len() => pair(self, ps, xs, binds),

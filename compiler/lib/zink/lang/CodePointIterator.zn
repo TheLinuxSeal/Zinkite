@@ -1,0 +1,52 @@
+package zink.lang;
+
+// The code points of UTF-8 text (STDLIB §3.5). An invalid or cut-off sequence gives
+// U+FFFD for its first byte, and decoding goes on with the next.
+public class CodePointIterator implements Iterator<u32> {
+    private string text;
+    private i64 at = 0;
+
+    static CodePointIterator codePoints(string text) {
+        return new CodePointIterator(text);
+    }
+
+    public mut u32 next() {
+        if (at >= text.len) {
+            return #status.END 0;
+        }
+        u8 b = text[at];
+        if (b < 0x80) {
+            at++;
+            return b;
+        }
+        u32 c = 0;
+        i64 len = 0;
+        if ((b & 0xE0) == 0xC0) {
+            c = b & 0x1F;
+            len = 2;
+        } else if ((b & 0xF0) == 0xE0) {
+            c = b & 0x0F;
+            len = 3;
+        } else if ((b & 0xF8) == 0xF0) {
+            c = b & 0x07;
+            len = 4;
+        } else {
+            at++;
+            return 0xFFFD;
+        }
+        if (at + len > text.len) {
+            at++;
+            return 0xFFFD;
+        }
+        for (i64 k = 1; k < len; k++) {
+            u8 x = text[at + k];
+            if ((x & 0xC0) != 0x80) {
+                at++;
+                return 0xFFFD;
+            }
+            c = (c << 6) | (x & 0x3F);
+        }
+        at += len;
+        return c;
+    }
+}

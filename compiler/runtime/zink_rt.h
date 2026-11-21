@@ -756,66 +756,6 @@ static ZR_UNUSED zr_pair zr_split_first(zr_slice s, zr_slice sep, int last) {
     return r;
 }
 
-/* Iterators (DESIGN §9.4): each `next` gives 0 and a value, or END when nothing is left. */
-typedef struct { zr_slice s; int64_t pos; zr_slice sep; int kind; } zr_iter;
-
-static ZR_UNUSED zr_iter zr_iter_new(zr_slice s, int kind, zr_slice sep) { zr_iter it = {s, 0, sep, kind}; return it; }
-
-/* kind 0: lines; 1: words; 2: splitBy(sep). */
-static ZR_UNUSED uint8_t zr_iter_next(zr_iter *it, zr_slice *out) {
-    const uint8_t *p = (const uint8_t *)it->s.p;
-    int64_t n = it->s.n;
-    if (it->kind == 0) {
-        if (it->pos >= n) return 194;
-        int64_t i = it->pos;
-        while (i < n && p[i] != '\n') i++;
-        int64_t end = i;
-        if (end > it->pos && p[end - 1] == '\r') end--;
-        out->p = (void *)(p + it->pos); out->n = end - it->pos;
-        it->pos = i + 1;
-        return 0;
-    }
-    if (it->kind == 1) {
-        int64_t i = it->pos;
-        while (i < n && zr_space(p[i])) i++;
-        if (i >= n) { it->pos = n; return 194; }
-        int64_t j = i;
-        while (j < n && !zr_space(p[j])) j++;
-        out->p = (void *)(p + i); out->n = j - i;
-        it->pos = j;
-        return 0;
-    }
-    if (it->pos > n) return 194;
-    int64_t i = zr_find_from(it->s, it->sep, it->pos);
-    if (i < 0 || it->sep.n == 0) i = n;
-    out->p = (void *)(p + it->pos); out->n = i - it->pos;
-    it->pos = i + (it->sep.n ? it->sep.n : 1);
-    return 0;
-}
-
-/* UTF-8 decoding: an invalid sequence gives U+FFFD and decoding goes on (STDLIB §3.5). */
-static ZR_UNUSED uint8_t zr_cp_next(zr_iter *it, uint32_t *out) {
-    const uint8_t *p = (const uint8_t *)it->s.p;
-    int64_t n = it->s.n, i = it->pos;
-    if (i >= n) return 194;
-    uint8_t b = p[i];
-    uint32_t c;
-    int len;
-    if (b < 0x80) { c = b; len = 1; }
-    else if ((b & 0xE0) == 0xC0) { c = b & 0x1F; len = 2; }
-    else if ((b & 0xF0) == 0xE0) { c = b & 0x0F; len = 3; }
-    else if ((b & 0xF8) == 0xF0) { c = b & 0x07; len = 4; }
-    else { it->pos = i + 1; *out = 0xFFFD; return 0; }
-    if (i + len > n) { it->pos = i + 1; *out = 0xFFFD; return 0; }
-    for (int k = 1; k < len; k++) {
-        if ((p[i + k] & 0xC0) != 0x80) { it->pos = i + 1; *out = 0xFFFD; return 0; }
-        c = c << 6 | (p[i + k] & 0x3F);
-    }
-    it->pos = i + len;
-    *out = c;
-    return 0;
-}
-
 /* ------------------------------------------------------------ numbers (DESIGN §9, STDLIB §2.4) */
 
 #define ZR_ADD(T, a, b, f, l) ({ T _r; if (__builtin_add_overflow((T)(a), (T)(b), &_r)) zr_fail(f, l, "integer overflow"); _r; })

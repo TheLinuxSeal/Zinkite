@@ -624,3 +624,38 @@ void main() {
         e[2]
     );
 }
+
+/// A text iterator holds a view into its text (REFERENCES §9): removing from the text
+/// while one may still be used is an error, and so is keeping one over a temporary.
+#[test]
+fn text_iterators_follow_the_rules() {
+    let e = errors(
+        r##"u8[.] make() { u8[..>] t = []; t.append("a\nb"); return t; }
+
+void main() {
+    u8[..~] text = [];
+    text.append("a\nb\n");
+    for (string l : text.lines()) {
+        if (l == "a") { text.clear(); }
+    }
+    LineIterator it = text.lines();
+    text.clear();
+    while (string l : it.next()) {}
+    LineIterator gone = make().lines();
+    while (string l : gone.next()) {}
+}
+"##,
+    );
+    assert_eq!(e.len(), 3, "{:#?}", e);
+    assert!(
+        e[0].contains("`clear` removes from `text` inside a for-each over it"),
+        "{}",
+        e[0]
+    );
+    assert!(
+        e[1].contains("`clear` removes from `text` while `it` may still refer into it"),
+        "{}",
+        e[1]
+    );
+    assert!(e[2].contains("refers into a temporary value"), "{}", e[2]);
+}

@@ -1,0 +1,34 @@
+package zink.lang;
+
+// The words of a text, separated by runs of ASCII whitespace (STDLIB §3.2). Each is a view
+// into the text.
+public class WordIterator implements Iterator<string> {
+    private string text;
+    private i64 at = 0;
+
+    static WordIterator words(string text) {
+        return new WordIterator(text);
+    }
+
+    // Space, tab, \n, \v, \f and \r.
+    private static bool space(u8 b) {
+        return b == ' ' || (b >= 9 && b <= 13);
+    }
+
+    public mut string next() {
+        i64 i = at;
+        while (i < text.len && space(text[i])) {
+            i++;
+        }
+        if (i >= text.len) {
+            at = text.len;
+            return #status.END "";
+        }
+        i64 j = i;
+        while (j < text.len && !space(text[j])) {
+            j++;
+        }
+        at = j;
+        return text[i:j];
+    }
+}

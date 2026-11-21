@@ -593,12 +593,7 @@ pub fn seq_method(elem: &Ty, kind: SeqKind, name: &str) -> Result<Vec<Sig>, Stri
             one(Sig::new(name, vec![i64t()], Ty::Void).muts())
         }
 
-        // Iterators.
-        "chunks" | "windows" => one(Sig::new(
-            name,
-            vec![i64t()],
-            Ty::Iter(Box::new(Ty::Slice(Box::new(e())))),
-        )),
+        // `chunks` and `windows` are `zink.lang` classes (check.rs, `text_iterator`).
 
         // Heaps (STDLIB §7.2).
         "heapPush" => {
@@ -631,7 +626,6 @@ pub fn seq_method(elem: &Ty, kind: SeqKind, name: &str) -> Result<Vec<Sig>, Stri
 /// Methods on text (STDLIB §3), with the receiver as a `string`.
 fn text_method(name: &str) -> Vec<Sig> {
     let pair = || Ty::Tuple(vec![s(), s()]);
-    let strings = || Ty::Iter(Box::new(s()));
     let one = |sig: Sig| vec![sig];
     match name {
         "find" => vec![
@@ -649,8 +643,8 @@ fn text_method(name: &str) -> Vec<Sig> {
         }
         "count" => one(Sig::new(name, vec![s()], i64t())),
         "split" => one(Sig::new(name, vec![s()], grow(s()))),
-        "splitBy" => one(Sig::new(name, vec![s()], strings())),
-        "lines" | "words" => one(Sig::new(name, vec![], strings())),
+        // `splitBy`, `lines`, `words` and `codePoints` are `zink.lang` classes (check.rs,
+        // `text_iterator`).
         "splitFirst" | "splitLast" => one(Sig::new(name, vec![s()], pair())),
         "trim" | "trimStart" | "trimEnd" => one(Sig::new(name, vec![], s())),
         "trimPrefix" | "trimSuffix" => one(Sig::new(name, vec![s()], s())),
@@ -658,11 +652,6 @@ fn text_method(name: &str) -> Vec<Sig> {
         "toUpper" | "toLower" => one(Sig::new(name, vec![], text())),
         "replaceAll" | "replaceFirst" => one(Sig::new(name, vec![s(), s()], text())),
         "repeat" | "pad" | "padEnd" => one(Sig::new(name, vec![i64t()], text())),
-        "codePoints" => one(Sig::new(
-            name,
-            vec![],
-            Ty::Iter(Box::new(Ty::Prim(Prim::U32))),
-        )),
         "isValidUtf8" => one(Sig::new(name, vec![], Ty::bool())),
         "codePointCount" => one(Sig::new(name, vec![], i64t())),
         _ => Vec::new(),

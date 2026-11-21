@@ -1,0 +1,30 @@
+package zink.lang;
+
+// The parts of a text between separators (STDLIB §3.2), lazily: "a,,b" gives "a", "" and
+// "b", and a separator at the end gives an empty last part. An empty separator gives the
+// whole text. Each part is a view into the text.
+public class SplitIterator implements Iterator<string> {
+    private string text;
+    private string sep;
+    private i64 at = 0;
+
+    static SplitIterator splitBy(string text, string sep) {
+        return new SplitIterator(text, sep);
+    }
+
+    public mut string next() {
+        if (at > text.len) {
+            return #status.END "";
+        }
+        i64 end = text.len;
+        if (sep.len > 0) {
+            i64 i @none = text.find(sep, at);
+            if (!none) {
+                end = i;
+            }
+        }
+        string part = text[at:end];
+        at = sep.len > 0 ? end + sep.len : end + 1;
+        return part;
+    }
+}

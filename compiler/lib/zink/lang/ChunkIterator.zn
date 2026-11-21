@@ -1,0 +1,26 @@
+package zink.lang;
+
+// Slices of n elements of an array, in order, the last one shorter (STDLIB §7.1):
+// `for (i64[:] c : xs.chunks(3))`. Each is a view into the array. A size below 1 is a bug.
+public class ChunkIterator<T> implements Iterator<T[:]> {
+    private T[:] items;
+    private i64 n;
+    private i64 at = 0;
+
+    static <U> ChunkIterator<U> chunks(U[:] items, i64 n) {
+        if (n < 1) {
+            fail("chunks: the size must be at least 1");
+        }
+        return new ChunkIterator<U>(items, n);
+    }
+
+    public mut T[:] next() {
+        if (at >= items.len) {
+            return #status.END items[0:0];
+        }
+        i64 end = min(at + n, items.len);
+        T[:] part = items[at:end];
+        at = end;
+        return part;
+    }
+}

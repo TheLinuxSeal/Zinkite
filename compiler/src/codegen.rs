@@ -525,7 +525,6 @@ impl<'p, 'a> Gen<'p, 'a> {
             },
             Ty::Pool(_) | Ty::Handle(_) => self.unsupported(span, "pools"),
             Ty::Param(_) => self.unsupported(span, "generics"),
-            Ty::Iter(_) => self.unsupported(span, "iterators stored in variables"),
             _ => self.unsupported(span, "this library type"),
         }
     }
@@ -1565,61 +1564,6 @@ impl<'p, 'a> Gen<'p, 'a> {
             || matches!(ty, LocalType::Type(t) if matches!(t.kind, ast::TypeKind::Ref { .. }));
         self.line("{");
         self.indent += 1;
-        // A text iterator: lines(), words(), splitBy(sep), codePoints().
-        if let E::Call { callee, args } = &iter.kind
-            && let E::Member {
-                expr: base,
-                name: m,
-            } = &callee.kind
-            && matches!(
-                m.name.as_str(),
-                "lines" | "words" | "splitBy" | "codePoints"
-            )
-        {
-            let s = self.expr(base, &Ty::string());
-            let sep = if m.name == "splitBy" {
-                self.expr(&args[0].expr, &Ty::string())
-            } else {
-                lit("")
-            };
-            let kind = match m.name.as_str() {
-                "lines" => 0,
-                "words" => 1,
-                _ => 2,
-            };
-            let itv = self.tmp("it");
-            self.line(&format!(
-                "zr_iter {} = zr_iter_new({}, {}, {});",
-                itv, s, kind, sep
-            ));
-            let (vname, vty) = match name {
-                Name::Ident(n) => self.new_local(n),
-                Name::Discard(_) => (
-                    self.tmp("x"),
-                    if m.name == "codePoints" {
-                        Ty::Prim(Prim::U32)
-                    } else {
-                        Ty::string()
-                    },
-                ),
-            };
-            let ct = self.cty(&vty, iter.span);
-            self.line(&format!("{} {};", ct, vname));
-            let next = if m.name == "codePoints" {
-                "zr_cp_next"
-            } else {
-                "zr_iter_next"
-            };
-            self.loop_(
-                label,
-                &format!("while (!{}(&{}, &{}))", next, itv, vname),
-                body,
-                None,
-            );
-            self.indent -= 1;
-            self.line("}");
-            return;
-        }
         if matches!(it.unref(), Ty::Map(..) | Ty::Set(_)) {
             self.map_for_each(label, name, iter, body, by_ref);
             self.indent -= 1;

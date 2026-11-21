@@ -1075,7 +1075,6 @@ impl<'a> Program<'a> {
             Ty::MapEntry(k, v) => {
                 format!("an entry of hashmap<{}, {}>", self.show(k), self.show(v))
             }
-            Ty::Iter(e) => format!("an iterator of {}", self.show(e)),
             Ty::TypeName(t) => format!("the type {}", self.show(t)),
             Ty::Namespace(n) => (*n).to_string(),
             Ty::Unknown => "an unknown type".into(),
