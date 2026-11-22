@@ -785,6 +785,27 @@ static ZR_UNUSED zr_res_i64 zr_rfind(zr_slice s, zr_slice x) {
     return r;
 }
 
+/* Strict UTF-8 (RFC 3629): no overlong forms, no surrogates, nothing past U+10FFFF. */
+static ZR_UNUSED bool zr_valid_utf8(zr_slice s) {
+    const uint8_t *p = (const uint8_t *)s.p;
+    int64_t i = 0, n = s.n;
+    while (i < n) {
+        uint8_t c = p[i];
+        if (c < 0x80) { i++; continue; }
+        int k;
+        uint32_t lo = 0x80, hi = 0xBF;
+        if (c >= 0xC2 && c <= 0xDF) k = 1;
+        else if (c >= 0xE0 && c <= 0xEF) { k = 2; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
+        else if (c >= 0xF0 && c <= 0xF4) { k = 3; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+        else return false;
+        if (i + k >= n) return false;
+        if (p[i + 1] < lo || p[i + 1] > hi) return false;
+        for (int j = 2; j <= k; j++) if (p[i + j] < 0x80 || p[i + j] > 0xBF) return false;
+        i += k + 1;
+    }
+    return true;
+}
+
 static ZR_UNUSED int64_t zr_count(zr_slice s, zr_slice x) {
     if (x.n == 0) return s.n + 1;
     int64_t n = 0, i = 0;

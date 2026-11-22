@@ -1,0 +1,14 @@
+package zink.data;
+
+// One key or value of a parsed tree, in document order (STDLIB §9.2). A container's
+// subtree follows it: an array's elements, or an object's entries, each a KEY node and its
+// value's subtree.
+public class Node {
+    public Kind kind;
+    public u8 flags;        // how a number or string was written, for the formats that keep it
+    public u16 column;      // where it starts, clamped at 65535
+    public u32 size;        // nodes in this subtree, itself included: the next sibling is at index + size
+    public u32 count;       // an array's elements or an object's entries
+    public u32 line;
+    public string text;     // a key, a string, or a number's, boolean's or date's text as written
+}

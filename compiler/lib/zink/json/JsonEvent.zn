@@ -1,0 +1,79 @@
+package zink.json;
+
+import zink.data.*;
+
+// One step of a JsonReader (STDLIB §9.3). `text` is the raw text: a string's or key's
+// without the quotes but with any escapes, which is enough for comparing keys; a number's
+// digits; a bracket. `line` and `column` count from 1, the column in bytes.
+public class JsonEvent {
+    public JsonToken kind;
+    public string text;
+    public i64 line;
+    public i64 column;
+
+    // The text with its escapes decoded: a view into the input when it has none, and
+    // decoded into strings otherwise. A lone surrogate becomes U+FFFD.
+    public string decode(u8[..>]& strings) {
+        if (!text.contains("\\")) {
+            return text;
+        }
+        i64 start = strings.len;
+        i64 run = 0;
+        i64 i = 0;
+        while (i < text.len) {
+            if (text[i] != '\\') {
+                i++;
+                continue;
+            }
+            strings.append(text[run:i]);
+            u8 e = text[i + 1];
+            i += 2;
+            if (e == 'u') {
+                i64 cp = json.hex4(text, i);
+                i += 4;
+                if (cp >= 0xD800 && cp <= 0xDBFF) {
+                    i64 low = -1;
+                    if (i + 6 <= text.len && text[i] == '\\' && text[i + 1] == 'u') {
+                        low = json.hex4(text, i + 2);
+                    }
+                    if (low >= 0xDC00 && low <= 0xDFFF) {
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                        i += 6;
+                    } else {
+                        cp = 0xFFFD;
+                    }
+                } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                    cp = 0xFFFD;
+                }
+                json.utf8(strings, cp);
+            } else {
+                strings +> json.unescape(e);
+            }
+            run = i;
+        }
+        strings.append(text[run:text.len]);
+        return strings[start:strings.len];
+    }
+
+    // A NUMBER as the tree's accessors read it (STDLIB §9.2): TYPE for anything else, and
+    // for a number with a fraction or an exponent; RANGE past i64.
+    public i64 asI64() {
+        if (kind != JsonToken.NUMBER) {
+            return #status.TYPE 0;
+        }
+        if (!json.isInt(text)) {
+            return #status.TYPE 0;
+        }
+        i64 n @err = i64.parse(text);
+        return #err n;
+    }
+
+    // TYPE for anything but a NUMBER; a number beyond f64's range reads as ±infinity.
+    public f64 asF64() {
+        if (kind != JsonToken.NUMBER) {
+            return #status.TYPE 0.0;
+        }
+        f64 x @err = f64.parse(text);
+        return #err x;
+    }
+}

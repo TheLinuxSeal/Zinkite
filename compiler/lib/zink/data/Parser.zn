@@ -1,0 +1,7 @@
+package zink.data;
+
+// Any of the parsers, for choosing a format at run time (STDLIB §9.2).
+public interface Parser {
+    mut Value parse(Node[..>]& tree, u8[..>]& strings);
+    ParseError error();
+}

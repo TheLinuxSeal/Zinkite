@@ -704,6 +704,7 @@ pub fn slice_receiver(name: &str, first_param_is_string: bool) -> bool {
     matches!(
         name,
         "trim"
+            | "isValidUtf8"
             | "trimStart"
             | "trimEnd"
             | "startsWith"

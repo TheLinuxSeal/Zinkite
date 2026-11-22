@@ -1,0 +1,24 @@
+package zink.data;
+
+// An object's entries, in document order, repeated keys included: v.entries().
+public class EntryIterator implements Iterator<Entry> {
+    private Node[:] tree;
+    private i64 at;
+    private i64 end;
+
+    new(Node[:] tree, i64 at, i64 end) {
+        this.tree = tree;
+        this.at = at;
+        this.end = end;
+    }
+
+    // The next entry: END after the last.
+    public mut Entry next() {
+        if (at >= end) {
+            return #status.END new Entry("", new Value(tree, -1));
+        }
+        Entry e = new Entry(tree[at].text, new Value(tree, at + 1));
+        at += 1 + (i64) tree[at + 1].size;
+        return e;
+    }
+}

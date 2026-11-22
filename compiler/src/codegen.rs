@@ -4746,6 +4746,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                     }
                     "rfind" => fail(format!("zr_rfind({}, {})", s, a0), Ty::i64()),
                     "count" => ok(format!("zr_count({}, {})", s, a0), Ty::i64()),
+                    "isValidUtf8" => ok(format!("zr_valid_utf8({})", s), Ty::bool()),
                     "compareTo" => ok(format!("zr_cmp({}, {})", s, a0), Ty::Prim(Prim::I32)),
                     "compareNatural" => ok(
                         format!("zr_cmp_natural({}, {})", s, a0),

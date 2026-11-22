@@ -122,9 +122,9 @@ iterators. Every failure is a status (DESIGN §7.6): `@` reads any in its expres
 calls, indexes, arithmetic and casts alike, by jumping to a local label where the
 status is read; one that nothing reads stops the program at its line, naming what
 failed, and for the program's own functions where the status was returned, with exit
-status 1. That check is one predictable branch after a call that can fail. Seven of
-the eight examples run: `cachesim`, `csvsort`, `dirwalk`, `linebuf`, `sortlines`,
-`stats` and `wordfreq`. `jsonfmt` needs `zink.json`.
+status 1. That check is one predictable branch after a call that can fail. All eight
+examples run: `cachesim`, `csvsort`, `dirwalk`, `jsonfmt`, `linebuf`, `sortlines`,
+`stats` and `wordfreq`.
 
 Variable-size records (DESIGN §3.2, §11): a class with a `T[.*]` or `T[.]` field, or
 a field that is such a class, is one run of bytes. Its fixed-size fields come first,
@@ -261,7 +261,18 @@ representations as they are. Written so far:
   block boundary. `xxh3` waits for a reference to test against;
 - `zink.encoding`: `bytes.hex()`, `hex.decode` and base64 with both alphabets;
 - `zink.csv`: `CsvReader`, with fields as views into the input where they can be,
-  and `CsvWriter`; 2,000 random rows round-trip through Python's `csv`.
+  and `CsvWriter`; 2,000 random rows round-trip through Python's `csv`;
+- `zink.data`: the tree every parser builds, `Node`s in document order with each
+  subtree's size, so navigating is index arithmetic; `Value` with navigation that
+  never fails, the readers, JSON Pointer and iterators; `Entry`, `Kind`,
+  `ParseError`, and the `Parser` and `DataWriter` interfaces;
+- `zink.json`: `JsonReader`, a state machine with its own stack, so nesting can't
+  overflow the native one; `JsonParser`, built on its events; `JsonWriter` and
+  `json.write`. Strings and numbers are views into the input unless a string has
+  escapes. `jsonfmt` matches Python's `json` byte for byte on random documents, and
+  accepts and rejects one-character mutations of them as Python's strict parser
+  does; it re-indents 48 MB in 0.35 s streaming and 0.65 s through a tree with keys
+  sorted, against 3.2 s for Python and 2.2 s for `jq`.
 
 `zink.lang`'s `Iterator<T>` is in `lib/zink/lang/`, with every library iterator,
 each implementing it: `LineIterator`, `WordIterator`, `SplitIterator` and
@@ -274,8 +285,7 @@ against 0.25 s for the C functions they replace, since each `next()` is a direct
 call the C compiler inlines.
 
 Where they differ from STDLIB: `fs.move` of a directory across file systems still
-fails with `CROSS_DEVICE`; `ParseError` is in `zink.csv` until `zink.data` is written;
-and `hash.xxh3` isn't written.
+fails with `CROSS_DEVICE`; `hash.xxh3`, JSON5 and `TreeBuilder` aren't written.
 
 Not yet: a capturing lambda
 passed to a function of the program's own (which needs that function specialized per lambda), `filter`, `map`

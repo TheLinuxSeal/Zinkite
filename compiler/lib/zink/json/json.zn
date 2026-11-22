@@ -1,0 +1,144 @@
+package zink.json;
+
+import zink.data.*;
+
+// A whole tree written in one call (STDLIB §9.7), and what the reader and the writer
+// share.
+public class json {
+    // The tree under v as JSON, `indent` spaces per level, 0 for one line. TYPE, as
+    // JsonWriter.finish().
+    public static void write(u8[..>]& out, Value v, i64 indent) {
+        JsonWriter w = new JsonWriter(out);
+        w.indent = indent;
+        w.write(v);
+        u8 st = @w.finish();
+        return #st;
+    }
+
+    // Where the JSON number starting at i ends (RFC 8259 §6): -?(0|[1-9][0-9]*), then
+    // .[0-9]+ and [eE][+-]?[0-9]+, each optional; -1 when none starts there.
+    static i64 numberEnd(string s, i64 from) {
+        i64 i = from;
+        if (i < s.len && s[i] == '-') {
+            i++;
+        }
+        if (i >= s.len || !json.digit(s[i])) {
+            return -1;
+        }
+        if (s[i] == '0') {
+            i++;
+        } else {
+            while (i < s.len && json.digit(s[i])) {
+                i++;
+            }
+        }
+        if (i < s.len && s[i] == '.') {
+            i++;
+            if (i >= s.len || !json.digit(s[i])) {
+                return -1;
+            }
+            while (i < s.len && json.digit(s[i])) {
+                i++;
+            }
+        }
+        if (i < s.len && (s[i] == 'e' || s[i] == 'E')) {
+            i++;
+            if (i < s.len && (s[i] == '+' || s[i] == '-')) {
+                i++;
+            }
+            if (i >= s.len || !json.digit(s[i])) {
+                return -1;
+            }
+            while (i < s.len && json.digit(s[i])) {
+                i++;
+            }
+        }
+        return i;
+    }
+
+    // A number with neither a fraction nor an exponent: an INT, where the rest are FLOATs.
+    static bool isInt(string number) {
+        for (u8 c : number) {
+            if (c == '.' || c == 'e' || c == 'E') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static bool digit(u8 c) { return c >= '0' && c <= '9'; }
+
+    // The value of a hex digit, or -1.
+    static i64 hexDigit(u8 c) {
+        if (c >= '0' && c <= '9') {
+            return (i64) c - 48;
+        }
+        if (c >= 'a' && c <= 'f') {
+            return (i64) c - 87;
+        }
+        if (c >= 'A' && c <= 'F') {
+            return (i64) c - 55;
+        }
+        return -1;
+    }
+
+    // The four hex digits at s[i:i + 4], or -1 when they aren't.
+    static i64 hex4(string s, i64 i) {
+        if (i + 4 > s.len) {
+            return -1;
+        }
+        i64 v = 0;
+        for (i64 k = i; k < i + 4; k++) {
+            i64 d = json.hexDigit(s[k]);
+            if (d < 0) {
+                return -1;
+            }
+            v = v * 16 + d;
+        }
+        return v;
+    }
+
+    // The byte a one-letter escape stands for: \" \\ \/ \b \f \n \r \t.
+    static u8 unescape(u8 e) {
+        if (e == 'b') {
+            return 8;
+        }
+        if (e == 'f') {
+            return 12;
+        }
+        if (e == 'n') {
+            return 10;
+        }
+        if (e == 'r') {
+            return 13;
+        }
+        if (e == 't') {
+            return 9;
+        }
+        return e;
+    }
+
+    // Whether e may follow a backslash, \u aside.
+    static bool simpleEscape(u8 e) {
+        return e == '"' || e == '\\' || e == '/' || e == 'b' || e == 'f' || e == 'n' || e == 'r' || e == 't';
+    }
+
+    // A code point as UTF-8.
+    static void utf8(u8[..>]& out, i64 cp) {
+        if (cp < 0x80) {
+            out +> (u8) cp;
+        } else if (cp < 0x800) {
+            out +> (u8) (0xC0 | (cp >> 6));
+            out +> (u8) (0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            out +> (u8) (0xE0 | (cp >> 12));
+            out +> (u8) (0x80 | ((cp >> 6) & 0x3F));
+            out +> (u8) (0x80 | (cp & 0x3F));
+        } else {
+            out +> (u8) (0xF0 | (cp >> 18));
+            out +> (u8) (0x80 | ((cp >> 12) & 0x3F));
+            out +> (u8) (0x80 | ((cp >> 6) & 0x3F));
+            out +> (u8) (0x80 | (cp & 0x3F));
+        }
+    }
+}

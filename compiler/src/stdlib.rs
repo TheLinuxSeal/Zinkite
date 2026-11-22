@@ -74,7 +74,21 @@ lib! {
     "zink.hash", "zink/hash/Crc32.zn";
     "zink.encoding", "zink/encoding/hex.zn";
     "zink.encoding", "zink/encoding/base64.zn";
-    "zink.csv", "zink/csv/ParseError.zn";
+    "zink.data", "zink/data/ParseError.zn";
+    "zink.data", "zink/data/Kind.zn";
+    "zink.data", "zink/data/Node.zn";
+    "zink.data", "zink/data/Value.zn";
+    "zink.data", "zink/data/Entry.zn";
+    "zink.data", "zink/data/ValueIterator.zn";
+    "zink.data", "zink/data/EntryIterator.zn";
+    "zink.data", "zink/data/Parser.zn";
+    "zink.data", "zink/data/DataWriter.zn";
+    "zink.json", "zink/json/JsonToken.zn";
+    "zink.json", "zink/json/JsonEvent.zn";
+    "zink.json", "zink/json/json.zn";
+    "zink.json", "zink/json/JsonReader.zn";
+    "zink.json", "zink/json/JsonParser.zn";
+    "zink.json", "zink/json/JsonWriter.zn";
     "zink.csv", "zink/csv/CsvReader.zn";
     "zink.csv", "zink/csv/CsvWriter.zn";
 }

@@ -1,0 +1,72 @@
+package zink.json;
+
+import zink.data.*;
+
+// JSON into a tree (STDLIB §9.2, §9.3), built from a JsonReader's events, so it never
+// recurses either. Numbers keep their text, duplicate keys are kept, and strings with
+// escapes are decoded into the caller's strings.
+public class JsonParser implements Parser {
+    public string input;
+    public i64 maxDepth = 1024;     // nesting deeper than this fails with FULL
+    private u8 errCode = 0;
+    private i64 errLine = 0;
+    private i64 errColumn = 0;
+    private string errMessage = "";
+
+    public new(string input) {
+        this.input = input;
+    }
+
+    // The document's value, its nodes appended to tree. INVALID or FULL, with an absent
+    // value, which error() describes.
+    public mut Value parse(Node[..>]& tree, u8[..>]& strings) {
+        JsonReader r = new JsonReader(input);
+        r.maxDepth = maxDepth;
+        i64 root = tree.len;
+        i64[..~] open = [];     // the open containers' nodes
+        while (JsonEvent e : r.next()) @why {
+            JsonToken k = e.kind;
+            if (k == JsonToken.END_OBJECT || k == JsonToken.END_ARRAY) {
+                i64 at = open.pop();
+                tree[at].size = (u32) (tree.len - at);
+                continue;
+            }
+            // An object counts its keys, an array its elements.
+            if (open.len > 0 && (k == JsonToken.KEY || tree[open[^1]].kind == Kind.ARRAY)) {
+                tree[open[^1]].count += 1;
+            }
+            u32 line = (u32) e.line;
+            u16 col = (u16) min(e.column, 65535);
+            switch (k) {
+                case BEGIN_OBJECT => {
+                    open +> tree.len;
+                    tree +> new Node(Kind.OBJECT, 0, col, 1, 0, line, "");
+                }
+                case BEGIN_ARRAY => {
+                    open +> tree.len;
+                    tree +> new Node(Kind.ARRAY, 0, col, 1, 0, line, "");
+                }
+                case KEY => tree +> new Node(Kind.KEY, 0, col, 1, 0, line, e.decode(strings));
+                case STRING => tree +> new Node(Kind.STRING, 0, col, 1, 0, line, e.decode(strings));
+                case NUMBER => tree +> new Node(json.isInt(e.text) ? Kind.INT : Kind.FLOAT, 0, col, 1, 0, line, e.text);
+                case TRUE, FALSE => tree +> new Node(Kind.BOOL, 0, col, 1, 0, line, e.text);
+                case NULL => tree +> new Node(Kind.NULL, 0, col, 1, 0, line, e.text);
+                default => {}
+            }
+        }
+        ParseError pe = r.error();
+        errCode = pe.code;
+        errLine = pe.line;
+        errColumn = pe.column;
+        errMessage = pe.message;
+        if (why != status.END) {
+            return #why new Value(tree, -1);
+        }
+        return new Value(tree, root);
+    }
+
+    // Where the input went wrong: code 0 if it hasn't.
+    public ParseError error() {
+        return new ParseError(errCode, errLine, errColumn, errMessage);
+    }
+}

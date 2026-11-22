@@ -1,0 +1,7 @@
+package zink.data;
+
+// One entry of an object, as entries() gives them: its key, and a view of its value.
+public class Entry {
+    public string key;
+    public Value value;
+}

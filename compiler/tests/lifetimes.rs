@@ -702,3 +702,50 @@ void main() { println("${depth(3)}"); }
     assert_eq!(e.len(), 1, "{:#?}", e);
     assert!(e[0].contains("`here` is a variable-size record and in scope during this call, which can recurse back into `depth`"), "{}", e[0]);
 }
+
+/// A call to a method declared further down the file has its summary (REFERENCES §4.2):
+/// what it stores is checked, which a store through a later method once escaped, and what
+/// it returns keeps its roots, so a reader whose next() returns a helper's view of its
+/// input gives views rooted at that input, not at the reader.
+#[test]
+fn calls_to_functions_declared_later_have_summaries() {
+    rejects(
+        "class Keep {\n    string[..>]& out;\n    new(string[..>]& out) { this.out = out; }\n    mut void add(string s) { later(s); }\n    mut void later(string s) { out +> s; }\n}\nvoid main() {\n    string[..>] out = [];\n    Keep k = new Keep(out);\n    {\n        u8[..>] inner = [];\n        inner.append(\"short-lived\");\n        k.add(inner);\n    }\n    println(\"${out.len}\");\n}\n",
+        "a reference into `inner` can't be stored in `out`",
+    );
+    ok(
+        "class Ev { string text; }\nclass R {\n    string input;\n    i64 pos = 0;\n    new(string input) { this.input = input; }\n    mut Ev next() {\n        if (pos >= input.len) { return #status.END new Ev(\"\"); }\n        return one();\n    }\n    private mut Ev one() {\n        pos++;\n        return new Ev(input[pos - 1:pos]);\n    }\n}\nvoid keep(string t, string[..>]& out) { R r = new R(t); while (Ev e : r.next()) { out +> e.text; } }\nvoid main() { string[..>] out = []; keep(\"ab\", out); println(\"${out.len}\"); }\n",
+    );
+}
+
+/// A method called on a temporary value, as in `cfg.get("a").text()`, gives what the
+/// temporary holds, which outlives it; a reference into the temporary itself doesn't.
+#[test]
+fn a_temporary_receiver_passes_on_what_it_holds() {
+    ok(
+        "class V {\n    string[:] items;\n    V first() { return new V(items[0:1]); }\n    string name() { return items[0]; }\n}\nvoid main() {\n    string[..>] all = [];\n    all +> \"a\";\n    V v = new V(all);\n    string n = v.first().first().name();\n    println(n);\n}\n",
+    );
+    rejects(
+        "class Box {\n    i64 n;\n    i64& get() { return n; }\n}\nBox make() { return new Box(1); }\nvoid main() {\n    i64& r = make().get();\n    println(\"${r}\");\n}\n",
+        "temporary",
+    );
+}
+
+/// A removal from an object's field is checked against references into that field, which
+/// are rooted at it however the object is reached (REFERENCES §5.3): a reference to the
+/// object itself doesn't refer into the field's elements.
+#[test]
+fn a_reference_to_an_object_survives_removals_from_its_fields() {
+    let class = "class Stack {\n    u8[..~] items = [];\n    mut void push(u8 x) { items +> x; }\n    mut u8 pop() { u8 x @err = items.pop(); return #err x; }\n    u8& top() { return items[^1]; }\n}\n";
+    ok(&format!(
+        "{}void drain(Stack& s) {{ while (u8 x : s.pop()) {{ println(\"${{x}}\"); }} }}\nvoid main() {{ Stack s = new Stack(); s.push(1); drain(s); }}\n",
+        class
+    ));
+    rejects(
+        &format!(
+            "{}void main() {{ Stack s = new Stack(); s.push(1); s.push(2); u8& t = s.top(); @_ = s.pop(); println(\"${{t}}\"); }}\n",
+            class
+        ),
+        "while `t` may still refer into it",
+    );
+}

@@ -3611,6 +3611,7 @@ true deadbeef 22 22
 fn zink_csv() {
     let exe = build(
         r##"import zink.csv.*;
+import zink.data.*;
 
 void main() {
     u8[.] text @_ = stdin.readAll();
@@ -4023,4 +4024,213 @@ void main(string[.] args) {
         "prog.zn:32: index 2 is out of range for length 2\n"
     );
     assert_eq!(r.code, 1);
+}
+
+/// examples/jsonfmt.zn (STDLIB §9.3, §9.7): re-indented event by event, compact, and
+/// through a tree with every object's keys sorted; numbers keep their text, escapes are
+/// decoded and written back as JSON needs. Malformed input fails with its line and
+/// column. Random documents and their one-character mutations agree with Python's json.
+#[test]
+fn jsonfmt_reindents_sorts_and_reports_errors() {
+    use std::io::Write;
+    let exe = example("jsonfmt");
+    let feed = |args: &[&str], input: &str| {
+        let mut child = Command::new(&exe)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let o = child.wait_with_output().unwrap();
+        (
+            o.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    let doc = "{\"name\": \"zink\", \"tags\": [\"a\", \"b\\u00e9\\ud83d\\ude00\"], \"n\": 12345678901234567890, \"x\": 1.50, \"nested\": {\"z\": 1, \"a\": [true, false, null, {}], \"e\": []}, \"esc\": \"line\\nbreak \\\"q\\\" \\\\\"}";
+    assert_eq!(
+        feed(&[], doc),
+        (0, "{\n  \"name\": \"zink\",\n  \"tags\": [\n    \"a\",\n    \"bé😀\"\n  ],\n  \"n\": 12345678901234567890,\n  \"x\": 1.50,\n  \"nested\": {\n    \"z\": 1,\n    \"a\": [\n      true,\n      false,\n      null,\n      {}\n    ],\n    \"e\": []\n  },\n  \"esc\": \"line\\nbreak \\\"q\\\" \\\\\"\n}\n".to_string(), "".to_string()),
+        "plain"
+    );
+    assert_eq!(
+        feed(&["-c"], doc),
+        (0, "{\"name\":\"zink\",\"tags\":[\"a\",\"bé😀\"],\"n\":12345678901234567890,\"x\":1.50,\"nested\":{\"z\":1,\"a\":[true,false,null,{}],\"e\":[]},\"esc\":\"line\\nbreak \\\"q\\\" \\\\\"}\n".to_string(), "".to_string()),
+        "compact"
+    );
+    assert_eq!(
+        feed(&["-s", "--indent", "1"], doc),
+        (0, "{\n \"esc\": \"line\\nbreak \\\"q\\\" \\\\\",\n \"n\": 12345678901234567890,\n \"name\": \"zink\",\n \"nested\": {\n  \"a\": [\n   true,\n   false,\n   null,\n   {}\n  ],\n  \"e\": [],\n  \"z\": 1\n },\n \"tags\": [\n  \"a\",\n  \"bé😀\"\n ],\n \"x\": 1.50\n}\n".to_string(), "".to_string()),
+        "sorted"
+    );
+    assert_eq!(
+        feed(&["-c"], "[1, {\"a\": 2,}]"),
+        (
+            1,
+            "".to_string(),
+            "jsonfmt: stdin:1:13: expected a key in double quotes\n".to_string()
+        ),
+        "trailing"
+    );
+    assert_eq!(
+        feed(&["-c"], "{\"deep\": \"unterminated"),
+        (
+            1,
+            "".to_string(),
+            "jsonfmt: stdin:1:10: this string is never closed\n".to_string()
+        ),
+        "unterminated"
+    );
+    assert_eq!(
+        feed(&["--indent", "99"], "[]"),
+        (2, "".to_string(), "jsonfmt: --indent takes a number from 0 to 16\nusage: jsonfmt [--indent N] [-c] [-s] [file]\n".to_string()),
+        "usage"
+    );
+}
+
+/// zink.data's Value over a JSON tree (STDLIB §9.2): navigation that never fails, readers
+/// that fail with MISSING, TYPE and RANGE, fallbacks, a number's text past i64, repeated
+/// keys, JSON Pointer with its escapes, iterators, the Parser interface; the reader's
+/// skipValue and asI64; JSON Lines with a bad line; and JsonWriter's finish() reporting
+/// misuse, NaN and a bad number while the output stays well formed, with asciiOnly.
+#[test]
+fn json_trees_readers_and_writers() {
+    prints(
+        r##"import zink.data.*;
+import zink.json.*;
+
+void main() {
+    string text = "{\"server\": {\"host\": \"example.org\", \"port\": 8080, \"ratio\": 0.75},\n \"users\": [{\"name\": \"ann\"}, {\"name\": \"bo\\u00e9\"}, {}],\n \"big\": 99999999999999999999, \"neg\": -3, \"flag\": true, \"none\": null,\n \"a/b\": 1, \"m~n\": 2, \"dup\": 1, \"dup\": 2}";
+    u8[..>] strings = [];
+    Node[..>] tree = [];
+    JsonParser p = new JsonParser(text);
+    Parser& any = p;
+    Value cfg @bad = any.parse(tree, strings);
+    println("parsed ${bad} ${tree.len} nodes, ${cfg.len()} entries, line of users ${cfg.get("users").line()}");
+    string host @_ = cfg.get("server").get("host").asStringOr("localhost");
+    i64 port @e1 = cfg.get("server").get("port").asI64();
+    f64 ratio @e2 = cfg.get("server").get("ratio").asF64();
+    i64 asInt @e3 = cfg.get("server").get("ratio").asI64();
+    i64 missing @e4 = cfg.get("server").get("nope").asI64();
+    i64 big @e5 = cfg.get("big").asI64();
+    u64 neg @e6 = cfg.get("neg").asU64();
+    i64 fb @e7 = cfg.get("absent").asI64Or(7);
+    i64 fbType @e8 = cfg.get("flag").asI64Or(7);
+    println("${host} ${port}/${e1} ${ratio}/${e2} ${asInt}/${e3} ${missing}/${e4} ${big}/${e5} ${neg}/${e6} ${fb}/${e7} ${fbType}/${e8}");
+    string bigText @_ = cfg.get("big").text();
+    bool flag @_ = cfg.get("flag").asBool();
+    println("${bigText} ${flag} ${cfg.get("none").isNull()} ${cfg.get("none").exists()} ${cfg.get("zzz").exists()} ${cfg.get("dup").asI64Or(0)}");
+    for (Value user : cfg.get("users").items()) {
+        string name @_ = user.get("name").asStringOr("?");
+        print("[${name}] ");
+    }
+    println("");
+    string second @_ = cfg.pointer("/users/1/name").asString();
+    i64 slash @_ = cfg.pointer("/a~1b").asI64();
+    i64 tilde @_ = cfg.pointer("/m~0n").asI64();
+    println("${second} ${slash} ${tilde} ${cfg.pointer("/users/9/name").exists()} ${cfg.pointer("/users/01").exists()} ${cfg.pointer("").len()}");
+    i64 keys = 0;
+    for (Entry e : cfg.entries()) { keys++; }
+    println("entries ${keys}, users ${cfg.get("users").len()}, at(1) ${cfg.get("users").at(1).get("name").asStringOr("?")}, at on an object ${cfg.at(0).exists()}");
+
+    // The reader: skip a value, read numbers.
+    JsonReader r = new JsonReader("{\"skip\": {\"deep\": [1, [2, {\"x\": 3}]]}, \"id\": 42, \"f\": 2.5}");
+    while (JsonEvent e : r.next()) {
+        if (e.kind == JsonToken.KEY && e.text == "skip") { r.skipValue(); }
+        if (e.kind == JsonToken.NUMBER) {
+            i64 n @why = e.asI64();
+            print("number ${e.text} as i64 ${n}/${why} ");
+        }
+    }
+    println("| error code ${r.error().code}");
+
+    // JSON Lines.
+    string lines = "{\"n\": 1}\n{\"n\": 2}\n{\"n\": oops}\n";
+    i64 line = 0;
+    for (string l : lines.lines()) {
+        line++;
+        u8[..>] lstrings = [];
+        Node[..>] ltree = [];
+        JsonParser lp = new JsonParser(l);
+        Value v @lbad = lp.parse(ltree, lstrings);
+        if (lbad) {
+            println("line ${line}: ${lp.error().message} at column ${lp.error().column}");
+        } else {
+            print("n=${v.get("n").asI64Or(0)} ");
+        }
+    }
+
+    // The writer: misuse and values JSON can't hold are reported by finish.
+    u8[..>] out = [];
+    JsonWriter w = new JsonWriter(out);
+    w.beginObject();
+    w.key("ok");
+    w.write(1.5);
+    w.write(true);
+    w.key("nan");
+    w.write(0.0 / 0.0);
+    w.end();
+    u8 st = @w.finish();
+    println("${out} -> ${st}");
+    out.clear();
+    JsonWriter w2 = new JsonWriter(out);
+    w2.beginArray();
+    w2.writeNumber("12e");
+    w2.writeNumber("-0.5E+2");
+    w2.end();
+    w2.end();
+    u8 st2 = @w2.finish();
+    println("${out} -> ${st2}");
+    out.clear();
+    JsonWriter w3 = new JsonWriter(out);
+    w3.asciiOnly = true;
+    w3.beginArray();
+    w3.write("bé😀\u{1}");
+    w3.write((u64) 18446744073709551615);
+    w3.write(-5);
+    w3.beginObject();
+    w3.key("open");
+    u8 st3 = @w3.finish();
+    println("${out} -> ${st3}");
+    out.clear();
+    u8 st4 = @json.write(out, cfg.get("server"), 0);
+    println("${out} -> ${st4}");
+}
+"##,
+        "parsed 0 34 nodes, 10 entries, line of users 2\nexample.org 8080/0 0.75/0 0/197 0/195 0/34 0/34 7/0 7/197\n99999999999999999999 true true true false 2\n[ann] [boé] [?] \nboé 1 2 false false 10\nentries 10, users 3, at(1) boé, at on an object false\nnumber 42 as i64 42/0 number 2.5 as i64 0/197 | error code 0\nn=1 n=2 line 3: expected a value at column 7\n{\"ok\":1.5,\"\":true,\"nan\":null} -> 22\n[null,-0.5E+2] -> 22\n[\"b\\u00e9\\ud83d\\ude00\\u0001\",18446744073709551615,-5,{\"open\":null}] -> 22\n{\"host\":\"example.org\",\"port\":8080,\"ratio\":0.75} -> 0\n",
+    );
+}
+
+/// isValidUtf8 is strict UTF-8: overlong forms, surrogates, past U+10FFFF and cut-off
+/// sequences are invalid; it agrees with Python's decoder on 3,000 random byte strings.
+#[test]
+fn valid_utf8_is_strict() {
+    prints(
+        r##"void main() {
+    u8[..>] b = [];
+    string ok = "aé😀中";
+    print("${ok.isValidUtf8()} ${"".isValidUtf8()} ");
+    for (i64 k = 0; k < 6; k++) {
+        b.clear();
+        if (k == 0) { b +> 0xc0; b +> 0xaf; }
+        if (k == 1) { b +> 0xe0; b +> 0x80; b +> 0xaf; }
+        if (k == 2) { b +> 0xed; b +> 0xa0; b +> 0x80; }
+        if (k == 3) { b +> 0xf4; b +> 0x90; b +> 0x80; b +> 0x80; }
+        if (k == 4) { b +> 0xf0; b +> 0x9f; b +> 0x98; }
+        if (k == 5) { b +> 0xf0; b +> 0x9f; b +> 0x98; b +> 0x80; }
+        print("${b.isValidUtf8()} ");
+    }
+    println("");
+}
+"##,
+        "true true false false false false false true \n",
+    );
 }

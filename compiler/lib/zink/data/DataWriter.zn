@@ -1,0 +1,22 @@
+package zink.data;
+
+import zink.time.*;
+
+// What every writer does (STDLIB §9.7). Only finish() sets a status: misuse, and a value
+// the format has no form for, are reported there, and the output is well formed even then.
+public interface DataWriter {
+    mut void beginObject();
+    mut void beginArray();
+    mut void end();
+    mut void key(string k);
+    mut void write(string s);
+    mut void write(i64 n);
+    mut void write(u64 n);
+    mut void write(f64 x);
+    mut void write(bool b);
+    mut void write(DateTime d);
+    mut void write(Value v);
+    mut void writeNull();
+    mut void writeNumber(string text);
+    mut void finish();
+}

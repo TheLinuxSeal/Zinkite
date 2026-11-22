@@ -1,0 +1,301 @@
+package zink.json;
+
+import zink.data.*;
+import zink.time.*;
+
+// Streams JSON into a buffer (STDLIB §9.7). Only finish() sets a status: misuse, such as a
+// value inside an object without a key, and a number JSON has no form for, are reported
+// there, and the output is complete and well formed even then.
+public class JsonWriter implements DataWriter {
+    public i64 indent = 0;              // spaces per level; 0 writes everything on one line
+    public bool asciiOnly = false;      // \u-escape everything beyond ASCII too
+    private u8[..>]& out;
+    private u8[..~] levels = [];        // per open container: 1 an object, | 2 when it has an element, | 4 when a key waits for its value
+    private bool wroteRoot = false;
+    private u8 problem = 0;
+
+    public new(u8[..>]& out) {
+        this.out = out;
+    }
+
+    public mut void beginObject() {
+        before();
+        out +> '{';
+        levels +> 1;
+    }
+
+    public mut void beginArray() {
+        before();
+        out +> '[';
+        levels +> 0;
+    }
+
+    // Closes the innermost object or array.
+    public mut void end() {
+        if (levels.len == 0) {
+            note(status.INVALID);
+            return;
+        }
+        u8 top = levels.pop();
+        if ((top & 4) != 0) {
+            note(status.INVALID);
+            out.append("null");
+        }
+        if ((top & 2) != 0) {
+            newline();
+        }
+        if ((top & 1) != 0) {
+            out +> '}';
+        } else {
+            out +> ']';
+        }
+    }
+
+    public mut void key(string k) {
+        if (levels.len == 0 || (levels[^1] & 1) == 0) {
+            note(status.INVALID);
+            return;
+        }
+        u8 top = levels[^1];
+        if ((top & 4) != 0) {
+            note(status.INVALID);
+            out.append("null");
+        }
+        if ((top & 2) != 0) {
+            out +> ',';
+        }
+        newline();
+        str(k);
+        out +> ':';
+        if (indent > 0) {
+            out +> ' ';
+        }
+        levels[^1] = 7;
+    }
+
+    public mut void write(string s) {
+        before();
+        str(s);
+    }
+
+    public mut void write(i64 n) {
+        before();
+        out.append("${n}");
+    }
+
+    public mut void write(u64 n) {
+        before();
+        out.append("${n}");
+    }
+
+    // The shortest form that reads back the same; NaN and the infinities have no form in
+    // JSON, so they are written as null, and finish() fails with TYPE.
+    public mut void write(f64 x) {
+        before();
+        if (x - x != 0.0) {
+            note(status.TYPE);
+            out.append("null");
+            return;
+        }
+        out.append("${x}");
+    }
+
+    public mut void write(bool b) {
+        before();
+        out.append(b ? "true" : "false");
+    }
+
+    // As an RFC 3339 string: JSON has no dates.
+    public mut void write(DateTime d) {
+        before();
+        u8[..~40] s = d.iso();
+        str(s);
+    }
+
+    // A whole parsed subtree, numbers exactly as they were written. An absent value is
+    // written as null, and finish() fails with TYPE.
+    public mut void write(Value v) {
+        if (!v.exists()) {
+            note(status.TYPE);
+            writeNull();
+            return;
+        }
+        Node[:] tree = v.tree;
+        i64 stop = v.index + (i64) tree[v.index].size;
+        i64[..~] ends = [];         // where each open container's subtree ends
+        i64 i = v.index;
+        while (i < stop) {
+            while (ends.len > 0 && ends[^1] == i) {
+                ends ->;
+                end();
+            }
+            Node& n = tree[i];
+            switch (n.kind) {
+                case OBJECT => {
+                    beginObject();
+                    ends +> i + (i64) n.size;
+                }
+                case ARRAY => {
+                    beginArray();
+                    ends +> i + (i64) n.size;
+                }
+                case KEY => key(n.text);
+                case STRING, DATETIME => write(n.text);
+                case INT, FLOAT => writeNumber(n.text);
+                case BOOL => write(n.text == "true");
+                case NULL => writeNull();
+                default => {}
+            }
+            i++;
+        }
+        while (ends.len > 0) {
+            ends ->;
+            end();
+        }
+    }
+
+    public mut void writeNull() {
+        before();
+        out.append("null");
+    }
+
+    // A number exactly as written, such as the text a reader gave. Text that isn't a JSON
+    // number is written as null, and finish() fails with INVALID.
+    public mut void writeNumber(string text) {
+        before();
+        if (text.len == 0 || json.numberEnd(text, 0) != text.len) {
+            note(status.INVALID);
+            out.append("null");
+            return;
+        }
+        out.append(text);
+    }
+
+    // TYPE for a value JSON has no form for; INVALID for misuse: a value or key where none
+    // can go, end() with nothing open, something still open now, or nothing written.
+    public mut void finish() {
+        while (levels.len > 0) {
+            note(status.INVALID);
+            end();
+        }
+        if (!wroteRoot) {
+            note(status.INVALID);
+            out.append("null");
+            wroteRoot = true;
+        }
+        u8 p = problem;
+        return #p;
+    }
+
+    // ---- inside
+
+    // Before a value: the comma and line an array's element needs, or the key an object's
+    // value needs, which misuse leaves out and "" stands in for.
+    private mut void before() {
+        if (levels.len == 0) {
+            if (wroteRoot) {
+                note(status.INVALID);
+                out +> '\n';
+            }
+            wroteRoot = true;
+            return;
+        }
+        u8 top = levels[^1];
+        if ((top & 1) != 0) {
+            if ((top & 4) == 0) {
+                note(status.INVALID);
+                key("");
+            }
+            levels[^1] = 3;
+            return;
+        }
+        if ((top & 2) != 0) {
+            out +> ',';
+        }
+        newline();
+        levels[^1] = 2;
+    }
+
+    private mut void newline() {
+        if (indent <= 0) {
+            return;
+        }
+        out +> '\n';
+        i64 n = indent * levels.len;
+        for (i64 i = 0; i < n; i++) {
+            out +> ' ';
+        }
+    }
+
+    // The first problem is the one finish() reports.
+    private mut void note(u8 code) {
+        if (problem == 0) {
+            problem = code;
+        }
+    }
+
+    // A string in quotes, with ", \ and control characters escaped, and everything beyond
+    // ASCII too when asciiOnly is set.
+    private mut void str(string s) {
+        out +> '"';
+        i64 run = 0;
+        i64 i = 0;
+        while (i < s.len) {
+            u8 c = s[i];
+            if (c >= 0x20 && c != '"' && c != '\\' && (c < 0x80 || !asciiOnly)) {
+                i++;
+                continue;
+            }
+            out.append(s[run:i]);
+            if (c >= 0x80) {
+                i64 n = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+                i64 cp = 0xFFFD;
+                if (n > 1 && i + n <= s.len && s[i:i + n].isValidUtf8()) {
+                    cp = n == 2 ? (i64) (c & 0x1F) : n == 3 ? (i64) (c & 0x0F) : (i64) (c & 0x07);
+                    for (i64 k = i + 1; k < i + n; k++) {
+                        cp = (cp << 6) | (i64) (s[k] & 0x3F);
+                    }
+                } else {
+                    n = 1;
+                }
+                if (cp >= 0x10000) {
+                    cp -= 0x10000;
+                    hexEscape(0xD800 + (cp >> 10));
+                    hexEscape(0xDC00 + (cp & 0x3FF));
+                } else {
+                    hexEscape(cp);
+                }
+                i += n;
+            } else {
+                if (c == '"') {
+                    out.append("\\\"");
+                } else if (c == '\\') {
+                    out.append("\\\\");
+                } else if (c == 8) {
+                    out.append("\\b");
+                } else if (c == 12) {
+                    out.append("\\f");
+                } else if (c == 10) {
+                    out.append("\\n");
+                } else if (c == 13) {
+                    out.append("\\r");
+                } else if (c == 9) {
+                    out.append("\\t");
+                } else {
+                    hexEscape((i64) c);
+                }
+                i++;
+            }
+            run = i;
+        }
+        out.append(s[run:s.len]);
+        out +> '"';
+    }
+
+    private mut void hexEscape(i64 v) {
+        out.append("\\u");
+        for (i64 shift = 12; shift >= 0; shift -= 4) {
+            out +> "0123456789abcdef"[(v >> shift) & 15];
+        }
+    }
+}

@@ -1,5 +1,7 @@
 package zink.csv;
 
+import zink.data.*;
+
 // CSV records (RFC 4180, STDLIB §9.1). Quoted fields may hold the separator and line
 // breaks; lines end in \n or \r\n; a UTF-8 byte-order mark at the start is skipped. A field
 // is a view into the input whenever it can be; one with doubled quotes is decoded into the

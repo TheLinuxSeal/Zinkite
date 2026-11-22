@@ -1,0 +1,312 @@
+package zink.data;
+
+import zink.time.*;
+
+// A view of one node of a parsed tree (STDLIB §9.2), rooted at the tree and through it at
+// the text and strings its nodes view. `index` is -1 for a value that isn't there.
+//
+// Navigation never fails: a missing key or index, or get on something that isn't an
+// object, gives an absent value, so a chain such as cfg.get("server").get("port").asI64()
+// needs one check, at the end. Only reading a value sets a status.
+public class Value {
+    public Node[:] tree;
+    public i64 index;
+
+    public Kind kind() {
+        if (index < 0) {
+            return Kind.ABSENT;
+        }
+        return tree[index].kind;
+    }
+
+    public bool exists() { return index >= 0; }
+
+    public bool isNull() { return kind() == Kind.NULL; }
+
+    // An object's value for key: the last one when the key repeats.
+    public Value get(string key) {
+        if (kind() != Kind.OBJECT) {
+            return new Value(tree, -1);
+        }
+        i64 found = -1;
+        i64 end = index + (i64) tree[index].size;
+        i64 i = index + 1;
+        while (i < end) {
+            if (tree[i].text == key) {
+                found = i + 1;
+            }
+            i += 1 + (i64) tree[i + 1].size;
+        }
+        return new Value(tree, found);
+    }
+
+    // An array's element i, counting from 0: O(i), so iterate with items().
+    public Value at(i64 i) {
+        if (kind() != Kind.ARRAY || i < 0 || i >= (i64) tree[index].count) {
+            return new Value(tree, -1);
+        }
+        i64 k = index + 1;
+        for (i64 n = 0; n < i; n++) {
+            k += (i64) tree[k].size;
+        }
+        return new Value(tree, k);
+    }
+
+    // An RFC 6901 path: "/servers/0/port", with ~1 for a / in a key and ~0 for a ~. ""
+    // is the value itself.
+    public Value pointer(string p) {
+        if (p.len == 0) {
+            return this;
+        }
+        if (p[0] != '/') {
+            return new Value(tree, -1);
+        }
+        Value v = this;
+        i64 i = 1;
+        while (true) {
+            i64 j = i;
+            while (j < p.len && p[j] != '/') {
+                j++;
+            }
+            v = v.step(p[i:j]);
+            if (j >= p.len) {
+                return v;
+            }
+            i = j + 1;
+        }
+        return v;
+    }
+
+    // One reference token of a pointer.
+    private Value step(string token) {
+        Kind k = kind();
+        if (k == Kind.OBJECT) {
+            i64 found = -1;
+            i64 end = index + (i64) tree[index].size;
+            i64 i = index + 1;
+            while (i < end) {
+                if (Value.tokenIs(token, tree[i].text)) {
+                    found = i + 1;
+                }
+                i += 1 + (i64) tree[i + 1].size;
+            }
+            return new Value(tree, found);
+        }
+        if (k != Kind.ARRAY || token.len == 0 || (token.len > 1 && token[0] == '0')) {
+            return new Value(tree, -1);
+        }
+        i64 n = 0;
+        for (u8 c : token) {
+            if (c < '0' || c > '9' || n > 100000000000) {
+                return new Value(tree, -1);
+            }
+            n = n * 10 + (i64) c - 48;
+        }
+        return at(n);
+    }
+
+    // Whether a pointer's token, with its ~0 and ~1, names this key.
+    private static bool tokenIs(string token, string key) {
+        i64 i = 0;
+        i64 k = 0;
+        while (i < token.len) {
+            u8 c = token[i];
+            if (c == '~' && i + 1 < token.len && (token[i + 1] == '0' || token[i + 1] == '1')) {
+                c = token[i + 1] == '0' ? '~' : '/';
+                i++;
+            }
+            if (k >= key.len || key[k] != c) {
+                return false;
+            }
+            i++;
+            k++;
+        }
+        return k == key.len;
+    }
+
+    // An array's elements or an object's entries; 0 for anything else.
+    public i64 len() {
+        Kind k = kind();
+        if (k == Kind.ARRAY || k == Kind.OBJECT) {
+            return (i64) tree[index].count;
+        }
+        return 0;
+    }
+
+    // An array's elements, in order; nothing for anything else.
+    public ValueIterator items() {
+        if (kind() != Kind.ARRAY) {
+            return new ValueIterator(tree, 0, 0);
+        }
+        return new ValueIterator(tree, index + 1, index + (i64) tree[index].size);
+    }
+
+    // An object's entries in document order, repeated keys included; nothing for
+    // anything else.
+    public EntryIterator entries() {
+        if (kind() != Kind.OBJECT) {
+            return new EntryIterator(tree, 0, 0);
+        }
+        return new EntryIterator(tree, index + 1, index + (i64) tree[index].size);
+    }
+
+    // MISSING, TYPE.
+    public string asString() {
+        Kind k = kind();
+        if (k == Kind.ABSENT) {
+            return #status.MISSING "";
+        }
+        if (k != Kind.STRING) {
+            return #status.TYPE "";
+        }
+        return tree[index].text;
+    }
+
+    // MISSING, TYPE, RANGE. A FLOAT is a TYPE, even 3.0: nothing converts silently.
+    public i64 asI64() {
+        Kind k = kind();
+        if (k == Kind.ABSENT) {
+            return #status.MISSING 0;
+        }
+        if (k != Kind.INT) {
+            return #status.TYPE 0;
+        }
+        i64 n @err = i64.parse(tree[index].text);
+        return #err n;
+    }
+
+    // MISSING, TYPE, RANGE: a negative number is out of range.
+    public u64 asU64() {
+        Kind k = kind();
+        if (k == Kind.ABSENT) {
+            return #status.MISSING 0;
+        }
+        if (k != Kind.INT) {
+            return #status.TYPE 0;
+        }
+        string t = tree[index].text;
+        if (t.len > 0 && t[0] == '-') {
+            i64 n @_ = i64.parse(t);
+            if (n == 0) {
+                return 0;
+            }
+            return #status.RANGE 0;
+        }
+        u64 n @err = u64.parse(t);
+        return #err n;
+    }
+
+    // MISSING, TYPE. An integer converts; a number beyond f64's range reads as ±infinity.
+    public f64 asF64() {
+        Kind k = kind();
+        if (k == Kind.ABSENT) {
+            return #status.MISSING 0.0;
+        }
+        if (k != Kind.INT && k != Kind.FLOAT) {
+            return #status.TYPE 0.0;
+        }
+        f64 x @err = f64.parse(tree[index].text);
+        return #err x;
+    }
+
+    // MISSING, TYPE.
+    public bool asBool() {
+        Kind k = kind();
+        if (k == Kind.ABSENT) {
+            return #status.MISSING false;
+        }
+        if (k != Kind.BOOL) {
+            return #status.TYPE false;
+        }
+        return tree[index].text == "true";
+    }
+
+    // MISSING, TYPE: TOML's dates and times, as DateTime.parse reads them.
+    public DateTime asDateTime() {
+        Kind k = kind();
+        if (k == Kind.ABSENT) {
+            return #status.MISSING new DateTime(0, 0, 0, 0, 0, 0, 0, 0, 0);
+        }
+        if (k != Kind.DATETIME) {
+            return #status.TYPE new DateTime(0, 0, 0, 0, 0, 0, 0, 0, 0);
+        }
+        DateTime d @err = DateTime.parse(tree[index].text);
+        return #err d;
+    }
+
+    // The fallback when the value is absent or null; TYPE, with the fallback, when it's
+    // something else.
+    public string asStringOr(string fallback) {
+        Kind k = kind();
+        if (k == Kind.ABSENT || k == Kind.NULL) {
+            return fallback;
+        }
+        if (k != Kind.STRING) {
+            return #status.TYPE fallback;
+        }
+        return tree[index].text;
+    }
+
+    // RANGE, with the fallback, for an integer i64 can't hold.
+    public i64 asI64Or(i64 fallback) {
+        Kind k = kind();
+        if (k == Kind.ABSENT || k == Kind.NULL) {
+            return fallback;
+        }
+        if (k != Kind.INT) {
+            return #status.TYPE fallback;
+        }
+        i64 n @err = i64.parse(tree[index].text);
+        if (err) {
+            return #err fallback;
+        }
+        return n;
+    }
+
+    public f64 asF64Or(f64 fallback) {
+        Kind k = kind();
+        if (k == Kind.ABSENT || k == Kind.NULL) {
+            return fallback;
+        }
+        if (k != Kind.INT && k != Kind.FLOAT) {
+            return #status.TYPE fallback;
+        }
+        f64 x @_ = f64.parse(tree[index].text);
+        return x;
+    }
+
+    public bool asBoolOr(bool fallback) {
+        Kind k = kind();
+        if (k == Kind.ABSENT || k == Kind.NULL) {
+            return fallback;
+        }
+        if (k != Kind.BOOL) {
+            return #status.TYPE fallback;
+        }
+        return tree[index].text == "true";
+    }
+
+    // A scalar as written: a number's digits, even for one too big for i64. MISSING, and
+    // TYPE for an object or array.
+    public string text() {
+        Kind k = kind();
+        if (k == Kind.ABSENT) {
+            return #status.MISSING "";
+        }
+        if (k == Kind.ARRAY || k == Kind.OBJECT) {
+            return #status.TYPE "";
+        }
+        return tree[index].text;
+    }
+
+    // The line it starts on in the input; 0 for an absent value.
+    public i64 line() {
+        if (index < 0) {
+            return 0;
+        }
+        return (i64) tree[index].line;
+    }
+
+    // Its YAML tag, or "": no other format has them.
+    public string tag() { return ""; }
+}

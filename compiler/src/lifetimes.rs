@@ -107,11 +107,12 @@ impl Root {
         }
     }
 
-    /// Whether a reference rooted at `self` may point into the elements of `other`.
+    /// Whether a reference rooted at `self` may point into the elements of `other`. A
+    /// reference into a field's own storage is rooted at that part, however the object was
+    /// reached (§5.3), so one with no part, such as a reference to the object itself,
+    /// doesn't point into any part's elements.
     fn overlaps(&self, other: &Root) -> bool {
-        !self.whole
-            && self.var == other.var
-            && (self.part.is_none() || other.part.is_none() || self.part == other.part)
+        !self.whole && self.var == other.var && (other.part.is_none() || self.part == other.part)
     }
 }
 
@@ -169,6 +170,10 @@ struct CallR {
     /// The functions it may call; empty when unknown, which roots its result at every argument.
     callees: Vec<FnId>,
     recv: Option<R>,
+    /// For a method called on a temporary value, such as `cfg.get("a").text()`: the
+    /// references the temporary holds, which its `ThisHeld` stands for, where its own
+    /// storage dies with the statement.
+    recv_held: Option<R>,
     args: Vec<R>,
 }
 
@@ -329,6 +334,9 @@ struct Analysis<'p, 'a> {
     static_rs: HashMap<u32, Roots>,
     diags: Vec<(usize, Diagnostic)>,
     reported: HashSet<(usize, u32, u32)>,
+    /// Temporaries already reported as stored where they can't be, by file: what then
+    /// holds one, and what is read from that, would only repeat the error.
+    temps_reported: std::cell::RefCell<HashSet<(usize, Var)>>,
     holds_memo: std::cell::RefCell<HashMap<ClassId, bool>>,
 }
 
@@ -356,6 +364,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
             static_rs: HashMap::new(),
             diags: Vec::new(),
             reported: HashSet::new(),
+            temps_reported: Default::default(),
             holds_memo: Default::default(),
         }
     }
@@ -462,6 +471,21 @@ impl<'p, 'a> Analysis<'p, 'a> {
 
     fn build(&mut self) {
         let prog = self.prog;
+        // Every function's id first, so a call to one declared further on finds it: its
+        // result's roots and what it stores come from its summary (§4.2).
+        let mut next = 0;
+        for (c, ci) in prog.classes.iter().enumerate() {
+            for (i, m) in ci.methods.iter().enumerate() {
+                if m.decl.body.is_some() {
+                    self.fn_of.insert((c, false, i), next);
+                    next += 1;
+                }
+            }
+            for i in 0..ci.ctors.len() {
+                self.fn_of.insert((c, true, i), next);
+                next += 1;
+            }
+        }
         for (c, ci) in prog.classes.iter().enumerate() {
             for (i, m) in ci.methods.iter().enumerate() {
                 let Some(body) = &m.decl.body else { continue };
@@ -472,8 +496,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
                     .zip(&m.params)
                     .map(|(p, t)| (name_of(&p.name), t.clone()))
                     .collect();
-                let id = self.funcs.len();
-                self.fn_of.insert((c, false, i), id);
+                debug_assert_eq!(self.fn_of.get(&(c, false, i)), Some(&self.funcs.len()));
                 let mut b = Builder::new(self, !m.is_static);
                 b.ret = m.ret.clone();
                 let f = b.function(&m.decl.params, body);
@@ -488,8 +511,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 });
             }
             for (i, k) in ci.ctors.iter().enumerate() {
-                let id = self.funcs.len();
-                self.fn_of.insert((c, true, i), id);
+                debug_assert_eq!(self.fn_of.get(&(c, true, i)), Some(&self.funcs.len()));
                 match k.decl {
                     Some(d) => {
                         let params = d
@@ -633,14 +655,17 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 .as_ref()
                 .map(|r| self.eval(rs, r))
                 .unwrap_or_default(),
-            Var::ThisHeld => c
-                .recv
-                .as_ref()
-                .map(|r| self.eval(rs, r))
-                .unwrap_or_default()
-                .iter()
-                .flat_map(|x| self.stored(rs, x))
-                .collect(),
+            Var::ThisHeld => match &c.recv_held {
+                Some(h) => self.eval(rs, h),
+                None => c
+                    .recv
+                    .as_ref()
+                    .map(|r| self.eval(rs, r))
+                    .unwrap_or_default()
+                    .iter()
+                    .flat_map(|x| self.stored(rs, x))
+                    .collect(),
+            },
             _ => return [*fr].into_iter().collect(),
         };
         // A reference into the elements of what the argument names isn't a reference to the whole of it.
@@ -1030,6 +1055,9 @@ impl<'p, 'a> Analysis<'p, 'a> {
                     (Var::Literal | Var::Static(_), _) => {}
                     (_, Var::Temp(..) | Var::Literal) => {}
                     (Var::Temp(kind, ..), _) => {
+                        if !self.temps_reported.borrow_mut().insert((f.file, s.var)) {
+                            continue;
+                        }
                         let (msg, help) = match kind {
                             TempKind::Text => (
                                 format!("{}this text is a temporary, built only for this statement, so {} can't keep a view of it", prefix, self.root_name(f, d)),
@@ -2675,6 +2703,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
 
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[ast::Arg]) -> Val {
         let fact = self.an.facts.calls.get(&key(e.span));
+        let mut recv_held = None;
         let (recv, recv_ty): (Option<R>, Ty) = match &callee.kind {
             E::Member { expr: base, .. } => {
                 let bt = self.ty(base);
@@ -2682,6 +2711,12 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                     (None, bt)
                 } else {
                     let bv = self.expr(base);
+                    if bv.cell.is_none()
+                        && !Analysis::refish(&bt)
+                        && !matches!(bt.unref(), Ty::Unknown)
+                    {
+                        recv_held = Some(bv.refs.clone());
+                    }
                     // A library object the checker doesn't model is a handle: what a call
                     // gives back is rooted at what it holds.
                     let r = if matches!(bt.unref(), Ty::Unknown) {
@@ -2734,7 +2769,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             }
             Origin::Method(..) | Origin::Ctor(..) => {
                 let ret = self.ty(e);
-                match self.user_call_with(e.span, recv, args, fact, false) {
+                match self.user_call_with(e.span, recv, recv_held, args, fact, false) {
                     Some(c) => match &ret {
                         Ty::Tuple(ts) => {
                             let elems: Vec<Val> = (0..ts.len())
@@ -2776,13 +2811,15 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
         is_new: bool,
     ) -> Option<Rc<CallR>> {
         let fact = self.an.facts.calls.get(&key(span))?;
-        self.user_call_with(span, recv, args, fact, is_new)
+        self.user_call_with(span, recv, None, args, fact, is_new)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn user_call_with(
         &mut self,
         span: Span,
         recv: Option<R>,
+        recv_held: Option<R>,
         args: &[ast::Arg],
         fact: &CallFact,
         is_new: bool,
@@ -2858,6 +2895,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
         let call = Rc::new(CallR {
             callees: callees.clone(),
             recv,
+            recv_held,
             args: arg_rs,
         });
         let in_scope = self.resizable_in_scope();

@@ -1,0 +1,10 @@
+package zink.data;
+
+// Where input went wrong (STDLIB §9.2): the status the parse failed with, or 0; a line and
+// a column counting from 1, the column in bytes; and a message, which is static text.
+public class ParseError {
+    public u8 code;
+    public i64 line;
+    public i64 column;
+    public string message;
+}

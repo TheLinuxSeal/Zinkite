@@ -1,0 +1,6 @@
+package zink.data;
+
+// What a node holds (STDLIB §9.2). ABSENT is a value that isn't there: a missing key, an
+// index past the end, or anything asked of something that isn't an object or array. KEY
+// is a node only, before each value of an object; a Value is never one.
+public enum Kind { ABSENT, NULL, BOOL, INT, FLOAT, STRING, DATETIME, ARRAY, OBJECT, KEY }

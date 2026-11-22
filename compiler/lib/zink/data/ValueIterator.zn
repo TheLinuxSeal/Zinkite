@@ -1,0 +1,24 @@
+package zink.data;
+
+// An array's elements, in order: v.items().
+public class ValueIterator implements Iterator<Value> {
+    private Node[:] tree;
+    private i64 at;
+    private i64 end;
+
+    new(Node[:] tree, i64 at, i64 end) {
+        this.tree = tree;
+        this.at = at;
+        this.end = end;
+    }
+
+    // The next element: END after the last.
+    public mut Value next() {
+        if (at >= end) {
+            return #status.END new Value(tree, -1);
+        }
+        Value v = new Value(tree, at);
+        at += (i64) tree[at].size;
+        return v;
+    }
+}

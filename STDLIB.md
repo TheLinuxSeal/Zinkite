@@ -21,8 +21,8 @@
 | `zink.hash` | `hash`, `Crc32`, `Sha2_256` and the other SHA-2 and SHA-3 classes | v1 | 8.3 |
 | `zink.encoding` | `hex`, `base64` | v1 | 8.4 |
 | `zink.csv` | `CsvReader`, `CsvWriter` | v1 | 9.1 |
-| `zink.data` | the shared parsed tree: `Node`, `Value`, `Entry`, `Kind`, `ParseError`, `Parser`, `DataWriter`, `TreeBuilder` | later | 9.2, 9.7 |
-| `zink.json` | `JsonParser`, `JsonReader`, `JsonEvent`, `JsonToken`, `JsonWriter`, `json`; JSON and JSON5 | later | 9.3, 9.4 |
+| `zink.data` | the shared parsed tree: `Node`, `Value`, `Entry`, `Kind`, `ParseError`, `Parser`, `DataWriter`; `TreeBuilder` later | v1 | 9.2, 9.7 |
+| `zink.json` | `JsonParser`, `JsonReader`, `JsonEvent`, `JsonToken`, `JsonWriter`, `json`; JSON5 later | v1 | 9.3, 9.4 |
 | `zink.toml` | `TomlParser`, `toml` | later | 9.5 |
 | `zink.yaml` | `YamlParser`, `yaml` | later | 9.6 |
 | `zink.glob`, `zink.regex` | `glob`, `Regex` | later | 9.9 |
@@ -972,7 +972,7 @@ while (true) {
 - **A field is a view into the input whenever it can be**: an unquoted field, or a quoted one with no `""` inside (the view leaves the quotes out).
 - **Only fields with doubled quotes are decoded**, into `strings`. `next` never clears `strings`; clear it yourself once no earlier field is kept.
 - **A blank line is a record with no fields**, as Python's `csv` reads it.
-- **`ParseError` is in `zink.csv`** until `zink.data` is written (§9.2).
+- **`ParseError` is `zink.data`'s** (§9.2), so naming it takes `import zink.data.*;`.
 - **The format is RFC 4180's**:
   - quoted fields may contain the separator and newlines;
   - lines end in `\n` or `\r\n`;
@@ -997,7 +997,7 @@ u8 err = @File.writeAll("out.csv", out);
 - **`w.separator = '\t'`** writes tab-separated values.
 - **It sets no status** (§1.3, rule 7).
 
-### 9.2 Parsed trees: `zink.data` (later)
+### 9.2 Parsed trees: `zink.data`
 **All four formats parse into the same tree**: JSON, JSON5, TOML and YAML.
 - Code that reads configuration doesn't care which format the file was in.
 - Converting between formats is a parse and a write (§9.8).
@@ -1039,11 +1039,11 @@ for (Value user : cfg.get("users").items()) {
 - Only reading a value sets a status.
 - So a chain such as `cfg.get("server").get("port").asI64()` needs one check, at the end, and drops no status along the way.
 
-`Value` is a view of one node, `{ Node[:] tree; i64 at; }`, 24 bytes. It is rooted at the tree, and through the tree at `text` and `strings`.
+`Value` is a view of one node, `{ Node[:] tree; i64 index; }`, 24 bytes, with `index` -1 for an absent value. It is rooted at the tree, and through the tree at `text` and `strings`.
 
 | Method | Result | Fails with |
 |---|---|---|
-| `Kind kind()` | `NULL`, `BOOL`, `INT`, `FLOAT`, `STRING`, `DATETIME`, `ARRAY`, `OBJECT`, or `ABSENT` | |
+| `Kind kind()` | `NULL`, `BOOL`, `INT`, `FLOAT`, `STRING`, `DATETIME`, `ARRAY`, `OBJECT`, or `ABSENT`; `KEY` is a node's kind only | |
 | `bool exists()` | false for an absent value | |
 | `bool isNull()` | | |
 | `Value get(string key)` | an object's value for `key`; the last one when the key repeats | |
@@ -1105,11 +1105,11 @@ interface Parser {
 
 **Reading into classes** is open (§11): `cfg.into<Config>()`, filling fields by name, and writing a class out the same way. Both need compile-time access to a class's fields, which Zinkite doesn't have (there is no reflection, DESIGN §1).
 
-### 9.3 JSON: `zink.json` (later)
+### 9.3 JSON: `zink.json`
 The format is RFC 8259.
 
 ```
-JsonParser p = new JsonParser(text);   // fields: string input; bool json5 = false; i64 maxDepth = 1024
+JsonParser p = new JsonParser(text);   // fields: string input; i64 maxDepth = 1024; bool json5 = false, later
 Value v @bad = p.parse(tree, strings);
 ```
 
@@ -1132,7 +1132,7 @@ while (JsonEvent e : r.next()) {
 if (r.error().code) { ... }
 ```
 
-- **`JsonEvent`** is `{ JsonToken kind; string text; i64 line; }`. The kinds are `BEGIN_OBJECT`, `END_OBJECT`, `BEGIN_ARRAY`, `END_ARRAY`, `KEY`, `STRING`, `NUMBER`, `TRUE`, `FALSE` and `NULL`.
+- **`JsonEvent`** is `{ JsonToken kind; string text; i64 line; i64 column; }`, the column in bytes. The kinds are `BEGIN_OBJECT`, `END_OBJECT`, `BEGIN_ARRAY`, `END_ARRAY`, `KEY`, `STRING`, `NUMBER`, `TRUE`, `FALSE` and `NULL`.
 - **`e.text` is the raw text**, without the quotes but with any escapes. That's enough for comparing keys, which rarely have escapes.
   - `string e.decode(u8[..>]& strings)` gives the decoded text.
   - It is a view into the input when there are no escapes, and is decoded into `strings` otherwise.
@@ -1144,13 +1144,14 @@ if (r.error().code) { ... }
 **JSON Lines** (`.jsonl`), one value per line:
 ```
 for (string line : text.lines()) {
-    tree.clear();
-    strings.clear();
+    u8[..>] strings = [];
+    Node[..>] tree = [];
     JsonParser p = new JsonParser(line);
     Value v @bad = p.parse(tree, strings);
     ...
 }
 ```
+- **Each line's buffers are declared in the loop.** Its data stack frees them with one store at the end of each pass, so reusing them would save nothing. Clearing `tree` and then `strings` instead is an error: the rules are per variable, so they can't see that `tree` no longer views `strings` (REFERENCES §3.5).
 
 Writing JSON is in §9.7.
 
@@ -1248,7 +1249,7 @@ Value doc @bad = p.parse(tree, strings);         // exactly one document
 
 **Comments aren't kept in the tree**, so a parse followed by a write loses them. Editing a YAML or TOML file while keeping its comments and layout needs a different, lossless tree, and is out of scope.
 
-### 9.7 Writing (later)
+### 9.7 Writing
 **`DataWriter`** is the interface every writer implements:
 
 ```
@@ -1298,7 +1299,8 @@ u8 err = @w.finish();
 println(out);
 ```
 
-- **Fields**: `i64 indent = 0; bool json5 = false; bool asciiOnly = false; i64 maxExpansion = 1000000;`.
+- **Fields**: `i64 indent = 0; bool asciiOnly = false;`, and later, with JSON5 and YAML, `bool json5 = false; i64 maxExpansion = 1000000;`.
+- **Misuse is written so the output stays well formed**: a value in an object without a key gets the key `""`, a key with no value gets `null`, and `finish()` closes whatever is open. Writing a second value at the top level puts it on a new line, as JSON Lines does, and is reported too.
 - **Strings are escaped as JSON requires**: `"`, `\` and control characters. `asciiOnly` escapes everything beyond ASCII too.
 - **Floats are written in the shortest form that reads back the same** (`0.1`).
 - **`json.write(u8[..>]& out, Value v, i64 indent)`** writes a whole tree in one call (`TYPE`, `FULL`).
@@ -1319,7 +1321,7 @@ void yaml.write(u8[..>]& out, Value root)    // FULL
   - uses `|` for multi-line strings;
   - writes anchors and aliases back as `&` and `*`.
 
-**`TreeBuilder`** builds a tree from program data: for writing TOML or YAML, or for code that takes a `Value`.
+**`TreeBuilder`** (later) builds a tree from program data: for writing TOML or YAML, or for code that takes a `Value`.
 ```
 u8[..>] strings = [];                  // the text of the numbers the program writes
 Node[..>] tree = [];                   // its nodes view strings, so strings comes first (rule S)

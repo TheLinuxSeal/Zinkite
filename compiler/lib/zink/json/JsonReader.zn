@@ -1,0 +1,282 @@
+package zink.json;
+
+import zink.data.*;
+
+// JSON as a stream of events (STDLIB §9.3), for input too big for a tree, or for reading
+// straight into a program's own classes:
+//     while (JsonEvent e : r.next()) { ... }
+//     if (r.error().code) { ... }
+// It keeps a stack of the objects and arrays that are open, so it never recurses. A
+// byte-order mark at the start is skipped.
+public class JsonReader {
+    public string input;
+    public i64 maxDepth = 1024;     // nesting deeper than this fails with FULL
+    private u8[..~] open = [];      // per open container: 1 an object, 2 an array
+    private i64 pos = 0;
+    private i64 line = 1;
+    private i64 lineStart = 0;
+    // What may come next: 0 a value, 1 a value or ']', 2 a key or '}', 3 a key, 4 ':',
+    // 5 ',' or the end of the container, 6 nothing more.
+    private u8 state = 0;
+    private u8 errCode = 0;
+    private i64 errLine = 0;
+    private i64 errColumn = 0;
+    private string errMessage = "";
+
+    public new(string input) {
+        this.input = input;
+        if (input.startsWith("\u{feff}")) {
+            pos = 3;
+            lineStart = 3;
+        }
+    }
+
+    // The next event. END once the value is complete and nothing but whitespace follows;
+    // INVALID or FULL at an error, which error() describes. After either it keeps failing
+    // the same way.
+    public mut JsonEvent next() {
+        if (errCode != 0) {
+            return #errCode none();
+        }
+        while (true) {
+            skipSpace();
+            if (state == 6) {
+                if (pos < input.len) {
+                    u8 st = bad("text after the value");
+                    return #st none();
+                }
+                return #status.END none();
+            }
+            if (pos >= input.len) {
+                u8 st = bad(open.len > 0 ? "the input ends inside an object or array" : "the input ends before a value");
+                return #st none();
+            }
+            u8 c = input[pos];
+            i64 col = pos - lineStart + 1;
+            if (state == 4) {
+                if (c != ':') {
+                    u8 st = bad("expected ':' after the key");
+                    return #st none();
+                }
+                pos++;
+                state = 0;
+                continue;
+            }
+            if (state == 5) {
+                u8 top = open[^1];
+                if (c == ',') {
+                    pos++;
+                    state = top == 1 ? 3 : 0;
+                    continue;
+                }
+                if (top == 1 && c == '}') {
+                    return close(JsonToken.END_OBJECT, col);
+                }
+                if (top == 2 && c == ']') {
+                    return close(JsonToken.END_ARRAY, col);
+                }
+                u8 st = bad(top == 1 ? "expected ',' or '}'" : "expected ',' or ']'");
+                return #st none();
+            }
+            if (state == 2 && c == '}') {
+                return close(JsonToken.END_OBJECT, col);
+            }
+            if (state == 1 && c == ']') {
+                return close(JsonToken.END_ARRAY, col);
+            }
+            if (state == 2 || state == 3) {
+                if (c != '"') {
+                    u8 st = bad("expected a key in double quotes");
+                    return #st none();
+                }
+                string raw @err = scanString();
+                if (err) {
+                    return #err none();
+                }
+                state = 4;
+                return new JsonEvent(JsonToken.KEY, raw, line, col);
+            }
+            JsonEvent v @err = value(c, col);
+            return #err v;
+        }
+        return none();
+    }
+
+    // Skips the value that comes next, a whole object or array included: after a KEY, or
+    // where an array's element comes. Fails as next() does.
+    public mut void skipValue() {
+        i64 depth = 0;
+        while (true) {
+            JsonEvent e @err = next();
+            if (err) {
+                return #err;
+            }
+            if (e.kind == JsonToken.BEGIN_OBJECT || e.kind == JsonToken.BEGIN_ARRAY) {
+                depth++;
+            } else if (e.kind == JsonToken.END_OBJECT || e.kind == JsonToken.END_ARRAY) {
+                depth--;
+            }
+            if (depth <= 0) {
+                return;
+            }
+        }
+    }
+
+    // Where the input went wrong: code 0 if it hasn't.
+    public ParseError error() {
+        return new ParseError(errCode, errLine, errColumn, errMessage);
+    }
+
+    // ---- inside
+
+    private mut JsonEvent value(u8 c, i64 col) {
+        if (c == '{' || c == '[') {
+            if (open.len >= maxDepth) {
+                note(status.FULL, "nested deeper than maxDepth");
+                return #status.FULL none();
+            }
+            bool obj = c == '{';
+            open +> (obj ? 1 : 2);
+            pos++;
+            state = obj ? 2 : 1;
+            return new JsonEvent(obj ? JsonToken.BEGIN_OBJECT : JsonToken.BEGIN_ARRAY, input[pos - 1:pos], line, col);
+        }
+        if (c == '"') {
+            string raw @err = scanString();
+            if (err) {
+                return #err none();
+            }
+            done();
+            return new JsonEvent(JsonToken.STRING, raw, line, col);
+        }
+        if (c == '-' || json.digit(c)) {
+            i64 end = json.numberEnd(input, pos);
+            if (end < 0) {
+                u8 st = bad("a malformed number");
+                return #st none();
+            }
+            i64 start = pos;
+            pos = end;
+            done();
+            return new JsonEvent(JsonToken.NUMBER, input[start:end], line, col);
+        }
+        if (word("true")) {
+            done();
+            return new JsonEvent(JsonToken.TRUE, input[pos - 4:pos], line, col);
+        }
+        if (word("false")) {
+            done();
+            return new JsonEvent(JsonToken.FALSE, input[pos - 5:pos], line, col);
+        }
+        if (word("null")) {
+            done();
+            return new JsonEvent(JsonToken.NULL, input[pos - 4:pos], line, col);
+        }
+        u8 st = bad("expected a value");
+        return #st none();
+    }
+
+    private mut JsonEvent close(JsonToken t, i64 col) {
+        open ->;
+        pos++;
+        done();
+        return new JsonEvent(t, input[pos - 1:pos], line, col);
+    }
+
+    // After a complete value: a ',' or the container's end, or nothing more.
+    private mut void done() {
+        state = open.len > 0 ? 5 : 6;
+    }
+
+    private mut bool word(string w) {
+        if (pos + w.len <= input.len && input[pos:pos + w.len] == w) {
+            pos += w.len;
+            return true;
+        }
+        return false;
+    }
+
+    private mut void skipSpace() {
+        while (pos < input.len) {
+            u8 c = input[pos];
+            if (c == '\n') {
+                line++;
+                lineStart = pos + 1;
+            } else if (c != ' ' && c != '\t' && c != '\r') {
+                return;
+            }
+            pos++;
+        }
+    }
+
+    // A string's text between its quotes, escapes and all; pos is past the closing quote.
+    private mut string scanString() {
+        i64 start = pos + 1;
+        i64 i = start;
+        bool ascii = true;
+        while (i < input.len) {
+            u8 c = input[i];
+            if (c == '"') {
+                string raw = input[start:i];
+                if (!ascii && !raw.isValidUtf8()) {
+                    pos = start;
+                    u8 st = bad("invalid UTF-8");
+                    return #st "";
+                }
+                pos = i + 1;
+                return raw;
+            }
+            if (c == '\\') {
+                if (i + 1 >= input.len) {
+                    break;
+                }
+                u8 e = input[i + 1];
+                if (e == 'u') {
+                    if (json.hex4(input, i + 2) < 0) {
+                        pos = i;
+                        u8 st = bad("\\u needs four hex digits");
+                        return #st "";
+                    }
+                    i += 6;
+                    continue;
+                }
+                if (!json.simpleEscape(e)) {
+                    pos = i;
+                    u8 st = bad("an unknown escape");
+                    return #st "";
+                }
+                i += 2;
+                continue;
+            }
+            if (c < 0x20) {
+                pos = i;
+                u8 st = bad("a control character in a string must be escaped");
+                return #st "";
+            }
+            if (c >= 0x80) {
+                ascii = false;
+            }
+            i++;
+        }
+        pos = start - 1;
+        u8 st = bad("this string is never closed");
+        return #st "";
+    }
+
+    // Records an error at pos, and gives INVALID.
+    private mut u8 bad(string message) {
+        note(status.INVALID, message);
+        return status.INVALID;
+    }
+
+    private mut void note(u8 code, string message) {
+        errCode = code;
+        errLine = line;
+        errColumn = pos - lineStart + 1;
+        errMessage = message;
+    }
+
+    private JsonEvent none() {
+        return new JsonEvent(JsonToken.NULL, "", line, pos - lineStart + 1);
+    }
+}
