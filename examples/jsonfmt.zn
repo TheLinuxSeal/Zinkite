@@ -93,10 +93,11 @@ u8 main(string[.] args) {
     cli.flag('c', "compact", "everything on one line");
     cli.flag('s', "sort-keys", "sort every object's keys");
     cli.positional("file", "input file; stdin when left out");
-    cli.parseOrExit(args);
+    u8 code @stop = cli.parseOrStop(args);
+    if (stop) { return code; }
 
     i64 indent @badIndent = cli.getI64("indent", 2);
-    if (badIndent || indent < 0 || indent > 16) { cli.usageError("--indent takes a number from 0 to 16"); }
+    if (badIndent || indent < 0 || indent > 16) { return cli.usageError("--indent takes a number from 0 to 16"); }
 
     u8[..>] text = [];
     string file = cli.get("file", "");

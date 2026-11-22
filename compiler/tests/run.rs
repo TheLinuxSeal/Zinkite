@@ -221,7 +221,10 @@ fn bugs_stop_the_program_with_their_location() {
             "i64 n = 300; u8 b = (u8) n;",
             "prog.zn:3: the value doesn't fit in u8",
         ),
-        ("fail(\"unreachable\");", "prog.zn:3: unreachable"),
+        (
+            "i64[..~] e = []; i64 v = e.pop();",
+            "prog.zn:3: `pop` failed with EMPTY, and nothing read its status",
+        ),
         (
             "i128 m = i128.MAX; m = m + 1;",
             "prog.zn:3: integer overflow",
@@ -596,7 +599,7 @@ i64 below(i64 n) {
     return (i64) ((seed >> 33) % (u64) n);
 }
 
-void main() {
+u8 main() {
     i64[.~.$] chunked = [];
     i64[..~] model = [];
     i64 next = 0;
@@ -612,14 +615,14 @@ void main() {
         } else {
             i64 i = below(model.len);
             i64 got @_ = chunked.removeAt(i);
-            if (got != model[i]) { println("wrong element at step ${step}"); exit(1); }
+            if (got != model[i]) { println("wrong element at step ${step}"); return 1; }
             for (i64 k = i; k + 1 < model.len; k++) { model[k] = model[k + 1]; }
             @_ = model ->;
         }
         if (step % 1000 == 0) {
-            if (chunked.len != model.len) { println("length ${chunked.len} against ${model.len}"); exit(1); }
+            if (chunked.len != model.len) { println("length ${chunked.len} against ${model.len}"); return 1; }
             for (i64 k = 0; k < model.len; k++) {
-                if (chunked[k] != model[k]) { println("mismatch at ${k}, step ${step}"); exit(1); }
+                if (chunked[k] != model[k]) { println("mismatch at ${k}, step ${step}"); return 1; }
             }
             checks++;
         }
@@ -1884,7 +1887,7 @@ fn zink_cli_arguments() {
     let exe = build(
         r##"import zink.cli.*;
 
-void main(string[.] args) {
+u8 main(string[.] args) {
     Args cli = new Args("tool", "Does things to files.");
     cli.version = "1.2";
     cli.flag('v', "verbose", "say more; twice for even more");
@@ -1893,7 +1896,8 @@ void main(string[.] args) {
     cli.option(0, "scale", "X", "a factor");
     cli.positional("mode", "what to do");
     cli.rest("files", "the files");
-    cli.parseOrExit(args);
+    u8 code @stop = cli.parseOrStop(args);
+    if (stop) { return code; }
     f64 scale @bad = cli.getF64("scale", 1.5);
     print("v=${cli.count("verbose")} dry=${cli.has("dry-run")} out=${cli.get("out", "-")} scale=${scale}/${bad} mode=${cli.get("mode", "?")} files:");
     ArgIterator files = cli.restValues();
@@ -2611,12 +2615,13 @@ i64 count(Iterator<string>& it) {
     return n;
 }
 
-void main(string[.] args) {
+u8 main(string[.] args) {
     Countdown c = new Countdown(4);
     println("sum ${sum(c)}");
     Args cli = new Args("t", "");
     cli.rest("files", "the files");
-    cli.parseOrExit(args);
+    u8 code @stop = cli.parseOrStop(args);
+    if (stop) { return code; }
     for (string f : cli.restValues()) { print("<${f}>"); }
     println("");
     ArgIterator all = cli.restValues();
@@ -3744,7 +3749,11 @@ void main(string[.] args) {
     for (i64 i = 0; i < 100000; i++) { @_ = f.println("line ${i}"); }
     i64 at @_ = f.position();
     @_ = f.write("tail");
-    if (args.len > 1) { fail("stopping with a file open"); }
+    if (args.len > 1) {
+        // A status nothing reads stops the program, with the file still open.
+        i64[..~] none = [];
+        i64 x = none.pop();
+    }
     @_ = f.close();
     println("position ${at}");
 }
@@ -3894,4 +3903,124 @@ fn repeat_fails_for_a_negative_count() {
 "##,
         "[ababab] [] 22 0 [-----] 4\nxyxy\n",
     );
+}
+
+/// A call that fails stops the program when nothing reads its status (DESIGN §7.6), at
+/// the call's line, naming it and its status, and for a function of the program's own,
+/// where it returned the status: in a declaration, inside `${...}`, as a statement, in the
+/// library, and for an option `Args` never declared. `@err`, `@_` and `@` read it.
+#[test]
+fn an_unread_failure_stops_the_program() {
+    let exe = build(
+        r##"import zink.hash.*;
+import zink.cli.*;
+
+i64 half(i64 n) {
+    if (n % 2 != 0) {
+        return #status.INVALID 0;
+    }
+    return n / 2;
+}
+
+void main(string[.] args) {
+    i64 a = half(4);
+    i64 b @err = half(3);
+    i64 c @_ = half(5);
+    u8 s = @half(1);
+    println("${a} ${b} ${err} ${c} ${s} ${@half(2)}");
+    if (args[0] == "own") { i64 d = half(7); }
+    if (args[0] == "interp") { println("${half(9)}"); }
+    if (args[0] == "lib") { u8[.] h = hash.shake_256("abc", -1); }
+    if (args[0] == "stmt") { half(11); }
+    if (args[0] == "typo") {
+        Args cli = new Args("t", "");
+        cli.flag('n', "number", "show numbers");
+        @_ = cli.parse(args[1:]);
+        println("given ${cli.has("number")}");
+        println("given ${cli.has("nmber")}");
+    }
+    println("end");
+}
+"##,
+    );
+    let first = "2 0 22 0 22 0\n";
+    let r = exec(&exe, &["ok"]);
+    assert_eq!((r.stdout.as_str(), r.code), ("2 0 22 0 22 0\nend\n", 0));
+    let own = "    `half` returned it at prog.zn:6\n";
+    for (arg, line, what, more) in [
+        ("own", 17, "half", own),
+        ("interp", 18, "half", own),
+        ("lib", 19, "shake_256", ""),
+        ("stmt", 20, "half", own),
+        ("typo", 26, "has", ""),
+    ] {
+        let r = exec(&exe, &[arg]);
+        assert_eq!(r.code, 1, "{}", arg);
+        assert!(r.stdout.starts_with(first), "{}: {}", arg, r.stdout);
+        assert!(!r.stdout.contains("end"), "{}", arg);
+        assert_eq!(
+            r.stderr,
+            format!(
+                "prog.zn:{}: `{}` failed with INVALID, and nothing read its status\n{}",
+                line, what, more
+            ),
+            "{}",
+            arg
+        );
+    }
+}
+
+/// `@` catches every failure in the expression it reads (DESIGN §7.6): an index, a slice,
+/// overflow, division by zero, a cast that doesn't fit, a negation, and a call inside
+/// that nothing else reads, which skips the rest. The value is then zero, and a reference
+/// refers to a zero value of its own; a reference that doesn't fail refers to the element.
+/// The same index without `@` stops the program.
+#[test]
+fn at_catches_every_failure_in_its_expression() {
+    let r = run(
+        r##"i64 half(i64 n) {
+    if (n % 2 != 0) {
+        return #status.INVALID 0;
+    }
+    return n / 2;
+}
+
+i64 twice(i64 n) { return n * 2; }
+
+void main(string[.] args) {
+    i64[..>] a = [10, 20];
+    i64 big = i64.MAX;
+    i64 zero = args.len - args.len;
+    i64 x @e1 = a[5];
+    i64 y @e2 = a[0] + 1;
+    u8 s3 = @(a[0] / zero);
+    i64 o @e4 = big + 1;
+    i64 n = 300;
+    u8 b @e5 = (u8) n;
+    i64 t @e6 = twice(half(3));
+    i64 u @e7 = twice(a[9]);
+    i64 w @e8 = half(a[0]) + a[1];
+    i64& r @e9 = a[1];
+    r = 99;
+    i64& q @e10 = a[7];
+    q = 5;
+    string text = "hello";
+    string sl @e11 = text[2:9];
+    i64 neg @e12 = -(i64.MIN + zero);
+    println("${x} ${e1} ${y} ${e2} ${s3} ${o} ${e4} ${b} ${e5} ${t} ${e6} ${u} ${e7} ${w} ${e8}");
+    println("${a[1]} ${e9} ${q} ${e10} [${sl}] ${e11} ${neg} ${e12} ${@a[1]} ${@a[3]}");
+    i64 v = a[2];
+}
+"##,
+        &[],
+    );
+    assert_eq!(
+        r.stdout,
+        "0 34 11 0 33 0 34 0 34 0 22 0 34 25 0\n99 0 5 34 [] 34 0 34 0 34\n"
+    );
+    assert_eq!(
+        r.stderr,
+        "prog.zn:32: index 2 is out of range for length 2\n"
+    );
+    assert_eq!(r.code, 1);
 }

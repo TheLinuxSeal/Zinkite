@@ -59,11 +59,12 @@ u8 main(string[.] args) {
     cli.flag('i', "integers", "read integers, and count each value");
     cli.option(0, "top", "N", "with -i, print the N most common values (10)");
     cli.positional("file", "input file; stdin when left out");
-    cli.parseOrExit(args);
+    u8 code @stop = cli.parseOrStop(args);
+    if (stop) { return code; }
 
     bool integers = cli.has("integers");
     i64 top @badTop = cli.getI64("top", 10);
-    if (badTop || top < 0) { cli.usageError("--top takes a number from 0"); }
+    if (badTop || top < 0) { return cli.usageError("--top takes a number from 0"); }
 
     u8[..>] text = [];
     string file = cli.get("file", "");

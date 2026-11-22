@@ -162,8 +162,6 @@ pub fn global(name: &str) -> Vec<Sig> {
         "print" | "println" | "errprint" | "errprintln" => {
             vec![Sig::new(name, vec![s()], Ty::Void)]
         }
-        "exit" => vec![Sig::new(name, vec![Ty::u8()], Ty::Void)],
-        "fail" => vec![Sig::new(name, vec![s()], Ty::Void)],
         "min" | "max" => vec![Sig::new(name, vec![t(), t()], t()).generic(vec![tp("#T", Ordered)])],
         // INVALID, and 0, when lo > hi.
         "clamp" => vec![
@@ -174,11 +172,6 @@ pub fn global(name: &str) -> Vec<Sig> {
         "abs" => vec![Sig::new(name, vec![t()], t()).generic(vec![tp("#T", Number)])],
         _ => Vec::new(),
     }
-}
-
-/// The functions that never return (STDLIB §2.2).
-pub fn never_returns(name: &str) -> bool {
-    name == "exit" || name == "fail"
 }
 
 pub fn status_fn(name: &str) -> Vec<Sig> {
@@ -730,4 +723,71 @@ pub fn slice_receiver(name: &str, first_param_is_string: bool) -> bool {
             | "splitBy"
             | "codePoints"
     ) || (name == "contains" && first_param_is_string)
+}
+
+/// The named status codes (DESIGN §7.7, STDLIB §1.4), with their `errno` aliases; the
+/// runtime's `zr_status_name` is the same list.
+pub fn status_code(name: &str) -> Option<u8> {
+    Some(match name {
+        "OK" => 0,
+        "FAILED" => 1,
+        "NOT_FOUND" | "ENOENT" => 2,
+        "INTERRUPTED" | "EINTR" => 4,
+        "IO" | "EIO" => 5,
+        "BAD_HANDLE" | "EBADF" => 9,
+        "AGAIN" | "EAGAIN" => 11,
+        "NO_MEMORY" | "ENOMEM" => 12,
+        "PERMISSION" | "EACCES" => 13,
+        "BUSY" | "EBUSY" => 16,
+        "EXISTS" | "EEXIST" => 17,
+        "CROSS_DEVICE" | "EXDEV" => 18,
+        "NOT_DIRECTORY" | "ENOTDIR" => 20,
+        "IS_DIRECTORY" | "EISDIR" => 21,
+        "INVALID" | "EINVAL" => 22,
+        "NOT_TERMINAL" | "ENOTTY" => 25,
+        "NO_SPACE" | "ENOSPC" => 28,
+        "BROKEN_PIPE" | "EPIPE" => 32,
+        "DOMAIN" | "EDOM" => 33,
+        "RANGE" | "ERANGE" => 34,
+        "NAME_TOO_LONG" | "ENAMETOOLONG" => 36,
+        "NOT_EMPTY" | "ENOTEMPTY" => 39,
+        "LOOP" | "ELOOP" => 40,
+        "UNSUPPORTED" | "EOPNOTSUPP" => 95,
+        "TIMEOUT" | "ETIMEDOUT" => 110,
+        "EMPTY" => 192,
+        "FULL" => 193,
+        "END" => 194,
+        "MISSING" => 195,
+        "POSITION" => 196,
+        "TYPE" => 197,
+        "GPU" => 198,
+        "OUT_OF_DATE" => 199,
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    /// The runtime names each code as the compiler does, for the message when nothing
+    /// reads a failure.
+    #[test]
+    fn the_runtime_names_statuses_as_the_compiler_does() {
+        let rt = include_str!("../runtime/zink_rt.h");
+        let start = rt
+            .find("static const char *zr_status_name(uint8_t s) {")
+            .unwrap();
+        let body = &rt[start..start + rt[start..].find("\n}\n").unwrap()];
+        let mut n = 0;
+        for line in body.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("case ") else {
+                continue;
+            };
+            let (code, name) = rest.split_once(": return \"").unwrap();
+            let name = name.trim_end_matches("\";");
+            assert_eq!(super::status_code(name), code.parse().ok(), "{}", name);
+            n += 1;
+        }
+        assert_eq!(n, 33);
+    }
 }

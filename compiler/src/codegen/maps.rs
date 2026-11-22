@@ -162,7 +162,7 @@ static ZR_UNUSED uint8_t zmd{n}(zr_map *m, {K} key, uint64_t h) {{
             eh = eh,
             same = same,
             set_h = set_h,
-            missing = status_code("MISSING"),
+            missing = crate::builtins::status_code("MISSING").unwrap_or(195),
         );
         self.maps.insert(id, ops.clone());
         Some(ops)
@@ -218,7 +218,7 @@ static ZR_UNUSED uint8_t zmd{n}(zr_map *m, {K} key, uint64_t h) {{
             a
         );
         let add = format!("{}({}, _k, _h)", ops.add, a);
-        let missing = status_code("MISSING");
+        let missing = crate::builtins::status_code("MISSING").unwrap_or(195);
         let val = ops.val.clone().unwrap_or(Ty::Void);
         match m {
             "put" => out(

@@ -19,15 +19,16 @@ u8 main(string[.] args) {
     cli.flag(0, "header", "keep the first line where it is");
     cli.option(0, "top", "N", "print only the first N lines");
     cli.positional("file", "input file; stdin when left out");
-    cli.parseOrExit(args);
+    u8 code @stop = cli.parseOrStop(args);
+    if (stop) { return code; }
 
     bool numeric = cli.has("numeric");
     bool natural = cli.has("natural");
     bool reverse = cli.has("reverse");
     bool unique = cli.has("unique");
-    if (numeric && natural) { cli.usageError("-n and -V can't be combined"); }
+    if (numeric && natural) { return cli.usageError("-n and -V can't be combined"); }
     i64 top @badTop = cli.getI64("top", i64.MAX);
-    if (badTop || top < 0) { cli.usageError("--top takes a number from 0"); }
+    if (badTop || top < 0) { return cli.usageError("--top takes a number from 0"); }
 
     u8[..>] text = [];                          // the whole input; it only grows, so views into it stay valid
     string file = cli.get("file", "");

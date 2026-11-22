@@ -79,6 +79,26 @@ static ZR_NORETURN ZR_UNUSED void zr_fail(const char *file, int line, const char
     exit(1);
 }
 
+/* Where the last function to fail returned its status (DESIGN §7.6). */
+static const char *zr_at_file;
+static int zr_at_line;
+
+static ZR_UNUSED void zr_set_at(const char *file, int line) {
+    zr_at_file = file;
+    zr_at_line = line;
+}
+
+static const char *zr_status_name(uint8_t s);
+
+/* A call failed and nothing read its status: the program stops, at the call. `own` says
+ * the call was to a function of the program's, which recorded where it returned it. */
+static ZR_NORETURN ZR_UNUSED void zr_unread(const char *file, int line, uint8_t st, const char *what, int own) {
+    zr_flush();
+    fprintf(stderr, "%s:%d: `%s` failed with %s, and nothing read its status\n", file, line, what, zr_status_name(st));
+    if (own && zr_at_file) fprintf(stderr, "    `%s` returned it at %s:%d\n", what, zr_at_file, zr_at_line);
+    exit(1);
+}
+
 static ZR_NORETURN ZR_UNUSED void zr_fail_text(const char *file, int line, zr_slice msg) {
     zr_flush();
     fprintf(stderr, "%s:%d: %.*s\n", file, line, (int)msg.n, (const char *)msg.p);
@@ -791,13 +811,15 @@ static ZR_UNUSED zr_pair zr_split_first(zr_slice s, zr_slice sep, int last) {
 
 /* ------------------------------------------------------------ numbers (DESIGN §9, STDLIB §2.4) */
 
-#define ZR_ADD(T, a, b, f, l) ({ T _r; if (__builtin_add_overflow((T)(a), (T)(b), &_r)) zr_fail(f, l, "integer overflow"); _r; })
-#define ZR_SUB(T, a, b, f, l) ({ T _r; if (__builtin_sub_overflow((T)(a), (T)(b), &_r)) zr_fail(f, l, "integer overflow"); _r; })
-#define ZR_MUL(T, a, b, f, l) ({ T _r; if (__builtin_mul_overflow((T)(a), (T)(b), &_r)) zr_fail(f, l, "integer overflow"); _r; })
-#define ZR_NEG(T, a, f, l) ({ T _r; if (__builtin_sub_overflow((T)0, (T)(a), &_r)) zr_fail(f, l, "integer overflow"); _r; })
-#define ZR_DIV(T, a, b, f, l) ({ T _a = (a), _b = (b), _t; if (_b == 0) zr_fail(f, l, "division by zero"); \
-    if ((T)-1 < 0 && _b == (T)-1 && __builtin_mul_overflow(_a, _b, &_t)) zr_fail(f, l, "integer overflow"); (T)(_a / _b); })
-#define ZR_REM(T, a, b, f, l) ({ T _a = (a), _b = (b); if (_b == 0) zr_fail(f, l, "division by zero"); \
+/* Checked arithmetic (DESIGN §9.2). On overflow or division by zero each runs `fail`, which
+ * stops the program, or inside `@` sets the status and jumps to where it's read (§7.6). */
+#define ZR_ADD(T, a, b, fail) ({ T _r; if (__builtin_add_overflow((T)(a), (T)(b), &_r)) { fail; } _r; })
+#define ZR_SUB(T, a, b, fail) ({ T _r; if (__builtin_sub_overflow((T)(a), (T)(b), &_r)) { fail; } _r; })
+#define ZR_MUL(T, a, b, fail) ({ T _r; if (__builtin_mul_overflow((T)(a), (T)(b), &_r)) { fail; } _r; })
+#define ZR_NEG(T, a, fail) ({ T _r; if (__builtin_sub_overflow((T)0, (T)(a), &_r)) { fail; } _r; })
+#define ZR_DIV(T, a, b, zero, over) ({ T _a = (a), _b = (b), _t; if (_b == 0) { zero; } \
+    if ((T)-1 < 0 && _b == (T)-1 && __builtin_mul_overflow(_a, _b, &_t)) { over; } (T)(_a / _b); })
+#define ZR_REM(T, a, b, zero) ({ T _a = (a), _b = (b); if (_b == 0) { zero; } \
     ((T)-1 < 0 && _b == (T)-1) ? (T)0 : (T)(_a % _b); })
 
 /* Saturating arithmetic (DESIGN §9.2): an overflow gives the nearest bound. */
@@ -813,33 +835,31 @@ static ZR_UNUSED zr_pair zr_split_first(zr_slice s, zr_slice sep, int last) {
 static ZR_UNUSED int zr_cmp_su(int64_t a, uint64_t b) { return a < 0 ? -1 : (uint64_t)a < b ? -1 : (uint64_t)a > b ? 1 : 0; }
 static ZR_UNUSED int zr_cmp_su128(zr_i128 a, zr_u128 b) { return a < 0 ? -1 : (zr_u128)a < b ? -1 : (zr_u128)a > b ? 1 : 0; }
 
-/* A checked index: out of range stops the program (DESIGN §4.10). */
-static ZR_UNUSED int64_t zr_ix(int64_t i, int64_t n, const char *f, int l) {
-    if (i < 0 || i >= n) {
-        char msg[96];
-        snprintf(msg, sizeof msg, "index %lld is out of range for length %lld", (long long)i, (long long)n);
-        zr_fail(f, l, msg);
-    }
-    return i;
+/* Checked indexes (DESIGN §4.10): out of range runs `fail`, as the arithmetic does. */
+#define ZR_IX(i, n, fail) ({ int64_t _zxi = (i), _zxn = (n); if (_zxi < 0 || _zxi >= _zxn) { fail; } _zxi; })
+#define ZR_IX_WRAP(i, n, fail) ({ int64_t _zxi = (i), _zxn = (n); if (_zxn == 0) { fail; } \
+    int64_t _zxr = _zxi % _zxn; _zxr < 0 ? _zxr + _zxn : _zxr; })
+#define ZR_IX_CLAMP(i, n, fail) ({ int64_t _zxi = (i), _zxn = (n); if (_zxn == 0) { fail; } \
+    _zxi < 0 ? 0 : _zxi >= _zxn ? _zxn - 1 : _zxi; })
+
+static ZR_NORETURN ZR_UNUSED void zr_ix_fail(const char *f, int l, int64_t i, int64_t n) {
+    char msg[96];
+    snprintf(msg, sizeof msg, "index %lld is out of range for length %lld", (long long)i, (long long)n);
+    zr_fail(f, l, msg);
 }
 
-static ZR_UNUSED int64_t zr_ix_wrap(int64_t i, int64_t n, const char *f, int l) {
-    if (n == 0) zr_fail(f, l, "index into an empty array");
-    int64_t r = i % n;
-    return r < 0 ? r + n : r;
+static ZR_NORETURN ZR_UNUSED void zr_range_fail(const char *f, int l, int64_t i, int64_t j, int64_t n) {
+    char msg[96];
+    snprintf(msg, sizeof msg, "slice %lld:%lld is out of range for length %lld", (long long)i, (long long)j, (long long)n);
+    zr_fail(f, l, msg);
 }
 
-static ZR_UNUSED int64_t zr_ix_clamp(int64_t i, int64_t n, const char *f, int l) {
-    if (n == 0) zr_fail(f, l, "index into an empty array");
-    return i < 0 ? 0 : i >= n ? n - 1 : i;
-}
-
-static ZR_UNUSED void zr_range(int64_t i, int64_t j, int64_t n, const char *f, int l) {
-    if (i < 0 || j > n || i > j) {
-        char msg[96];
-        snprintf(msg, sizeof msg, "slice %lld:%lld is out of range for length %lld", (long long)i, (long long)j, (long long)n);
-        zr_fail(f, l, msg);
-    }
+/* What a reference caught by `@` refers to when the expression failed: a zero value of its
+ * type, of its own, since there is no element (DESIGN §7.5). */
+static ZR_UNUSED void *zr_zero_ref(size_t n) {
+    void *p = calloc(1, n ? n : 1);
+    if (!p) zr_fail("zink runtime", 0, "out of memory for a zero value");
+    return p;
 }
 
 /* Parsing: a sign, then digits; INVALID or RANGE on failure (STDLIB §2.4). */
@@ -1412,8 +1432,10 @@ static ZR_UNUSED uint32_t zr_pool_take(zr_pool *p, size_t sz) {
 
 /* 0 when the handle's value is still there, MISSING once it was freed. A handle to a slot
  * the pool never had is from another pool, or a failed call's zero value: a bug. */
-static ZR_UNUSED uint8_t zr_pool_check(zr_pool *p, zr_handle h, size_t sz, const char *f, int l) {
-    if ((int64_t)h.i >= p->v.n) zr_fail(f, l, "this handle isn't from this pool");
+/* MISSING for a slot freed since, INVALID for one the pool never had: the handle is from
+ * another pool, or is the zero value a failed call gave. */
+static ZR_UNUSED uint8_t zr_pool_check(zr_pool *p, zr_handle h, size_t sz) {
+    if ((int64_t)h.i >= p->v.n) return 22;
     return zr_pool_slot(p, h.i, sz)[0] == h.g ? 0 : 195;
 }
 
@@ -2438,6 +2460,47 @@ static ZR_UNUSED int zr_finish(int status) {
 static ZR_NORETURN ZR_UNUSED void zr_exit(uint8_t status) { exit(zr_finish(status)); }
 
 static const char *zr_status_names[256];
+
+/* The names of DESIGN §7.7 and STDLIB §1.4; codegen::STATUS_NAMES is the same list. */
+static const char *zr_status_name(uint8_t s) {
+    static char buf[8];
+    switch (s) {
+        case 0: return "OK";
+        case 1: return "FAILED";
+        case 2: return "NOT_FOUND";
+        case 4: return "INTERRUPTED";
+        case 5: return "IO";
+        case 9: return "BAD_HANDLE";
+        case 11: return "AGAIN";
+        case 12: return "NO_MEMORY";
+        case 13: return "PERMISSION";
+        case 16: return "BUSY";
+        case 17: return "EXISTS";
+        case 18: return "CROSS_DEVICE";
+        case 20: return "NOT_DIRECTORY";
+        case 21: return "IS_DIRECTORY";
+        case 22: return "INVALID";
+        case 25: return "NOT_TERMINAL";
+        case 28: return "NO_SPACE";
+        case 32: return "BROKEN_PIPE";
+        case 33: return "DOMAIN";
+        case 34: return "RANGE";
+        case 36: return "NAME_TOO_LONG";
+        case 39: return "NOT_EMPTY";
+        case 40: return "LOOP";
+        case 95: return "UNSUPPORTED";
+        case 110: return "TIMEOUT";
+        case 192: return "EMPTY";
+        case 193: return "FULL";
+        case 194: return "END";
+        case 195: return "MISSING";
+        case 196: return "POSITION";
+        case 197: return "TYPE";
+        case 198: return "GPU";
+        case 199: return "OUT_OF_DATE";
+        default: snprintf(buf, sizeof buf, "%d", s); return buf;
+    }
+}
 
 static ZR_UNUSED zr_slice zr_status_message(uint8_t s) {
     static char buf[32];

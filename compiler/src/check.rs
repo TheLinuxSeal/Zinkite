@@ -91,6 +91,9 @@ pub struct Facts {
     pub capturing: HashSet<(u32, u32)>,
     /// Assignments `r = x` that bind a reference not yet bound, rather than write through it.
     pub binds: HashSet<(u32, u32)>,
+    /// Calls, insertions and removals that can fail whose status nothing reads, by span,
+    /// with the name to report: a nonzero status there stops the program (DESIGN §7.6).
+    pub unchecked: HashMap<(u32, u32), String>,
 }
 
 pub enum NameRes {
@@ -245,10 +248,7 @@ struct Checker<'p, 'a> {
 }
 
 fn is_status_const(name: &str) -> bool {
-    name.starts_with(|c: char| c.is_ascii_uppercase())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    builtins::status_code(name).is_some()
 }
 
 fn starts_upper(name: &str) -> bool {
@@ -1665,9 +1665,6 @@ impl<'p, 'a> Checker<'p, 'a> {
                 "this expression's value isn't used, so the statement does nothing",
             );
         }
-        if never_returns(e) {
-            self.flow = Flow::unreachable();
-        }
     }
 
     fn local_decl(&mut self, d: &ast::LocalDecl) {
@@ -2201,9 +2198,6 @@ impl<'p, 'a> Checker<'p, 'a> {
                 let (t, span) = match &rule.body {
                     SwitchBody::Expr(x) => {
                         let t = self.expr(x, want);
-                        if never_returns(x) {
-                            self.flow = Flow::unreachable();
-                        }
                         (t, x.span)
                     }
                     SwitchBody::Block(b) => {
@@ -2504,8 +2498,19 @@ impl<'p, 'a> Checker<'p, 'a> {
             }
             E::Unary { op, expr } => self.unary(*op, expr, want),
             E::StatusRead(x) => {
-                if !is_status_source(x) {
-                    self.err_help(x.span, "`@` reads the status of a call or an array operator", "for an operator expression, put it in parentheses: `@(a +> x)` (DESIGN §7.3)");
+                // Anything that can fail can be read (DESIGN §7.6); a name or a literal can't.
+                if matches!(
+                    strip_parens(x).kind,
+                    E::Ident(_)
+                        | E::Int { .. }
+                        | E::Float { .. }
+                        | E::Str(_)
+                        | E::Char(_)
+                        | E::Bool(_)
+                        | E::Null
+                        | E::This
+                ) {
+                    self.err_help(x.span, "`@` reads the status of something that can fail, and this can't", "for an operator expression, put it in parentheses: `@(a / b)` (DESIGN §7.3)");
                 }
                 self.expr_c(x, None, true);
                 Ty::u8()
@@ -2625,7 +2630,7 @@ impl<'p, 'a> Checker<'p, 'a> {
 
     /// A value inside `${...}` (DESIGN §4.11, §4.13).
     fn interp(&mut self, x: &Expr) {
-        let t = self.expr_c(x, None, true);
+        let t = self.expr_c(x, None, false);
         match t.unref() {
             Ty::Class(..) => self.err_help(
                 x.span,
@@ -4181,14 +4186,14 @@ impl<'p, 'a> Checker<'p, 'a> {
 
     // ------------------------------------------------------------ calls
 
+    /// A status nothing reads stops the program when it's nonzero (DESIGN §7.6), so the
+    /// call is recorded for code generation to check.
     fn note_status(&mut self, can_fail: Option<bool>, consumed: bool, span: Span, name: &str) {
         self.last_can_fail = can_fail;
         if can_fail == Some(true) && !consumed {
-            self.warn_help(
-                span,
-                format!("the status of `{}` can be nonzero, and it is dropped", name),
-                "capture it with `x @err = ...`, or discard it on purpose with `@_ = ...` (DESIGN §7.3)",
-            );
+            self.facts.unchecked.insert(key(span), name.to_string());
+        } else {
+            self.facts.unchecked.remove(&key(span));
         }
     }
 
@@ -4355,8 +4360,22 @@ impl<'p, 'a> Checker<'p, 'a> {
             return self.resolve_call(name, vec![sig], None, args, span, consumed);
         }
         self.type_args(args);
-        if !self.unmodelled() {
-            self.err(name_span, format!("unknown function `{}`", name));
+        // Only main returning ends a program (DESIGN §7.6).
+        match name {
+            "fail" => self.err_help(
+                name_span,
+                "there is no `fail`: a function fails by returning a status, and a caller that doesn't read it stops there",
+                "return one, as `return #status.FAILED x;` (DESIGN §7.6)",
+            ),
+            "exit" => self.err_help(
+                name_span,
+                "there is no `exit`: only returning from `main` ends the program",
+                "return a status to the caller, and from `main` the exit status (DESIGN §7.6)",
+            ),
+            _ if !self.unmodelled() => {
+                self.err(name_span, format!("unknown function `{}`", name));
+            }
+            _ => {}
         }
         Ty::Unknown
     }
@@ -6089,13 +6108,6 @@ fn is_true(e: &Expr) -> bool {
     }
 }
 
-fn never_returns(e: &Expr) -> bool {
-    match &e.kind {
-        E::Call { callee, .. } => matches!(&callee.kind, E::Ident(n) if builtins::never_returns(n)),
-        _ => false,
-    }
-}
-
 /// Whether running the statements can reach their end.
 fn completes_all(ss: &[Stmt]) -> bool {
     ss.iter().all(completes)
@@ -6114,11 +6126,10 @@ fn completes(s: &Stmt) -> bool {
             let has_default = sw.rules.iter().any(|r| r.labels.is_none());
             !has_default
                 || sw.rules.iter().any(|r| match &r.body {
-                    SwitchBody::Expr(x) => !never_returns(x),
+                    SwitchBody::Expr(_) => true,
                     SwitchBody::Block(b) => completes_all(&b.stmts),
                 })
         }
-        S::Expr(e) => !never_returns(e),
         S::If_(b) => completes_all(active(b)),
         _ => true,
     }
@@ -6313,5 +6324,12 @@ fn rebound_in_expr(e: &Expr, out: &mut Vec<String>) {
     }
     for c in expr_children(e) {
         rebound_in_expr(c, out);
+    }
+}
+
+fn strip_parens(e: &Expr) -> &Expr {
+    match &e.kind {
+        E::Paren(x) => strip_parens(x),
+        _ => e,
     }
 }

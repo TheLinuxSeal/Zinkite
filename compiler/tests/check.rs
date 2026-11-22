@@ -342,7 +342,8 @@ fn missing_returns() {
     ok("i64 f() { while (true) { } }\n");
     ok("i64 f(i64 n) { for (;;) { if (n > 0) { return n; } } }\n");
     rejects("i64 f() { while (true) { break; } }\n", "can reach its end");
-    ok("i64 f() { fail(\"never\"); }\n");
+    rejects("i64 f() { fail(\"never\"); }\n", "there is no `fail`");
+    rejects("void f() { exit(2); }\n", "there is no `exit`");
     ok("i64 f(i64 n) { switch (n) { case 0 => { return 1; } default => { return 2; } } }\n");
     rejects("void f() { return 1; }\n", "returns nothing");
     rejects("i64 f() { return; }\n", "needs a value");
@@ -822,32 +823,34 @@ fn status_writes() {
     rejects("void main() { return #1; }\n", "`main` can't set a status");
     rejects(
         &body("i64 x = 0; u8 e = @x;"),
-        "`@` reads the status of a call",
+        "`@` reads the status of something that can fail",
     );
+    // Anything that can fail can be read: an index, arithmetic, a cast (DESIGN §7.6).
+    ok(&body(
+        "i64[..>] a = []; i64 n = 2; u8 e = @a[0]; u8 f = @(a.len / n); u8 g = @((u8) n); i64 x @h = a[1] + 1;",
+    ));
+    rejects(
+        "void f() { return #status.EWHATEVER; }\n",
+        "isn't a status code",
+    );
+    ok("void f() { return #status.DOMAIN; }\n");
 }
 
 #[test]
-fn dropped_statuses_warn() {
-    warns(
-        &body("i64[..~] a = []; i64 x = a.pop();"),
-        "the status of `pop` can be nonzero, and it is dropped",
-    );
-    warns(&body("i64[..~] a = []; a ->;"), "the status of `->`");
-    warns(
-        "i64 f() { return #1 0; }\nvoid main() { i64 x = f(); }\n",
-        "the status of `f`",
-    );
-    warns(&body("i64 n = i64.parse(\"1\");"), "the status of `parse`");
+fn unread_statuses_draw_no_warning() {
+    // A status nothing reads stops the program when it's nonzero (DESIGN §7.6), so
+    // leaving it unread is no mistake, and draws no warning.
+    ok(&body("i64[..~] a = []; i64 x = a.pop();"));
+    ok(&body("i64[..~] a = []; a ->;"));
+    ok("i64 f() { return #1 0; }\nvoid main() { i64 x = f(); }\n");
+    ok(&body("i64 n = i64.parse(\"1\");"));
     ok(&body(
         "i64[..~] a = []; i64 x @e = a.pop(); i64 y @_ = a.pop(); @_ = a.pop(); u8 s = @a.pop(); if (@a.pop()) { } x @e = a.pop();",
     ));
     ok(&body(
         "i64[..>] a = []; a.push(1); u8[..>] t = []; t.append(\"x\");",
     ));
-    warns(
-        &body("i64[..>16] a = []; a.push(1);"),
-        "the status of `push`",
-    );
+    ok(&body("i64[..>16] a = []; a.push(1);"));
     rejects(
         &body("i64 n @e = i64.parse(\"1\"); @nope = i64.parse(\"2\");"),
         "`nope` isn't declared",
@@ -1320,11 +1323,13 @@ fn locals_are_assigned_before_they_are_read() {
 }
 
 #[test]
-fn exits_end_a_path() {
+fn returns_end_a_path() {
     ok("void f(bool c) { i64 x; if (c) { return; } else { x = 1; } println(\"${x}\"); }\n");
-    ok("void f(bool c) { i64 x; if (c) { x = 1; } else { fail(\"no\"); } println(\"${x}\"); }\n");
     ok(
-        "void f(i64 n) { i64 x; switch (n) { case 0 => x = 1; default => fail(\"no\"); } println(\"${x}\"); }\n",
+        "void f(bool c) { i64 x; if (c) { x = 1; } else { return #status.INVALID; } println(\"${x}\"); }\n",
+    );
+    ok(
+        "void f(i64 n) { i64 x; switch (n) { case 0 => x = 1; default => { return; } } println(\"${x}\"); }\n",
     );
 }
 

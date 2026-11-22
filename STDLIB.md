@@ -11,7 +11,7 @@
 
 | Package | Contents | Tier | § |
 |---|---|---|---|
-| `zink.lang` | imported automatically: output and streams, `status`, `exit`, `fail`, `env`, number parsing and helpers, text methods, array methods, `hashmap`, `hashset`, `pool`, `Handle`, `Iterator` | v1 | 2, 3, 7 |
+| `zink.lang` | imported automatically: output and streams, `status`, `env`, number parsing and helpers, text methods, array methods, `hashmap`, `hashset`, `pool`, `Handle`, `Iterator` | v1 | 2, 3, 7 |
 | `zink.io` | `File`, `Dir`, `fs`, `path` | v1 | 4 |
 | `zink.os` | `process`, `Command`, `term` | v1 | 5.1–5.2 |
 | `zink.time` | `time`, `Duration`, `Instant`, `Timestamp`, `DateTime` | v1 | 5.3 |
@@ -65,12 +65,12 @@ These follow from the memory model and the status code. Every section below keep
    - Operating-system errors pass through as their `errno` number.
    - Each signature lists the codes worth handling. A call that wraps a system call can also fail with any other `errno` the kernel returns.
    - The value on failure is the zero value (DESIGN §7.5). The `...Or(fallback)` functions are the one documented exception, as `getOr` already is (DESIGN §4.10).
-7. **A function that can't fail sets no status**, so calling it never draws the dropped-status warning (DESIGN §7.3). Writers set none per call and report once, at `finish()` (§9.7).
-8. **An argument value a function can't take fails with `INVALID`**, and the value is the zero value. The caller checks the status, and the dropped-status warning (DESIGN §7.3) is the reminder.
-   - Examples: `rng.range(5, 1)`, `clamp(x, 10, 1)`, `"ab".repeat(-1)`, `xs.chunks(0)`, `s.find(x, 99)` on shorter text, `hash.shake_128(b, -1)`.
-   - **Misuse of an object's state or of the program's own structure is still a bug**, and stops the program: `w.key("a")` outside an object, declaring a 65th option, asking `Args` for an option never declared.
-   - **Indexes are the language's** (DESIGN §7.6): `a[i]` out of range stops the program, and so does `selectNth(k)`, whose result is a reference with nothing to refer to.
-   - Expected failures, such as a missing file or bad input, are statuses too, with their own codes.
+7. **A function that can't fail sets no status**, so calling it never needs a check. Writers set none per call and report once, at `finish()` (§9.7).
+8. **Nothing in the library stops the program.** Every failure is a status, and a caller that doesn't read it stops there, at its own line (DESIGN §7.6).
+   - **An argument value a function can't take fails with `INVALID`**, and the value is the zero value: `rng.range(5, 1)`, `clamp(x, 10, 1)`, `"ab".repeat(-1)`, `xs.chunks(0)`, `s.find(x, 99)` on shorter text, `hash.shake_128(b, -1)`.
+   - **So does misuse of an object's state or of the program's own setup**: `w.key("a")` outside an object, asking `Args` for an option never declared, or a pool handle from another pool. Declaring a 65th option fails with `FULL`.
+   - **A call with arguments that can't fail needs nothing written**: `rng.range(1, 7)` never fails, so it never stops anything, and it needs no `@`.
+   - Expected failures, such as a missing file or bad input, have their own codes.
 9. **Lambdas are compile-time values** (DESIGN §9.3), so `filter`, `sortBy` and `retain` compile to the loop you would write by hand.
 10. **Parsers report where input went wrong.** A status can't carry a line number, so each parser and reader keeps a `ParseError` with the line, the column and a message, to read after a failure (§9.2).
 11. **Library objects that write into a caller's buffer hold a reference to it**: `JsonWriter`, `CsvWriter`, `TreeBuilder`, `Walker`. The reference is to the array itself, not into its elements, so it may be a field (REFERENCES §7.1).
@@ -83,6 +83,7 @@ DESIGN §7.7 lists them too.
 |---|---|---|---|---|
 | `CROSS_DEVICE` | 18 | `EXDEV` | Invalid cross-device link | `fs.rename` across file systems (`fs.move` copies instead) |
 | `NOT_TERMINAL` | 25 | `ENOTTY` | Inappropriate ioctl for device | `term.size()` when stdout isn't a terminal |
+| `DOMAIN` | 33 | `EDOM` | Numerical argument out of domain | a division by zero, read with `@` (DESIGN §7.6) |
 | `NAME_TOO_LONG` | 36 | `ENAMETOOLONG` | File name too long | a path past the system's limit; `fs.walk` deeper than 256 levels |
 | `NOT_EMPTY` | 39 | `ENOTEMPTY` | Directory not empty | `fs.remove` on a directory that has entries |
 | `LOOP` | 40 | `ELOOP` | Too many levels of symbolic links | `fs.walk` with `followLinks` coming back to a directory it is in |
@@ -120,20 +121,15 @@ void errprintln(string text)
   - `stdout.flush()` writes whatever is pending;
   - everything is flushed at exit (DESIGN §6.4).
 
-### 2.2 Status, exit and failure
+### 2.2 Status
 
 ```
 string status.message(u8 code)   // "No such file or directory"; "Error 230" for a program's own codes
 string status.name(u8 code)      // "NOT_FOUND"; the C name ("ESRCH") for errno codes without a readable one; "" for 224–255
-void exit(u8 code)               // DESIGN §8.6: files flushed and closed, defers don't run
-void fail(string message)        // stops the program as a bug does
 ```
 
-- **Named codes** are constants on `status`: `status.OK`, `status.FAILED`, `status.NOT_FOUND`, … (DESIGN §7.7, and §1.4 here).
-- **`fail` is for states the program believes impossible**, such as `fail("unreachable: kind ${k}")`.
-  - It prints the message and the source location on stderr, flushes and closes files, and exits with 1, exactly like an index out of range (DESIGN §7.6).
-  - Nothing can catch it.
-- **The compiler knows that `exit` and `fail` never return**, so nothing is needed after them: no `return`, and no value for a function's result.
+- **Named codes** are constants on `status`: `status.OK`, `status.FAILED`, `status.NOT_FOUND`, … (DESIGN §7.7, and §1.4 here). A name that isn't one is a compile error.
+- **There is no `exit` and no `fail`** (DESIGN §7.6). A state the program believes impossible fails like anything else, `return #status.FAILED x;`, and a caller that doesn't read that stops the program at its line. Only returning from `main` ends a program (DESIGN §8.6).
 
 ### 2.3 Environment: `env`
 
@@ -573,11 +569,12 @@ cli.flag('n', "numeric", "compare the column as numbers");
 cli.flag('r', "reverse", "sort in descending order");
 cli.option('k', "column", "N", "sort by column N, counting from 1");
 cli.positional("file", "input file; stdin when left out");
-cli.parseOrExit(args);
+u8 code @stop = cli.parseOrStop(args);
+if (stop) { return code; }
 
 bool numeric = cli.has("numeric");
 i64 column @bad = cli.getI64("column", 1);
-if (bad || column < 1) { cli.usageError("--column takes a number from 1"); }
+if (bad || column < 1) { return cli.usageError("--column takes a number from 1"); }
 string file = cli.get("file", "");
 ```
 
@@ -594,7 +591,7 @@ Sort CSV rows by one column.
   file              input file; stdin when left out
 ```
 
-Declaring:
+Declaring, each failing with `FULL` past 64 options:
 ```
 void cli.flag(u8 letter, string name, string help)                // letter 0 for none
 void cli.option(u8 letter, string name, string meta, string help)
@@ -606,8 +603,8 @@ cli.version = "1.2.0";                                            // adds --vers
 Parsing:
 ```
 void cli.parse(string[:] args)         // INVALID; cli.error() says what was wrong
-void cli.parseOrExit(string[:] args)   // --help and --version print and exit 0; a usage error exits 2
-void cli.usageError(string message)    // prints "csvsort: message" and the usage line, then exits 2
+u8 cli.parseOrStop(string[:] args)     // for main: see below
+u8 cli.usageError(string message)      // prints "csvsort: message" and the usage line; gives 2
 ```
 
 Reading:
@@ -625,11 +622,12 @@ ArgIterator cli.restValues()
   - flags alone or combined (`-n`, `-nr`);
   - values after a space, attached, or after `=` (`-k 3`, `-k3`, `--column 3`, `--column=3`);
   - `--`, which ends the options.
-- **Usage errors**: an unknown option, a missing value, or an extra argument. Exit status 2 for them follows getopt-based tools and Python's argparse.
+- **`parseOrStop` is for `main`**, which is the only place a program can end (DESIGN §7.6). After `--help` or `--version` it prints what was asked for and fails with `END`; after a usage error it prints the error and the usage line and fails with `INVALID`. Either way, its value is the exit status `main` should return: 0, or 2.
+- **Usage errors**: an unknown option, a missing value, or an extra argument. Exit status 2 for them follows getopt-based tools and Python's argparse. `return cli.usageError("...");` gives the same for a value the program itself rejects.
 - **The fallback is used only when the option is absent.** A value that doesn't parse gives the zero value with `INVALID`.
 - **Values are views into `args`**, so nothing is copied, and `cli` can't outlive `args`.
-- **Storage**: declared options sit in a capped table inside `Args`, so a 65th option is a bug. The values found go in its one growable field.
-- **Options are looked up by their long name.** Asking for one that was never declared is a bug, which catches a typo the first time that line runs.
+- **Storage**: declared options sit in a capped table inside `Args`, so a 65th option fails with `FULL`. The values found go in its one growable field.
+- **Options are looked up by their long name.** Asking for one that was never declared fails with `INVALID`, which stops the program at that line the first time it runs, so a typo shows at once.
 - **Subcommands** (`tool add …`) are later. Until then, switch on the first positional and give the rest (`restValues()`) to a second `Args`.
 
 ### 6.2 Colors: `ansi`
@@ -836,7 +834,7 @@ for (Conn& c : conns) { ... }            // live slots only
   - On failure, `get` still returns a reference to the slot, which is safe because a pool slot always holds a `T` (REFERENCES §5.4).
 - **`T&` references into a pool are exempt from rule R** (REFERENCES §5.4), and may be stored in fields (REFERENCES §7.4). A stale one reads the replacement: a logic bug, never memory corruption.
 - **Layout**: one grow-only array of slots, each with an 8-byte header that holds its generation and, while the slot is free, the next free slot. An element with 8-byte alignment, as most are, would pad a 4-byte header to 8 anyway. A slot's generation is odd while it holds a value and even once freed.
-- **A handle to a slot the pool never had is a bug**, which stops the program: it comes from another pool, or is the zero value a failed call gave.
+- **A handle to a slot the pool never had fails with `INVALID`**: it comes from another pool, or is the zero value a failed call gave. `get` then gives a reference to a zero value of its own.
 - **A for-each visits the live slots in slot order.** Slots added during the loop aren't visited; one freed before the loop reaches it is skipped.
 - **Built in** like `hashmap`, so it is created with `[]` and is a built-in type name.
 
@@ -1275,7 +1273,7 @@ interface DataWriter {
 - **`write` is overloaded** (DESIGN §6.5): `w.write(80)` writes an `i64`, a `u32` goes to `write(u64)`, and an `f32` to `write(f64)`.
 - **Numbers keep their text through a copy.** `writeNumber(e.text)` and `write(Value)` write a number exactly as the input spelled it, so `12345678901234567890` and `1.50` survive reformatting.
 - **Only `finish()` sets a status** (§1.3, rule 7).
-- **Misuse is a bug and stops the program**: a value inside an object without a key, `end()` with nothing open, or `finish()` with something still open.
+- **Misuse fails with `INVALID`**: a value inside an object without a key, `end()` with nothing open, or `finish()` with something still open.
 - **`finish()` fails with**:
   - `TYPE` when a value has no form in the output format, such as a NaN in JSON or a null in TOML. JSON gets `null` in its place, and TOML leaves the key out.
   - `FULL` when alias expansion hit its limit;
@@ -1568,7 +1566,7 @@ while (running) {
   - Vulkan's `pNext` chains become optional fields of the create-info classes, and the C layer builds the real structs;
   - mapped GPU memory is written by copying (`mapped.write(offset, data)`), not through a view, since its life ends at `vkUnmapMemory`, outside the reference rules.
 - **Every field of a generated Vulkan class has an initializer**, so `new()` builds the zeroed struct Vulkan code starts from, with `sType` already set (DESIGN §6.2).
-- **Functions are loaded at run time**, once a context or instance exists: `glfw.loadGl()`, `glfw.loadVulkan()` or `sdl.loadVulkan()`, and then `vk.loadInstance(inst)` and `vk.loadDevice(dev)`. Calling a function the driver doesn't provide is a bug: it stops the program and names the function.
+- **Functions are loaded at run time**, once a context or instance exists: `glfw.loadGl()`, `glfw.loadVulkan()` or `sdl.loadVulkan()`, and then `vk.loadInstance(inst)` and `vk.loadDevice(dev)`. Calling a function the driver doesn't provide fails with `UNSUPPORTED`.
 - **Events are drained with a repeat loop** (DESIGN §9.4). SDL3 already works that way, with `SDL_PollEvent`. GLFW reports input through C callbacks instead, so its C layer queues the events. `w.nextEvent()` calls `glfwPollEvents` when the queue is empty, and fails with `END` when nothing more has happened.
 - **Handles are values.** `GlBuffer`, `GlTexture`, `VkDevice` and the rest are deleted explicitly, usually with `defer`: `defer gl.deleteBuffer(vbo);`, which follows the C name `glDeleteBuffers` (DESIGN §6.4). `delete` is reserved, so there is no `vbo.delete()`.
 - **Uploads take slices**: `gl.bufferData(target, data, usage)` and the Vulkan copy functions send a slice's bytes as they are. Classes stored inline without headers already have the layout a GPU buffer expects, once their field order and padding are fixed to C's (DESIGN §17).

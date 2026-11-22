@@ -61,32 +61,35 @@ public class Args {
     }
 
     // ---- declaring
+    // Each fails with FULL past 64 options.
 
     // A flag; letter 0 for none.
     public mut void flag(u8 letter, string name, string help) {
-        add(letter, name, "", help, 0);
+        u8 err = @add(letter, name, "", help, 0);
+        return #err;
     }
 
     // An option with a value, named meta in the help.
     public mut void option(u8 letter, string name, string meta, string help) {
-        add(letter, name, meta, help, 1);
+        u8 err = @add(letter, name, meta, help, 1);
+        return #err;
     }
 
     // An optional positional argument, filled in the order they are declared.
     public mut void positional(string name, string help) {
-        add(0, name, "", help, 2);
+        u8 err = @add(0, name, "", help, 2);
+        return #err;
     }
 
     // Any number more, after the positionals: [files...].
     public mut void rest(string name, string help) {
-        add(0, name, "", help, 3);
+        u8 err = @add(0, name, "", help, 3);
+        return #err;
     }
 
     private mut void add(u8 letter, string name, string meta, string help, u8 kind) {
         u8 full = @specs.push(new Spec(letter, name, meta, help, kind));
-        if (full) {
-            fail("zink.cli: an Args holds at most 64 options");
-        }
+        return #full;
     }
 
     // ---- parsing
@@ -187,27 +190,33 @@ public class Args {
         }
     }
 
-    // --help and --version print and exit 0; a usage error exits 2.
-    public mut void parseOrExit(string[:] args) {
+    // For main: parses args, or prints what --help or --version asks for (failing with
+    // END), or a usage error and the usage line (failing with INVALID), and gives the exit
+    // status main should then return: 0 after --help or --version, 2 after a usage error.
+    //     u8 code @stop = cli.parseOrStop(args);
+    //     if (stop) { return code; }
+    public mut u8 parseOrStop(string[:] args) {
         u8 err = @parse(args);
         if (wantHelp) {
             printHelp();
-            exit(0);
+            return #status.END 0;
         }
         if (wantVersion) {
             println("${program} ${version}");
-            exit(0);
+            return #status.END 0;
         }
         if (err != 0) {
-            usageError(problem);
+            return #status.INVALID usageError(problem);
         }
+        return 0;
     }
 
-    // Prints "program: message" and the usage line on stderr, then exits 2.
-    public void usageError(string message) {
+    // Prints "program: message" and the usage line on stderr, and gives 2, the exit status
+    // for a usage error, so main can `return cli.usageError("...");`.
+    public u8 usageError(string message) {
         errprintln("${program}: ${message}");
         printUsage(true);
-        exit(2);
+        return 2;
     }
 
     // What was wrong, after parse failed.
@@ -216,14 +225,20 @@ public class Args {
     }
 
     // ---- reading
+    // Asking for an option that was never declared fails with INVALID: a typo stops the
+    // program at that line, unless the caller reads the status.
 
     public bool has(string name) {
-        return count(name) > 0;
+        i64 n @err = count(name);
+        return #err n > 0;
     }
 
     // How many times it was given: -vvv gives 3.
     public i64 count(string name) {
-        i64 k = need(name);
+        i64 k @err = need(name);
+        if (err) {
+            return #err 0;
+        }
         i64 n = 0;
         for (Found& f : found) {
             if (f.spec == k) {
@@ -235,7 +250,10 @@ public class Args {
 
     // The last value given, or the fallback when it wasn't.
     public string get(string name, string fallback) {
-        i64 k = need(name);
+        i64 k @err = need(name);
+        if (err) {
+            return #err "";
+        }
         string v = fallback;
         for (Found& f : found) {
             if (f.spec == k) {
@@ -247,7 +265,11 @@ public class Args {
 
     // INVALID, RANGE: a value that doesn't parse gives 0.
     public i64 getI64(string name, i64 fallback) {
-        if (!has(name)) {
+        bool given @undeclared = has(name);
+        if (undeclared) {
+            return #undeclared 0;
+        }
+        if (!given) {
             return fallback;
         }
         i64 v @err = i64.parse(get(name, ""));
@@ -256,7 +278,11 @@ public class Args {
 
     // INVALID.
     public f64 getF64(string name, f64 fallback) {
-        if (!has(name)) {
+        bool given @undeclared = has(name);
+        if (undeclared) {
+            return #undeclared 0.0;
+        }
+        if (!given) {
             return fallback;
         }
         f64 v @err = f64.parse(get(name, ""));
@@ -265,7 +291,8 @@ public class Args {
 
     // Every value of an option given more than once: -I a -I b.
     public ArgIterator getAll(string name) {
-        return new ArgIterator(found, need(name));
+        i64 k @err = need(name);
+        return #err new ArgIterator(found, k);
     }
 
     // The arguments after the positionals, for the rest() declared.
@@ -303,15 +330,14 @@ public class Args {
         return -1;
     }
 
-    // Asking for an option that was never declared is a bug, which a typo is.
+    // INVALID, and -1, for an option that was never declared.
     private i64 need(string name) {
         for (i64 k = 0; k < specs.len; k++) {
             if (specs[k].name == name) {
                 return k;
             }
         }
-        fail("zink.cli: no option is named ${name}");
-        return -1;
+        return #status.INVALID -1;
     }
 
     // The positional or rest spec an argument goes to, from spec `from` on.

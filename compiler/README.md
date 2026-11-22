@@ -118,7 +118,11 @@ references, interfaces, strings and interpolation, every array kind, slices (exc
 chunked and reversed arrays on data stacks, which are undecided), every statement
 form, casts and the integer rules, generics, lambdas and function values, hash
 maps, sets and pools, calling C, and for-each over arrays, maps, sets, pools and
-iterators. Bugs stop the program with the file and line, and exit status 1. Seven of
+iterators. Every failure is a status (DESIGN §7.6): `@` reads any in its expression,
+calls, indexes, arithmetic and casts alike, by jumping to a local label where the
+status is read; one that nothing reads stops the program at its line, naming what
+failed, and for the program's own functions where the status was returned, with exit
+status 1. That check is one predictable branch after a call that can fail. Seven of
 the eight examples run: `cachesim`, `csvsort`, `dirwalk`, `linebuf`, `sortlines`,
 `stats` and `wordfreq`. `jsonfmt` needs `zink.json`.
 
@@ -271,9 +275,7 @@ call the C compiler inlines.
 
 Where they differ from STDLIB: `fs.move` of a directory across file systems still
 fails with `CROSS_DEVICE`; `ParseError` is in `zink.csv` until `zink.data` is written;
-and `hash.xxh3` isn't written. A bug the library finds, such as asking `Args` for an
-option that was never declared, is reported at the library's line, not the
-caller's.
+and `hash.xxh3` isn't written.
 
 Not yet: a capturing lambda
 passed to a function of the program's own (which needs that function specialized per lambda), `filter`, `map`

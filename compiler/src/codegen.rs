@@ -70,6 +70,14 @@ struct SwitchCtx {
     ty: Ty,
 }
 
+/// The status variable and label of an expression `@` reads, and whether anything in it
+/// can fail and jump there.
+struct Catch {
+    cs: String,
+    cl: String,
+    used: bool,
+}
+
 struct Gen<'p, 'a> {
     prog: &'p Program<'a>,
     facts: &'p Facts,
@@ -100,6 +108,8 @@ struct Gen<'p, 'a> {
     switches: Vec<SwitchCtx>,
     pending_label: Option<String>,
     used_scratch: bool,
+    /// Inside an expression whose status `@` reads: where a failure goes (DESIGN §7.6).
+    catching: Option<Catch>,
     /// For the call about to be generated, when its array result goes straight into a
     /// variable: where to build it (DESIGN §3.3), as C, or `NULL` for the callee's own
     /// data stack. `None` makes the result a temporary, kept on the scratch stack.
@@ -284,6 +294,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             switches: Vec::new(),
             pending_label: None,
             used_scratch: false,
+            catching: None,
             direct_result: None,
             fresh_dst: false,
             dst_fn: false,
@@ -520,6 +531,32 @@ impl<'p, 'a> Gen<'p, 'a> {
     fn tmp(&mut self, base: &str) -> String {
         self.tmp += 1;
         format!("_{}{}", base, self.tmp)
+    }
+
+    /// Records where a function returns a nonzero status, for the message when nothing
+    /// reads it: only on the failing path, so a success costs nothing.
+    fn set_at(&mut self, nonzero: &str, st: &str, span: Span) {
+        if st == "0" {
+            return;
+        }
+        let loc = self.loc(span);
+        if st.parse::<u8>().is_ok() {
+            self.line(&format!("zr_set_at({});", loc));
+        } else {
+            self.line(&format!("if ({}) zr_set_at({});", nonzero, loc));
+        }
+    }
+
+    /// What a failed check does (DESIGN §7.6): inside an expression `@` reads, it sets the
+    /// status and jumps to where that's read; elsewhere `stop` runs, which ends the program.
+    fn on_fail(&mut self, code: u8, stop: String) -> String {
+        match &mut self.catching {
+            Some(k) => {
+                k.used = true;
+                format!("{} = {}; goto {}", k.cs, code, k.cl)
+            }
+            None => stop,
+        }
     }
 
     fn loc(&self, span: Span) -> String {
@@ -1709,7 +1746,9 @@ impl<'p, 'a> Gen<'p, 'a> {
             Some(ast::StatusWrite::Int(n)) => n.to_string(),
             Some(ast::StatusWrite::Name(q)) => {
                 if q.parts.len() == 2 && q.parts[0].name == "status" {
-                    status_code(&q.parts[1].name).to_string()
+                    crate::builtins::status_code(&q.parts[1].name)
+                        .unwrap_or(1)
+                        .to_string()
                 } else {
                     let e = Expr {
                         kind: E::Ident(q.parts[0].name.clone()),
@@ -1728,12 +1767,19 @@ impl<'p, 'a> Gen<'p, 'a> {
         if self.is_ctor {
             self.run_defers(0);
             if self.rec_ctor.is_some() {
+                let t = self.tmp("ret");
+                self.line(&format!("uint8_t {} = {};", t, st));
+                self.set_at(&format!("{} != 0", t), &st, span);
+                let st = if st == "0" { st } else { t };
                 let end = self.record_ctor_end(&st);
                 self.line(&end);
                 return;
             }
             if self.fails {
-                self.line(&format!("return {};", st));
+                let t = self.tmp("ret");
+                self.line(&format!("uint8_t {} = {};", t, st));
+                self.set_at(&format!("{} != 0", t), &st, span);
+                self.line(&format!("return {};", t));
             } else {
                 self.line("return;");
             }
@@ -1776,12 +1822,14 @@ impl<'p, 'a> Gen<'p, 'a> {
                 let t = self.tmp("ret");
                 self.line(&format!("{} {} = {{{}, {}}};", rc, t, v, st));
                 self.run_defers(0);
+                self.set_at(&format!("{}.s != 0", t), &st, span);
                 self.line(&format!("return {};", t));
             }
             (true, None) => {
                 let t = self.tmp("ret");
                 self.line(&format!("uint8_t {} = {};", t, st));
                 self.run_defers(0);
+                self.set_at(&format!("{} != 0", t), &st, span);
                 self.line(&format!("return {};", t));
             }
             (false, Some(v)) => {
@@ -2387,9 +2435,16 @@ impl<'p, 'a> Gen<'p, 'a> {
                 let k = cap_of(to);
                 let loc = self.loc(span);
                 let fill = self.capped_fill(to, "_s.n", "_s.p", span);
+                let bad = self.on_fail(
+                    34,
+                    format!(
+                        "zr_fail({}, \"the value doesn't fit in an array that holds {}\")",
+                        loc, k
+                    ),
+                );
                 format!(
-                    "({{ zr_slice _s = {}; if (_s.n > {}) zr_fail({}, \"the value doesn't fit in an array that holds {}\"); {} _c; }})",
-                    code, k, loc, k, fill
+                    "({{ zr_slice _s = {}; if (_s.n > {}) {{ {}; }} {} _c; }})",
+                    code, k, bad, fill
                 )
             }
             (Ty::Prim(_) | Ty::IntLit { .. } | Ty::FloatLit, Ty::Prim(p)) => {
@@ -2438,8 +2493,13 @@ impl<'p, 'a> Gen<'p, 'a> {
                 op: BinOp::InsertEnd | BinOp::InsertFront | BinOp::InsertCursor,
                 ..
             } => {
-                let (code, _) = self.insert_status(e);
-                format!("(void)({})", code)
+                let (code, fails) = self.insert_status(e);
+                let c = CallOut {
+                    code,
+                    ret: Ty::Void,
+                    fails,
+                };
+                format!("(void)({})", self.check_unread(c, e.span).code)
             }
             E::Postfix { op, expr } if !matches!(op, PostfixOp::Inc | PostfixOp::Dec) => {
                 let c = self.remove_op(*op, expr, e.span);
@@ -2459,16 +2519,68 @@ impl<'p, 'a> Gen<'p, 'a> {
 
     /// The value and the status of an expression whose status is read (DESIGN §7.3):
     /// statements to run first, and the status expression.
+    /// Everything that can fail inside `e` is caught (DESIGN §7.6): a call nothing else
+    /// reads, an index, a slice, arithmetic, a cast. The first failure skips the rest, gives
+    /// its status, and leaves the zero value; a reference then refers to a zero value of
+    /// its own. Lambdas inside are functions of their own, and aren't part of it.
     fn with_status(&mut self, e: &Expr, want: &Ty) -> (String, (String, String)) {
         let e = strip_paren(e);
-        let c = self.status_call(e);
+        let cs = self.tmp("cs");
+        let cl = self.tmp("cl");
+        // A record built in place has no zero value to leave, so its checks still stop.
+        let et = settle(&self.ty(e));
+        let catchable = !self.vs_class(&et);
+        let saved = if catchable {
+            self.catching.replace(Catch {
+                cs: cs.clone(),
+                cl: cl.clone(),
+                used: false,
+            })
+        } else {
+            self.catching.take()
+        };
+        // A reference to an element is taken where it is, not copied.
+        let by_ref = is_ref(want) && !is_status_source(e);
+        let mut c = self.status_call(e);
+        if by_ref {
+            c.code = format!("(&({}))", c.code);
+            c.ret = Ty::Ref(Box::new(c.ret.clone()));
+        }
+        let caught = std::mem::replace(&mut self.catching, saved).is_some_and(|k| k.used);
         self.last_status_ret = c.ret.clone();
         let r = self.tmp("rs");
+        let void_ok = !c.fails && c.ret == Ty::Void;
         // A call that returns nothing and can't fail has status 0.
-        let pre = if !c.fails && c.ret == Ty::Void {
+        let pre = if caught && void_ok {
+            format!(
+                "uint8_t {cs} = 0; ({{ __label__ {cl}; (void)({}); {cl}: ; }});",
+                c.code,
+                cs = cs,
+                cl = cl
+            )
+        } else if caught {
+            let cd = self.tmp("cd");
+            // On failure, the value is zero, and a reference refers to a zero value.
+            let zero = match (c.fails, c.ret.clone()) {
+                (false, Ty::Ref(_)) => "_cx = zr_zero_ref(sizeof *_cx);".to_string(),
+                (true, Ty::Ref(_)) => {
+                    "memset(&_cx, 0, sizeof _cx); _cx.v = zr_zero_ref(sizeof *_cx.v);".to_string()
+                }
+                _ => "memset(&_cx, 0, sizeof _cx);".to_string(),
+            };
+            format!(
+                "uint8_t {cs} = 0; __auto_type {r} = ({{ __label__ {cl}, {cd}; __auto_type _cx = {}; goto {cd}; {cl}: {zero} {cd}: ; _cx; }});",
+                c.code,
+                cs = cs,
+                cl = cl,
+                cd = cd,
+                r = r,
+                zero = zero
+            )
+        } else if void_ok {
             format!("(void)({});", c.code)
         } else {
-            format!("__typeof__({}) {} = {};", c.code, r, c.code)
+            format!("__auto_type {} = {};", r, c.code)
         };
         let (val, st) = match (c.fails, c.ret == Ty::Void) {
             (true, true) => ("0".to_string(), r.clone()),
@@ -2477,6 +2589,12 @@ impl<'p, 'a> Gen<'p, 'a> {
             (false, true) => ("0".to_string(), "0".to_string()),
             (false, false) => (r.clone(), "0".to_string()),
         };
+        let st = match (caught, st.as_str()) {
+            (false, _) => st,
+            (true, "0") => cs,
+            (true, _) => format!("({cs} ? {cs} : {st})", cs = cs, st = st),
+        };
+
         let val = if c.ret == Ty::Void || *want == Ty::Void {
             val
         } else {
@@ -2788,7 +2906,13 @@ impl<'p, 'a> Gen<'p, 'a> {
         }
         if let Ty::Namespace(ns) = &bt {
             if *ns == "status" {
-                return (format!("((uint8_t){})", status_code(&name.name)), Ty::u8());
+                return (
+                    format!(
+                        "((uint8_t){})",
+                        crate::builtins::status_code(&name.name).unwrap_or(1)
+                    ),
+                    Ty::u8(),
+                );
             }
             if *ns == "math" {
                 let v = match name.name.as_str() {
@@ -2961,11 +3085,16 @@ impl<'p, 'a> Gen<'p, 'a> {
         let it = settle(&self.ty(index));
         let i = self.expr(index, &it);
         let i = format!("(int64_t)({})", i);
+        let oob = self.on_fail(34, "zr_ix_fail(LOC, _zxi, _zxn)".to_string());
+        let empty = self.on_fail(
+            34,
+            "zr_fail(LOC, \"index into an empty array\")".to_string(),
+        );
         let fix = match mode {
-            ast::IndexMode::Checked => format!("zr_ix({}, LEN, LOC)", i),
-            ast::IndexMode::FromEnd => format!("zr_ix(LEN - {}, LEN, LOC)", i),
-            ast::IndexMode::Wrap => format!("zr_ix_wrap({}, LEN, LOC)", i),
-            ast::IndexMode::Clamp => format!("zr_ix_clamp({}, LEN, LOC)", i),
+            ast::IndexMode::Checked => format!("ZR_IX({}, LEN, {})", i, oob),
+            ast::IndexMode::FromEnd => format!("ZR_IX(LEN - {}, LEN, {})", i, oob),
+            ast::IndexMode::Wrap => format!("ZR_IX_WRAP({}, LEN, {})", i, empty),
+            ast::IndexMode::Clamp => format!("ZR_IX_CLAMP({}, LEN, {})", i, empty),
         };
         self.elem_ptr(base, &fix, span)
     }
@@ -3023,13 +3152,14 @@ impl<'p, 'a> Gen<'p, 'a> {
         let l = self.slice_bound(lo, "0", "_n");
         let h = self.slice_bound(hi, "_n", "_n");
         let loc = self.loc(span);
+        let bad = self.on_fail(34, format!("zr_range_fail({}, _lo, _hi, _n)", loc));
         format!(
-            "({{ {} int64_t _n = {}; int64_t _lo = {}, _hi = {}; zr_range(_lo, _hi, _n, {}); (zr_slice){{{}, _hi - _lo}}; }})",
+            "({{ {} int64_t _n = {}; int64_t _lo = {}, _hi = {}; if (_lo < 0 || _hi > _n || _lo > _hi) {{ {}; }} (zr_slice){{{}, _hi - _lo}}; }})",
             ptr,
             ca.len(),
             l,
             h,
-            loc,
+            bad,
             ca.span("_lo")
         )
     }
@@ -3061,8 +3191,12 @@ impl<'p, 'a> Gen<'p, 'a> {
         };
         (
             format!(
-                "({{ zr_slice _s = {}; int64_t _lo = {}, _hi = {}; zr_range(_lo, _hi, _s.n, {}); (zr_slice){{({}*)_s.p + _lo, _hi - _lo}}; }})",
-                s, l, h, loc, ec
+                "({{ zr_slice _s = {}; int64_t _lo = {}, _hi = {}; if (_lo < 0 || _hi > _s.n || _lo > _hi) {{ {}; }} (zr_slice){{({}*)_s.p + _lo, _hi - _lo}}; }})",
+                s,
+                l,
+                h,
+                self.on_fail(34, format!("zr_range_fail({}, _lo, _hi, _s.n)", loc)),
+                ec
             ),
             res,
         )
@@ -3180,12 +3314,24 @@ impl<'p, 'a> Gen<'p, 'a> {
         }
         let u = unsigned_of(*p);
         let (lo, hi) = min_max(*p);
+        let checked = matches!(
+            op,
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+        );
+        let (over, zero) = if checked {
+            (
+                self.on_fail(34, format!("zr_fail({}, \"integer overflow\")", loc)),
+                self.on_fail(33, format!("zr_fail({}, \"division by zero\")", loc)),
+            )
+        } else {
+            (String::new(), String::new())
+        };
         match op {
-            BinOp::Add => format!("ZR_ADD({}, {}, {}, {})", c, a, b, loc),
-            BinOp::Sub => format!("ZR_SUB({}, {}, {}, {})", c, a, b, loc),
-            BinOp::Mul => format!("ZR_MUL({}, {}, {}, {})", c, a, b, loc),
-            BinOp::Div => format!("ZR_DIV({}, {}, {}, {})", c, a, b, loc),
-            BinOp::Rem => format!("ZR_REM({}, {}, {}, {})", c, a, b, loc),
+            BinOp::Add => format!("ZR_ADD({}, {}, {}, {})", c, a, b, over),
+            BinOp::Sub => format!("ZR_SUB({}, {}, {}, {})", c, a, b, over),
+            BinOp::Mul => format!("ZR_MUL({}, {}, {}, {})", c, a, b, over),
+            BinOp::Div => format!("ZR_DIV({}, {}, {}, {}, {})", c, a, b, zero, over),
+            BinOp::Rem => format!("ZR_REM({}, {}, {}, {})", c, a, b, zero),
             BinOp::WrapAdd => format!("(({})(({}){} + ({}){}))", c, u, a, u, b),
             BinOp::WrapSub => format!("(({})(({}){} - ({}){}))", c, u, a, u, b),
             BinOp::WrapMul => format!("(({})(({}){} * ({}){}))", c, u, a, u, b),
@@ -3371,7 +3517,9 @@ impl<'p, 'a> Gen<'p, 'a> {
                     Ty::Prim(p) if p.is_float() => (format!("(-{})", v), t),
                     Ty::Prim(p) => {
                         let loc = self.loc(span);
-                        (format!("ZR_NEG({}, {}, {})", prim_c(*p), v, loc), t)
+                        let over =
+                            self.on_fail(34, format!("zr_fail({}, \"integer overflow\")", loc));
+                        (format!("ZR_NEG({}, {}, {})", prim_c(*p), v, over), t)
                     }
                     _ => (self.unsupported(span, "this negation"), t),
                 }
@@ -3466,12 +3614,18 @@ impl<'p, 'a> Gen<'p, 'a> {
                     v, tc, lo, tc, lo, hi, tc, hi, tc
                 ),
                 _ => format!(
-                    "({{ double _v = (double)({}); if (!(_v > (double){} - 1.0 && _v < (double){} + 1.0)) zr_fail({}, \"the value doesn't fit in {}\"); ({})_v; }})",
+                    "({{ double _v = (double)({}); if (!(_v > (double){} - 1.0 && _v < (double){} + 1.0)) {{ {}; }} ({})_v; }})",
                     v,
                     lo,
                     hi,
-                    loc,
-                    to.name(),
+                    self.on_fail(
+                        34,
+                        format!(
+                            "zr_fail({}, \"the value doesn't fit in {}\")",
+                            loc,
+                            to.name()
+                        )
+                    ),
                     tc
                 ),
             };
@@ -3512,23 +3666,35 @@ impl<'p, 'a> Gen<'p, 'a> {
                     format!("(({}){})", tc, v)
                 } else if signed(fp) {
                     format!(
-                        "({{ {st} _v = ({st})({}); if (_v < ({st}){} || (_v > 0 && ({ut})_v > ({ut}){})) zr_fail({}, \"the value doesn't fit in {}\"); ({})_v; }})",
+                        "({{ {st} _v = ({st})({}); if (_v < ({st}){} || (_v > 0 && ({ut})_v > ({ut}){})) {{ {}; }} ({})_v; }})",
                         v,
                         lo,
                         hi,
-                        loc,
-                        to.name(),
+                        self.on_fail(
+                            34,
+                            format!(
+                                "zr_fail({}, \"the value doesn't fit in {}\")",
+                                loc,
+                                to.name()
+                            )
+                        ),
                         tc,
                         st = st,
                         ut = ut
                     )
                 } else {
                     format!(
-                        "({{ {ut} _v = ({ut})({}); if (_v > ({ut}){}) zr_fail({}, \"the value doesn't fit in {}\"); ({})_v; }})",
+                        "({{ {ut} _v = ({ut})({}); if (_v > ({ut}){}) {{ {}; }} ({})_v; }})",
                         v,
                         hi,
-                        loc,
-                        to.name(),
+                        self.on_fail(
+                            34,
+                            format!(
+                                "zr_fail({}, \"the value doesn't fit in {}\")",
+                                loc,
+                                to.name()
+                            )
+                        ),
                         tc,
                         ut = ut
                     )
@@ -3570,7 +3736,11 @@ impl<'p, 'a> Gen<'p, 'a> {
         if let Some(d) = default {
             self.switch_arm(&d.body, &r, &end, want);
         } else {
-            self.line("zr_fail(\"zink\", 0, \"no switch case matched\");");
+            let none = self.on_fail(
+                22,
+                "zr_fail(\"zink\", 0, \"no switch case matched\")".to_string(),
+            );
+            self.line(&format!("{};", none));
         }
         self.switches.pop();
         let body = std::mem::replace(&mut self.out, saved);
@@ -3822,7 +3992,67 @@ impl<'p, 'a> Gen<'p, 'a> {
 
     // ------------------------------------------------------------ calls
 
+    /// A call whose status nothing reads stops the program when it fails (DESIGN §7.6):
+    /// the check is wrapped around it, keeping its result's type.
     fn call_any(&mut self, e: &Expr) -> CallOut {
+        let c = self.call_any_inner(e);
+        self.check_unread(c, e.span)
+    }
+
+    fn check_unread(&mut self, mut c: CallOut, span: Span) -> CallOut {
+        let Some(name) = self.facts.unchecked.get(&key(span)).cloned() else {
+            return c;
+        };
+        if !c.fails {
+            return c;
+        }
+        if let Some(k) = &mut self.catching {
+            k.used = true;
+            let (cs, cl) = (k.cs.clone(), k.cl.clone());
+            let u = self.tmp("u");
+            let st = if c.ret == Ty::Void {
+                u.clone()
+            } else {
+                format!("{}.s", u)
+            };
+            c.code = format!(
+                "({{ __auto_type {u} = {c}; if ({st}) {{ {cs} = {st}; goto {cl}; }} {u}; }})",
+                u = u,
+                c = c.code,
+                st = st,
+                cs = cs,
+                cl = cl
+            );
+            return c;
+        }
+        // A function of the program's own says where it returned the status; the
+        // library's lines would say nothing useful.
+        let own = match self.facts.calls.get(&key(span)).map(|f| &f.origin) {
+            Some(Origin::Method(c, _) | Origin::Ctor(c, _)) => {
+                !self.prog.classes[*c].package.starts_with("zink.")
+            }
+            Some(Origin::Value) => true,
+            _ => false,
+        };
+        let u = self.tmp("u");
+        let st = if c.ret == Ty::Void {
+            u.clone()
+        } else {
+            format!("{}.s", u)
+        };
+        c.code = format!(
+            "({{ __auto_type {u} = {c}; if ({st}) zr_unread({loc}, {st}, {name}, {own}); {u}; }})",
+            c = c.code,
+            u = u,
+            st = st,
+            loc = self.loc(span),
+            name = c_string(name.as_bytes()),
+            own = own as u8
+        );
+        c
+    }
+
+    fn call_any_inner(&mut self, e: &Expr) -> CallOut {
         match &e.kind {
             E::Call { callee, args } => self.call(e, callee, args),
             E::New { args, .. } => {
@@ -4106,7 +4336,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             fails: true,
         };
         match &callee.kind {
-            // print, println, errprint, errprintln, exit, fail, min, max, abs, clamp.
+            // print, println, errprint, errprintln, min, max, abs, clamp.
             E::Ident(f) => {
                 return match f.as_str() {
                     "print" | "println" | "errprint" | "errprintln" => {
@@ -4125,8 +4355,6 @@ impl<'p, 'a> Gen<'p, 'a> {
                         };
                         ok(format!("({{ {} {} {} }})", pre, writes, nl), Ty::Void)
                     }
-                    "exit" => ok(format!("zr_exit({})", arg(self, 0)), Ty::Void),
-                    "fail" => ok(format!("zr_fail_text({}, {})", loc, arg(self, 0)), Ty::Void),
                     "min" | "max" | "clamp" | "abs" => {
                         let t = params.first().cloned().unwrap_or(ret.clone());
                         let vs: Vec<String> = (0..args.len()).map(|k| arg(self, k)).collect();
@@ -4781,8 +5009,15 @@ impl<'p, 'a> Gen<'p, 'a> {
                 };
                 ok(
                     format!(
-                        "({{ {} int64_t _i = zr_ix({}, {}, {}), _j = zr_ix({}, {}, {}); {} }})",
-                        ptr, i, len, loc, j, len, loc, body
+                        "({{ {} int64_t _i = ZR_IX({}, {}, {}), _j = ZR_IX({}, {}, {}); {} }})",
+                        ptr,
+                        i,
+                        len,
+                        self.on_fail(34, format!("zr_ix_fail({}, _zxi, _zxn)", loc)),
+                        j,
+                        len,
+                        self.on_fail(34, format!("zr_ix_fail({}, _zxi, _zxn)", loc)),
+                        body
                     ),
                     Ty::Void,
                 )
@@ -4952,7 +5187,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                         "({{ {} {} _r = {{0, {}}}; for (int64_t _i = 0; _i < {}; _i++) if ({}) {{ _r.v = _i; _r.s = 0; break; }} _r; }})",
                         ptr,
                         rt,
-                        status_code("MISSING"),
+                        crate::builtins::status_code("MISSING").unwrap_or(195),
                         len,
                         pred
                     ),
@@ -5110,6 +5345,11 @@ impl<'p, 'a> Gen<'p, 'a> {
     }
 
     fn remove_op(&mut self, op: PostfixOp, x: &Expr, span: Span) -> CallOut {
+        let c = self.remove_op_inner(op, x, span);
+        self.check_unread(c, span)
+    }
+
+    fn remove_op_inner(&mut self, op: PostfixOp, x: &Expr, span: Span) -> CallOut {
         let t = self.ty(x);
         let arr_t = t.unref().clone();
         let (Some(el), Some(lay)) = (arr_t.elem().cloned(), layout(&arr_t)) else {
@@ -5648,41 +5888,17 @@ fn common_type(a: &Ty, b: &Ty) -> Ty {
     }
 }
 
-/// The number of a named status code (DESIGN §7.7).
-pub fn status_code(name: &str) -> u8 {
-    match name {
-        "OK" => 0,
-        "FAILED" => 1,
-        "NOT_FOUND" | "ENOENT" => 2,
-        "INTERRUPTED" | "EINTR" => 4,
-        "IO" | "EIO" => 5,
-        "BAD_HANDLE" | "EBADF" => 9,
-        "AGAIN" | "EAGAIN" => 11,
-        "NO_MEMORY" | "ENOMEM" => 12,
-        "PERMISSION" | "EACCES" => 13,
-        "BUSY" | "EBUSY" => 16,
-        "EXISTS" | "EEXIST" => 17,
-        "CROSS_DEVICE" | "EXDEV" => 18,
-        "NOT_DIRECTORY" | "ENOTDIR" => 20,
-        "IS_DIRECTORY" | "EISDIR" => 21,
-        "INVALID" | "EINVAL" => 22,
-        "NOT_TERMINAL" | "ENOTTY" => 25,
-        "NO_SPACE" | "ENOSPC" => 28,
-        "BROKEN_PIPE" | "EPIPE" => 32,
-        "RANGE" | "ERANGE" => 34,
-        "NAME_TOO_LONG" | "ENAMETOOLONG" => 36,
-        "NOT_EMPTY" | "ENOTEMPTY" => 39,
-        "LOOP" | "ELOOP" => 40,
-        "UNSUPPORTED" | "EOPNOTSUPP" => 95,
-        "TIMEOUT" | "ETIMEDOUT" => 110,
-        "EMPTY" => 192,
-        "FULL" => 193,
-        "END" => 194,
-        "MISSING" => 195,
-        "POSITION" => 196,
-        "TYPE" => 197,
-        "GPU" => 198,
-        "OUT_OF_DATE" => 199,
-        _ => 1,
+/// A call, or an array operator, whose status `@` reads: its value is its own result, where
+/// another expression's is a place it names.
+fn is_status_source(e: &Expr) -> bool {
+    match &e.kind {
+        E::Call { .. } | E::New { .. } | E::ThisNew(_) => true,
+        E::Postfix { op, .. } => !matches!(op, PostfixOp::Inc | PostfixOp::Dec),
+        E::Binary { op, .. } => matches!(
+            op,
+            BinOp::InsertEnd | BinOp::InsertFront | BinOp::InsertCursor
+        ),
+        E::Paren(x) => is_status_source(x),
+        _ => false,
     }
 }

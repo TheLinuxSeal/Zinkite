@@ -16,7 +16,7 @@
 - **Java-style syntax**: classes with methods in the body, interfaces, constructors, `static` members, lambdas. **No inheritance.**
 - **No manual memory management and no memory manager at runtime**: no heap, no allocator, no garbage collector, no reference counts. Memory lives on data stacks that the compiler assigns, and is freed when its scope ends, with one store (§3).
 - **Memory safety, checked at compile time**: no use-after-free and no dangling references, without lifetime annotations (§5.2).
-- **Runtime safety**: no undefined behavior. Expected failures are reported through each call's status code (§7). Bugs, such as an index out of range, stop the program with a message (§7.6). Nothing is thrown.
+- **Runtime safety**: no undefined behavior. Every failure is a status code (§7), from a missing file to an index out of range. The caller reads it with `@`, or the program stops there with a message (§7.6). Nothing is thrown, and nothing else stops a program but returning from `main`.
 - **Fast data layouts**: nested data stored inline and contiguously, references that stay valid while arrays grow.
 - Small, fast-starting static binaries.
 
@@ -51,7 +51,7 @@ Left out to stay light: inheritance, exceptions, destructors, reflection, dynami
 | Status codes | Follow Linux's `errno` numbers (`NOT_FOUND` is `ENOENT`, 2); 1 means failed; Zinkite's own codes from 192 to 223; a program's own from 224 to 255 | Decided | 7.7 |
 | Value on failure | Always defined: every return supplies a value, and the standard library returns the zero value on failure | Decided | 7.5 |
 | Discarding | `_` takes any value or status and can never be read | Decided | 7.3 |
-| Bugs | Overflow, an index out of range, division by zero and similar stop the program with a message | Decided | 7.6 |
+| Failures nothing reads | A failed call, overflow, an index out of range, division by zero and similar stop the program with a message, unless `@` reads them | Decided | 7.6 |
 | Cleanup | No destructors, as in Goose; `defer` runs a statement when its block ends; the runtime flushes and closes files still open at exit | Decided | 6.4 |
 | Number types | `i8`–`i128`, `u8`–`u128`, `f32`, `f64`, plus `bool`; no aliases; lengths and indexes are `i64` | Decided | 9.1 |
 | Literals | An integer literal is an `i64` and a float literal an `f64` unless where it is used says otherwise; Rust-style suffixes (`255u8`, `1.5f32`) | Decided | 9.1 |
@@ -71,7 +71,7 @@ Left out to stay light: inheritance, exceptions, destructors, reflection, dynami
 | Conditional compilation | `#if` / `#else` / `#endif` | Decided | 8.3 |
 | Packages and imports | Java-style packages that match directories; `import a.b.C as D` for aliases | Decided | 8.4, 8.5 |
 | Script files | A file with no class declaration is allowed; its top-level methods and fields go into a hidden class | Decided | 8.6 |
-| Exit status | `u8 main(...)` returns it; `void main` exits with 0; `exit(code)` ends the program from anywhere | Decided | 8.6 |
+| Exit status | `u8 main(...)` returns it; `void main` exits with 0; there is no `exit` | Decided | 8.6 |
 | Static initialization | Every static field is set before `main`, in dependency order; initializers that depend on each other in a loop are a compile error | Decided | 8.7 |
 | String interpolation | `"${expr}"`; otherwise `$` only marks a chunked index in types (§4.1) | Decided | 4.11 |
 | Statements and expressions | Java's, plus `var`, for-each, arrow-only `switch`, simple enums | Decided | 9.4 |
@@ -308,7 +308,7 @@ The sign says insert (`+`) or remove (`-`); the symbol says where: `<` start, `^
 - The cursor methods require a cursor slot other than `.`.
 
 ### 4.10 Indexing (Decided)
-- **`a[i]`** is checked. Out of range stops the program (§7.6).
+- **`a[i]`** is checked. Out of range fails with `RANGE`, which stops the program unless `@` reads it (§7.6).
 - **`a[^k]`** is element `len - k`, so `a[^1]` is the last element. `a[^0]`, or `k > len`, is out of range.
   - `^k` is bracket syntax only: not a value, can't be stored or passed.
   - Slices can use it: `a[2:^1]`.
@@ -649,7 +649,7 @@ for (Shape& s : shapes) { total += s.area(); }
 - **An interface is never a value type.** `Shape s;`, a `Shape` field and a `Shape[..>]` are compile errors, because the size isn't known. Store each concrete class in its own array and keep `Shape&` references. Those references follow the root rules (§5.2).
 - **Generic bounds are static**: `<T implements Shape>` compiles once per type, with direct calls. The built-in bounds, such as `ordered` and `number`, are in §10.1.
 - **`instanceof`** on an interface reference compares the method-table pointer: `if (s instanceof Circle c)` binds `c` as a `Circle&` only when it matches. There are no casts between reference types.
-- **An interface method can fail when any class that implements it has a method of that name that can** (Decided). It has no body to write a status, and the compiler sees the whole program, so `s.area()` draws no dropped-status warning when no `area` fails, and `while (T x : it.next())` ends when an `Iterator`'s does.
+- **An interface method can fail when any class that implements it has a method of that name that can** (Decided). It has no body to write a status, and the compiler sees the whole program, so `s.area()` needs no check after it when no `area` fails, and `while (T x : it.next())` ends when an `Iterator`'s does.
 - **`=` through an interface reference is an error** (Decided): it would copy a value whose class isn't known. `s .= other` rebinds it (§5.1).
 - **`==` on interface references is an error** (Decided): `==` compares fields (§6.1), and the two values may be of different classes. Test them with `instanceof` first.
 - **Generic inference sees through `implements`**: a `Cell<string>` passed as `Box<T>&` gives `T = string` (§10).
@@ -762,7 +762,7 @@ Every function has an optional `u8` side output, its **status**, separate from i
 ### 7.1 Semantics
 - **The default is 0.** A function that never sets a status returns 0.
 - **By convention, nonzero means something went wrong**: 1 for a failure with no particular reason, and the standard library's named codes (§7.7) when there is one. Programs may use the status for anything else.
-- **The status belongs to the call, not the function.** It is used at the call site or dropped.
+- **The status belongs to the call, not the function.** It is read at the call site, or a nonzero one stops the program there (§7.6).
 - **Nothing propagates automatically**; passing a status on is explicit.
 - **Implementation**: a hidden second return value in a register. Functions that never set a status carry none.
 - **The standard library fails with a named code** (§7.7):
@@ -796,7 +796,7 @@ return #1;                         // early exit from a void function or constru
 ```
 x @err = a.pop();             // value into x, status into err
 @err = a.pop();               // status only, value dropped
-x = a.pop();                  // value only, status dropped
+x = a.pop();                  // value only: if it fails, the program stops here
 @err = a +> 1 +> 2;           // the first failure in a whole chain
 u8 bad = @a.pop();            // @ in an expression gives the status directly
 if (@a.pop()) { ... }         // nonzero means the call failed (§9.4)
@@ -814,14 +814,15 @@ if (err == status.EMPTY) { ... }
 - **Unsigned integers work as conditions** (§9.4), so `if (err)` tests whether the call failed.
 - **`while (T x : call)` repeats a call until its status is nonzero** (§9.4).
 - **A bare call in a condition tests its value**; `@` in front tests its status.
-- **Dropping a status that can be nonzero** gives a warning. Capturing it with `@err = ...` acknowledges it.
+- **`@` reads every failure in its expression**, not only a call's (§7.6): `i64 v @err = a[i] * w[j];` catches an index out of range or an overflow, and `@(n / d)` a division by zero.
+- **A status nothing reads stops the program when it's nonzero** (§7.6), so there's no warning for leaving one unread: `x = a.pop();` is a claim that it won't fail.
 - **`_` discards** (Decided). It can be assigned anything, and it can never be read:
   ```
-  num @_ = f64.parse(key);        // keep the value, ignore the status on purpose: no warning
+  num @_ = f64.parse(key);        // keep the value, ignore the status on purpose: 0 if it failed
   @_ = out.close();               // ignore the status of a call made for its effect
   _ = lookup(key);                // ignore a value
   _ @_ = f();                     // ignore both
-  defer @_ = d.close();           // a deferred call, without the dropped-status warning
+  defer @_ = d.close();           // a deferred call whose failure doesn't matter
   func(i64, i64 => i64) first = (i64 a, i64 _) => a;   // a parameter that isn't used
   ```
   - It declares nothing and has no type, so it can be assigned a value of any type, any number of times.
@@ -832,30 +833,56 @@ if (err == status.EMPTY) { ... }
 ### 7.4 Chaining and combining
 - **Chains keep the first failure**: the status of `a +> 1 +> 2` is the first nonzero status in it, and later steps never overwrite it.
 - `@a.pop() || @b.pop()` is true when either failed; `&&` when both did. These are easy to get backwards, so the documentation says so.
-- **In `@f(g())`, the status is `f`'s.** `g`'s status is dropped, with a warning if it can be nonzero.
+- **In `@f(g())`, the status is the first failure**: `g`'s if it fails, and then `f` isn't called; otherwise `f`'s.
 
 ### 7.5 The value on failure (Decided)
 - **The value is always defined.** Every non-void `return` supplies a value, whatever its status, so `x @err = f();` never leaves `x` undefined.
 - **The standard library returns the zero value on failure**: `0`, `false`, an empty view, or the zero value of a class.
+- **When `@` catches a failure partway through its expression**, the rest isn't evaluated and the value is the zero value. A reference then refers to a zero value of its own, not to any element, so writing through it changes nothing else: after `i64& r @err = a[9];` on a shorter `a`, `r = 5;` is harmless.
 - A stricter form that scopes `x` to the success branch is Open (§17).
 
-### 7.6 Bugs stop the program (Decided)
-With no exceptions, failures that are bugs rather than expected outcomes stop the program:
-- integer overflow, `x / 0`, `x % 0`, and `MIN / -1`;
-- an out-of-range `a[i]`;
-- a cast that doesn't fit, such as `(u8) n` when `n` is 300 (§9.1);
-- stack overflow (each stack ends in a guard page);
-- exceeding `#max_memory_mb` (§8.2).
+### 7.6 A failure nothing reads stops the program (Decided)
+Every failure is a status, and the caller decides what to do with it. A call that fails, and the checks the language makes, all give one:
 
-The program prints the message and the source location to stderr, flushes and closes open files, and exits with status 1. An embedded script returns the failure to its host through the C API. Nothing can catch it.
+| Failure | Status |
+|---|---|
+| a call that fails | its own |
+| integer overflow, including `MIN / -1` and unary `-` | `RANGE` |
+| an index or a slice out of range | `RANGE` |
+| a cast that doesn't fit, such as `(u8) n` when `n` is 300 (§9.1) | `RANGE` |
+| `x / 0` and `x % 0` | `DOMAIN` |
+| a `switch` with no case for its value | `INVALID` |
 
-The explicit alternatives remain for code that wants another outcome:
+- **`@` reads them** (§7.3): `x @err = e;`, `@err = e;`, `@e`, and `while (T x : e)`. It covers its whole expression, so the first failure anywhere in `e` is caught, and the rest of `e` is skipped (§7.5).
+- **Without `@`, a failure stops the program**, at the line where it happened. The message names what failed and its status, and for a function of the program's own, where it returned the status:
+  ```
+  tool.zn:12: `half` failed with INVALID, and nothing read its status
+      `half` returned it at tool.zn:6
+  tool.zn:20: index 5 is out of range for length 3
+  ```
+  The program flushes and closes open files, and exits with status 1. An embedded script returns the failure to its host through the C API.
+- **A function stops nothing itself.** It fails by returning a status (§7.2), and only its caller can stop the program, by not reading it. There is no `fail` and no `exit`: returning from `main` is the only way a program ends (§8.6).
+- **Lambdas are functions of their own**: `@` around a call that takes one doesn't catch failures in its body.
+- **What no program can catch**, and stops it all the same:
+  - stack overflow (each stack ends in a guard page);
+  - exceeding `#max_memory_mb` (§8.2);
+  - a signal, such as `kill` or Ctrl-C;
+  - a C function called through `extern` that crashes or exits.
+
+The explicit forms that don't fail remain for code that wants another outcome:
 - `+%` and the other wrapping operators (§9.2);
 - the wrapping and saturating casts `(u8%) n` and `(u8|) n`, and `u8.from(n)`, which fails with `status.RANGE` (§9.1);
 - `a[%i]`, `a[|i]` and `getOr` (§4.10);
 - `divOr`.
 
 **Closed pipes**: writing to stdout after the reading end has closed, as in `zink run tool.zn | head`, ends the program quietly, the way standard Unix tools do. The shell sees the usual SIGPIPE status. Writing to other files and pipes fails with `status.BROKEN_PIPE` instead.
+
+**Why one mechanism** (Decided over the earlier design, where bugs couldn't be caught and a dropped status only warned):
+- Nothing goes wrong silently: an unread failure doesn't carry on with a zero value.
+- A call with arguments that can't fail, such as `rng.range(1, 7)`, needs nothing written, where a warning would have asked for `@_` on every one.
+- The stop points at the caller's line, not into the library.
+- Expected failures and bugs differ only in whether the caller expects them, so the caller decides.
+- The cost is one predictable branch after a call that can fail and whose status nothing reads.
 
 ### 7.7 Named codes (Decided)
 Status codes follow Linux's `errno` numbers, with Zinkite's own codes from 192 up and a program's own from 224 up. So an operating-system error passes through unchanged, and `status.message(code)` can use the system's own description (`strerror`) for it.
@@ -897,7 +924,8 @@ if (err) {
   | `NOT_TERMINAL` | 25 | `ENOTTY` | Inappropriate ioctl for device |
   | `NO_SPACE` | 28 | `ENOSPC` | No space left on device |
   | `BROKEN_PIPE` | 32 | `EPIPE` | Broken pipe |
-  | `RANGE` | 34 | `ERANGE` | Numerical result out of range: also `i64.parse` of a number too big for the type |
+  | `DOMAIN` | 33 | `EDOM` | Numerical argument out of domain: a division by zero (§7.6) |
+  | `RANGE` | 34 | `ERANGE` | Numerical result out of range: also `i64.parse` of a number too big for the type, overflow, an index out of range and a cast that doesn't fit (§7.6) |
   | `NOT_EMPTY` | 39 | `ENOTEMPTY` | Directory not empty |
   | `UNSUPPORTED` | 95 | `EOPNOTSUPP` | Operation not supported: also input using a feature a parser leaves out |
   | `TIMEOUT` | 110 | `ETIMEDOUT` | Connection timed out |
@@ -1046,8 +1074,8 @@ void main(string[.] args) {
   - `void main(...)` always exits with 0;
   - the status is a `u8` because Linux keeps only its low 8 bits. With a wider type, `return 256;` would reach the shell as 0, which means success;
   - `main` can't set a status: `return #1;` in `main` is an error that suggests `return 1;`;
-  - `exit(code)` ends the program from anywhere with that status. Open files are flushed and closed (§6.4), but `defer`s don't run, as in Goose;
-  - a program that stops on a bug exits with 1 (§7.6).
+  - there is no `exit`: only returning from `main` ends a program, so a function deep in it fails with a status and its callers pass it up (§7.6);
+  - a program stopped by a failure nothing read exits with 1 (§7.6).
 - **A script file can also declare classes and interfaces**, which are visible only inside that file.
 - **It is in the unnamed package and has no `package` line.** It can import other packages, but nothing can import it. Once code is worth sharing, it moves into a class in a package.
 - Internally everything is still a class, so the type checker, the layout rules and the backends need no special case.
@@ -1365,7 +1393,7 @@ A small C static library linked into every program. It holds:
 There is no allocator, no counting and no collector. With dead-code elimination and a static build it is tens of KB.
 
 ### 12.3 Stacks and failures
-- **No unwinding.** There are no exceptions: failures are status codes (§7), and bugs stop the program (§7.6). No unwind tables, landing pads or per-call error checks are needed.
+- **No unwinding.** There are no exceptions: failures are status codes (§7), and one nothing reads stops the program where it happened (§7.6). No unwind tables, landing pads or per-call error checks are needed.
 - **Stack overflow**: the call stack and every data stack end in an unmapped guard page. Touching one stops the program, through a signal handler running on a separate small stack. Functions with frames larger than a page touch each page in order (stack probes), so a large frame can't jump past the guard page.
 
 ### 12.4 Dispatch (Decided)
@@ -1704,13 +1732,14 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 49. `x @failed = f();` gets both, `@failed = f();` the status only, and `x = f();` the value only, with a warning if `f` can fail.
 50. `@a.pop()` parses as `@(a.pop())`; `@a + b` is a compile error that asks for parentheses.
 51. Every standard-library failure returns the zero value with the named code it documents; `status.message(status.NOT_FOUND)` is "No such file or directory"; `status.NOT_FOUND == status.ENOENT == 2`; `status.EMPTY` is 192; an `EPERM` from the operating system arrives as `status.PERMISSION`; `status.message(230)` is "Error 230".
-52. `@a.pop() || @b.pop()` is true when either fails; in `@f(g())`, `g`'s dropped status warns; the status of a chain is its first failure.
+52. `@a.pop() || @b.pop()` is true when either fails; in `@f(g())`, a failing `g` gives its status and `f` isn't called; the status of a chain is its first failure.
 53. `num @_ = f64.parse(key);` and `@_ = f();` don't warn; `_ = f();` discards a value of any type; `(i64 a, i64 _) => a` and `for (var _ : items)` compile; `if (_)`, `x = _` and `_ += 1` are compile errors; `_count` is an ordinary name.
 54. `#if`, `#max_memory_mb` and `return #1` lex correctly in the same file.
 55. `if (err)` with a `u8` `err`, `while (n)` with a `u32` `n`, and `!err` compile; `if (n)` with an `i64` `n`, `bool b = err;` and `if (x = 0)` are compile errors.
 
-**Bugs stop the program**
-56. Overflow, `x / 0`, `MIN / -1`, an out-of-range index, stack overflow, and exceeding `#max_memory_mb` each stop the program with a message naming the source line and exit status 1, after flushing open files.
+**A failure nothing reads stops the program**
+56. Overflow, `x / 0`, `MIN / -1`, an out-of-range index, a failed call whose status nothing reads, stack overflow, and exceeding `#max_memory_mb` each stop the program with a message naming the source line and exit status 1, after flushing open files; for a function of the program's own, the message also says where it returned the status.
+56a. `x @err = a[i] * w[j];` with `i` out of range gives `x` 0 and `err` `RANGE`; `@(n / 0)` is `DOMAIN`; in `x @err = f(g())`, a failing `g` gives its status and `f` isn't called; `T& r @err = a[9]` on a shorter array refers to a zero value of its own; `fail(...)` and `exit(...)` are compile errors.
 57. At the limits of every integer type, signed and unsigned, `+` stops the program, `+%`, `-%` and `*%` wrap, and `+|`, `-|` and `*|` saturate; `MIN % -1` is 0.
 58. `long`, `byte` and `double` are compile errors that name the new type, and `int` and `float` used as types are errors that say they are bounds and suggest `i64` and `f64`; `u8 b = 300;` is a compile error; `var x = 5;` is an `i64`; `i64 big = 100000 * 100000;` doesn't overflow; `i64 n = someI32;` compiles without a cast, and `i32 m = someI64;` needs one.
 59. A program printing many lines, run as `zink run tool.zn | head -1`, exits quietly with no error output.
@@ -1741,7 +1770,7 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 76. A `package` line that doesn't match the file's directory is an error, and the source root is inferred correctly from the entry file.
 77. Importing a package-private declaration from another package is an error; circular imports between packages compile.
 78. A file with only top-level methods and fields compiles; `main()` and `main(string[.] args)` both work, returning `void` or `u8`; importing from a script file is a compile error.
-79. `u8 main` returning 3 exits with status 3, and falling off its end exits with 0; `return #1;` in `main` and `return 300;` in `u8 main` are compile errors; `exit(2)` from a helper exits with 2 without running `defer`s, after flushing open files.
+79. `u8 main` returning 3 exits with status 3, and falling off its end exits with 0; `return #1;` in `main` and `return 300;` in `u8 main` are compile errors.
 80. Static initializers run before `main` in dependency order; initializers that depend on each other in a loop are a compile error that lists the loop.
 
 **Lambdas and statements**
@@ -1796,7 +1825,7 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 119. `.=` on a value variable is a compile error that suggests `=`; `var& c = counts.getOrAdd(w, 0); c++;` changes the map's value.
 120. `println(out)`, `line.trim()`, `new JsonParser(text)` and `cmd == "quit"` on `u8` arrays compile and view them; `var c = out;` copies; `string s = buf;` followed by `buf.clear()` while `s` is still used is a compile error; passing a cursor array where a `string` is expected is a compile error; with `f(string)` and `f(u8[..>]&)`, `f(buf)` calls the second.
 121. `hashmap<string, u8[..>16]>` and `Pair<string, Pair<i32, i32>>` parse: a `>` inside slot brackets belongs to the slots, and `>>` closes two type-argument lists.
-122. A bare `println(...)` draws no dropped-status warning; when its write fails, the program reports it on stderr at exit and exits with status 1.
+122. A bare `println(...)` sets no status; when its write fails, the program reports it on stderr at exit and exits with status 1.
 123. `clear()` through a `T[..>]&` parameter is a compile error; through a `T[..~]&` it compiles.
 124. A program's own `sum` or `splitFirst` hides the `zink.lang` one, with no error; two imports of the same name are still an error.
 125. With `string w = a;`, `w = b;` makes `w` view `b`; with `u8[:]& v = buf[0:3];`, `v = "abc";` copies three bytes into `buf`.

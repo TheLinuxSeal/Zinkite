@@ -77,10 +77,11 @@ u8 main(string[.] args) {
     Args cli = new Args("cachesim", "Replay a trace of keys through an LRU cache.");
     cli.option('c', "capacity", "N", "cache size in entries (1000)");
     cli.positional("trace", "one key per line; stdin when left out");
-    cli.parseOrExit(args);
+    u8 code @stop = cli.parseOrStop(args);
+    if (stop) { return code; }
 
     i64 capacity @badCapacity = cli.getI64("capacity", 1000);
-    if (badCapacity || capacity < 1) { cli.usageError("--capacity takes a number from 1"); }
+    if (badCapacity || capacity < 1) { return cli.usageError("--capacity takes a number from 1"); }
 
     File input = stdin;
     string file = cli.get("trace", "");

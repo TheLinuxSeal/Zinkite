@@ -28,7 +28,8 @@ u8 main(string[.] args) {
     cli.flag('n', "number", "show line numbers");
     cli.positional("word", "what to look for");
     cli.positional("file", "the file to search");
-    cli.parseOrExit(args);
+    u8 code @stop = cli.parseOrStop(args);
+    if (stop) { return code; }
     string word = cli.get("word", "");
 
     // Read straight into text's own storage, freed at the end of main.
@@ -77,8 +78,14 @@ $ zink grepish.zn -n the notes.txt
   ```
 - **Statuses instead of exceptions.** Every call returns a `u8` status beside
   its value: `return #status.NOT_FOUND x;` sets it, `x @err = f();` reads it.
-  The codes follow Linux's `errno` numbers. Bugs, such as an index out of
-  range or an integer overflow, stop the program with the file and line.
+  The codes follow Linux's `errno` numbers. Every failure is one, a missing
+  file and an index out of range alike, and `@` can read any of them:
+  `v @err = a[i] * 2;`. A failure nothing reads stops the program at its line:
+  ```
+  tool.zn:12: `open` failed with NOT_FOUND, and nothing read its status
+  ```
+  Nothing else stops a program, and there is no `exit`: it ends when `main`
+  returns.
 - **Arrays that say what they allow.** `T[..>]` only grows at the end,
   `T[~.~]` changes at both ends, and `T[~]` has a cursor, as an editor's buffer
   does. Each gets the layout that suits it, and the compiler checks that the

@@ -60,6 +60,13 @@ impl<'p, 'a> Gen<'p, 'a> {
     /// is inlined, each parameter bound to its argument in place, so nothing is copied;
     /// any other function value is called through its pointer.
     pub(super) fn apply(&mut self, f: &Expr, args: &[String]) -> String {
+        let saved = self.catching.take();
+        let code = self.apply_inner(f, args);
+        self.catching = saved;
+        code
+    }
+
+    fn apply_inner(&mut self, f: &Expr, args: &[String]) -> String {
         let Some((params, body)) = as_lambda(f) else {
             let ft = settle(&self.ty(f));
             let fv = self.expr(f, &ft);
@@ -130,6 +137,13 @@ impl<'p, 'a> Gen<'p, 'a> {
     /// A lambda used as a value: the name of the C function it becomes, generated after
     /// the current function (`drain_lambdas`).
     pub(super) fn lambda_value(&mut self, e: &Expr) -> String {
+        let saved = self.catching.take();
+        let code = self.lambda_value_inner(e);
+        self.catching = saved;
+        code
+    }
+
+    fn lambda_value_inner(&mut self, e: &Expr) -> String {
         // One C function per lambda and instantiation of the generic code it's in.
         let k = format!("{:?}{:?}", key(e.span), self.subst);
         if let Some(n) = self.lambda_names.get(&k) {

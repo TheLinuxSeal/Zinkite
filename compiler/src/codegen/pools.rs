@@ -50,7 +50,6 @@ impl<'p, 'a> Gen<'p, 'a> {
         let (p, _) = self.place(base);
         let ptr = format!("zr_pool *_p = &({});", p);
         let at = |i: &str| format!("(&(({} *)_p->v.p)[{}])", slot, i);
-        let loc = self.loc(span);
         let handle = |me: &mut Self| me.expr(&args[0].expr, &Ty::Handle(Box::new(el.clone())));
         match m {
             "add" => {
@@ -71,19 +70,22 @@ impl<'p, 'a> Gen<'p, 'a> {
                     fails: false,
                 }
             }
-            // A reference to the slot even when it fails, since a slot always holds a T.
+            // A reference to the slot even when it's been freed, since a slot always holds a
+            // T; for a slot the pool never had, to a zero value of its own.
             "get" => {
                 let h = handle(self);
                 let r = Ty::Ref(Box::new(el.clone()));
                 let rt = self.result_ty(&r, span);
+                let ec = self.cty(&el, span);
                 CallOut {
                     code: format!(
-                        "({{ {} zr_handle _h = {}; uint8_t _st = zr_pool_check(_p, _h, sizeof({}), {}); ({}){{&{}->v, _st}}; }})",
+                        "({{ {} zr_handle _h = {}; uint8_t _st = zr_pool_check(_p, _h, sizeof({})); ({}){{_st == 22 ? ({} *)zr_zero_ref(sizeof({})) : &{}->v, _st}}; }})",
                         ptr,
                         h,
                         slot,
-                        loc,
                         rt,
+                        ec,
+                        ec,
                         at("_h.i")
                     ),
                     ret: r,
@@ -94,10 +96,9 @@ impl<'p, 'a> Gen<'p, 'a> {
                 let h = handle(self);
                 CallOut {
                     code: format!(
-                        "({{ {} zr_handle _h = {}; uint8_t _st = zr_pool_check(_p, _h, sizeof({s}), {}); if (!_st) zr_pool_release(_p, _h.i, sizeof({s})); _st; }})",
+                        "({{ {} zr_handle _h = {}; uint8_t _st = zr_pool_check(_p, _h, sizeof({s})); if (!_st) zr_pool_release(_p, _h.i, sizeof({s})); _st; }})",
                         ptr,
                         h,
-                        loc,
                         s = slot
                     ),
                     ret: Ty::Void,

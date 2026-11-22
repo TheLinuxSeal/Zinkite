@@ -194,9 +194,15 @@ impl<'p, 'a> Gen<'p, 'a> {
         let i_hi = less(self, "_i", "_hi");
         let rest = self.partial_sort_code(item, value, "_kk + 1", o, false, el, span);
         format!(
-            "int64_t _kk = {k}; if (_kk < 0 || _kk >= _n) zr_fail({loc}, \"selectNth: the position is out of range\"); int64_t _lo = 0, _hi = _n - 1; int _budget = 16; for (int64_t _q = _n; _q > 1; _q >>= 1) _budget += 2; while (_lo < _hi) {{ if (--_budget < 0) {{ {{ {rest} }} break; }} int64_t _mid = _lo + (_hi - _lo) / 2; if ({m_lo}) {s_ml} if ({h_lo}) {s_hl} if ({m_hi}) {s_mh} int64_t _st = _lo; for (int64_t _i = _lo; _i < _hi; _i++) if ({i_hi}) {{ {s_is} _st++; }} {s_sh} if (_st == _kk) break; if (_kk < _st) _hi = _st - 1; else _lo = _st + 1; }}",
+            "int64_t _kk = {k}; if (_kk < 0 || _kk >= _n) {{ {bad}; }} int64_t _lo = 0, _hi = _n - 1; int _budget = 16; for (int64_t _q = _n; _q > 1; _q >>= 1) _budget += 2; while (_lo < _hi) {{ if (--_budget < 0) {{ {{ {rest} }} break; }} int64_t _mid = _lo + (_hi - _lo) / 2; if ({m_lo}) {s_ml} if ({h_lo}) {s_hl} if ({m_hi}) {s_mh} int64_t _st = _lo; for (int64_t _i = _lo; _i < _hi; _i++) if ({i_hi}) {{ {s_is} _st++; }} {s_sh} if (_st == _kk) break; if (_kk < _st) _hi = _st - 1; else _lo = _st + 1; }}",
             k = k,
-            loc = loc,
+            bad = self.on_fail(
+                34,
+                format!(
+                    "zr_fail({}, \"selectNth: the position is out of range\")",
+                    loc
+                )
+            ),
             rest = rest,
             m_lo = m_lo,
             h_lo = h_lo,
