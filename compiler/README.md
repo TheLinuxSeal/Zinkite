@@ -251,9 +251,10 @@ representations as they are. Written so far:
   algorithms; they agree with Python's `datetime` over 5,000 random instants;
 - `zink.random`: `Rng`, xoshiro256** seeded through SplitMix64, with Lemire's
   unbiased `range` for every integer type, and the kernel's bytes for secrets;
-- `zink.hash`: FNV-1a, CRC-32 and SHA-256, one-shot and incremental, in the runtime's
-  C; they agree with Python's `zlib` and `hashlib`. `xxh3` waits for a reference to
-  test against;
+- `zink.hash`: FNV-1a, CRC-32, all of SHA-2 and SHA-3, and SHAKE, one-shot and
+  incremental, in the runtime's C, with one state for every SHA algorithm and an
+  unrolled Keccak; they agree with Python's `zlib` and `hashlib` at every padding and
+  block boundary. `xxh3` waits for a reference to test against;
 - `zink.encoding`: `bytes.hex()`, `hex.decode` and base64 with both alphabets;
 - `zink.csv`: `CsvReader`, with fields as views into the input where they can be,
   and `CsvWriter`; 2,000 random rows round-trip through Python's `csv`.

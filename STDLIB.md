@@ -18,7 +18,7 @@
 | `zink.cli` | `Args`, `ansi` | v1 | 6 |
 | `zink.math` | `math` | v1 | 8.1 |
 | `zink.random` | `random`, `Rng` | v1 | 8.2 |
-| `zink.hash` | `hash`, `Crc32`, `Sha256` | v1 | 8.3 |
+| `zink.hash` | `hash`, `Crc32`, `Sha2_256` and the other SHA-2 and SHA-3 classes | v1 | 8.3 |
 | `zink.encoding` | `hex`, `base64` | v1 | 8.4 |
 | `zink.csv` | `CsvReader`, `CsvWriter` | v1 | 9.1 |
 | `zink.data` | the shared parsed tree: `Node`, `Value`, `Entry`, `Kind`, `ParseError`, `Parser`, `DataWriter`, `TreeBuilder` | later | 9.2, 9.7 |
@@ -43,6 +43,7 @@
 - **Format-specific names carry the format**: `JsonParser`, `TomlParser`. Otherwise two wildcard imports would bring in two `Parser`s (DESIGN §8.5).
 - **Overloads share a name when they do the same thing for different inputs** (DESIGN §6.5): `i64.parse(s)` and `i64.parse(s, 16)`, `s.find(x)` and `s.find(x, from)`, and a writer's one `write`, for `string`, `i64`, `f64` and the rest.
 - **Different behaviour gets a different name**, even where the types would tell the calls apart: `sort(less)` and `sortBy(key)`, `parse` and `parsePrefix`.
+- **Hash functions are named as their standards number them**, with underscores between the numbers: `sha2_256`, `sha2_512_224`, `sha3_256`, `shake_128`, and the classes `Sha2_256` and `Shake_128`. Run together, as in `sha512224`, the numbers can't be read.
 
 ### 1.3 Conventions
 These follow from the memory model and the status code. Every section below keeps to them.
@@ -54,7 +55,7 @@ These follow from the memory model and the status code. Every section below keep
 2. **Text that is computed is returned as a `u8[.]`, built in place** where the caller keeps it (DESIGN §3.3).
    - `u8[.] up = name.toUpper();` writes the text once, into `up`.
    - Passed straight to a `string` parameter, the result is a statement temporary (DESIGN §4.11).
-3. **Small fixed-size results are returned by value**, in capped arrays, and never touch a data stack. `n.hex()` of a `u64` is a `u8[..~16]`, and `hash.sha256(b)` is a `u8[.32]`.
+3. **Small fixed-size results are returned by value**, in capped arrays, and never touch a data stack. `n.hex()` of a `u64` is a `u8[..~16]`, and `hash.sha2_256(b)` is a `u8[.32]`.
 4. **Views point into the input.** These are all views into their argument, rooted there (REFERENCES §4), so nothing is copied:
    - `s.trim()`, `s.split(",")` and `path.base(p)`;
    - every parsed string that has no escapes.
@@ -65,7 +66,11 @@ These follow from the memory model and the status code. Every section below keep
    - Each signature lists the codes worth handling. A call that wraps a system call can also fail with any other `errno` the kernel returns.
    - The value on failure is the zero value (DESIGN §7.5). The `...Or(fallback)` functions are the one documented exception, as `getOr` already is (DESIGN §4.10).
 7. **A function that can't fail sets no status**, so calling it never draws the dropped-status warning (DESIGN §7.3). Writers set none per call and report once, at `finish()` (§9.7).
-8. **Misuse is a bug and stops the program** (DESIGN §7.6), as an index out of range does. Examples: `w.key("a")` outside an object, `rng.range(5, 1)`, or declaring a 65th option. Expected failures, such as a missing file or bad input, are statuses.
+8. **An argument value a function can't take fails with `INVALID`**, and the value is the zero value. The caller checks the status, and the dropped-status warning (DESIGN §7.3) is the reminder.
+   - Examples: `rng.range(5, 1)`, `clamp(x, 10, 1)`, `"ab".repeat(-1)`, `xs.chunks(0)`, `s.find(x, 99)` on shorter text, `hash.shake_128(b, -1)`.
+   - **Misuse of an object's state or of the program's own structure is still a bug**, and stops the program: `w.key("a")` outside an object, declaring a 65th option, asking `Args` for an option never declared.
+   - **Indexes are the language's** (DESIGN §7.6): `a[i]` out of range stops the program, and so does `selectNth(k)`, whose result is a reference with nothing to refer to.
+   - Expected failures, such as a missing file or bad input, are statuses too, with their own codes.
 9. **Lambdas are compile-time values** (DESIGN §9.3), so `filter`, `sortBy` and `retain` compile to the loop you would write by hand.
 10. **Parsers report where input went wrong.** A status can't carry a line number, so each parser and reader keeps a `ParseError` with the line, the column and a message, to read after a failure (§9.2).
 11. **Library objects that write into a caller's buffer hold a reference to it**: `JsonWriter`, `CsvWriter`, `TreeBuilder`, `Walker`. The reference is to the array itself, not into its elements, so it may be a field (REFERENCES §7.1).
@@ -159,7 +164,7 @@ bool x.isNaN(), bool x.isFinite()     // float types
 
 <T implements ordered> T min(T a, T b)
 <T implements ordered> T max(T a, T b)
-<T implements ordered> T clamp(T x, T lo, T hi)    // lo > hi is a bug
+<T implements ordered> T clamp(T x, T lo, T hi)    // INVALID when lo > hi
 <T implements number> T abs(T x)                   // abs(i64.MIN) overflows, so it stops the program
 <T implements int> T x.divOr(T d, T fallback)     // x / d, or fallback when d is 0
 ```
@@ -197,7 +202,7 @@ To steer an iterator from inside the loop, or to read its state afterwards, decl
 ### 3.1 Searching
 ```
 i64 s.find(string needle)                  // MISSING
-i64 s.find(string needle, i64 start)       // MISSING; start > s.len is a bug
+i64 s.find(string needle, i64 start)       // MISSING; INVALID for a start outside 0..s.len
 i64 s.rfind(string needle)                 // MISSING
 i64 s.findAny(string bytes)                // the first byte that is one of bytes; MISSING
 bool s.contains(string needle)
@@ -248,9 +253,9 @@ bool s.equalsIgnoreCase(string other)  // ASCII letters only
 ```
 u8[.] s.toUpper()                           // ASCII letters; every other byte unchanged
 u8[.] s.toLower()
-u8[.] s.replaceAll(string from, string to)  // from == "" is a bug
+u8[.] s.replaceAll(string from, string to)  // INVALID when from == ""
 u8[.] s.replaceFirst(string from, string to)
-u8[.] s.repeat(i64 n)
+u8[.] s.repeat(i64 n)                       // INVALID for a negative n
 u8[.] s.pad(i64 w)                          // right-aligned in w code points, as pad(w) on numbers
 u8[.] s.padEnd(i64 w)                       // left-aligned
 ```
@@ -767,7 +772,7 @@ Scratch space is taken on a scratch data stack and released when the call return
 | `ChunkIterator chunks(i64 n)` | slices of `n` elements, the last one shorter |
 | `WindowIterator windows(i64 n)` | every run of `n` consecutive elements |
 
-Both yield slices, so on cursor arrays they wait for cursor-array slices (DESIGN §17). A size below 1 is a bug.
+Both yield slices, so on cursor arrays they wait for cursor-array slices (DESIGN §17). A size below 1 fails with `INVALID`, and the iterator gives nothing.
 
 ### 7.2 Heaps (v1)
 On arrays that can grow and shrink at the end (`T[..~]`):
@@ -880,10 +885,10 @@ Rng random.seeded(u64 seed)          // the same sequence on every run
 Rng random.fromOs()                  // seeded from getrandom
 u64 r.nextU64()
 f64 r.nextF64()                      // in [0, 1)
-<T implements int> T r.range(T lo, T hi)    // in [lo, hi), unbiased; lo >= hi is a bug
+<T implements int> T r.range(T lo, T hi)    // in [lo, hi), unbiased; INVALID when lo >= hi
 bool r.chance(f64 p)
 
-void random.secureBytes(u8[..>]& out, i64 n)   // from the kernel: keys, tokens, salts
+void random.secureBytes(u8[..>]& out, i64 n)   // from the kernel: keys, tokens, salts; INVALID for a negative n
 u64 random.secureU64()
 ```
 
@@ -895,20 +900,41 @@ u64 random.secureU64()
 u64 hash.fnv1a(string bytes)
 u64 hash.xxh3(string bytes, u64 seed)    // not written yet: it waits for a reference implementation to test against
 u32 hash.crc32(string bytes)              // the IEEE polynomial, as gzip and zip use
-u8[.32] hash.sha256(string bytes)
+
+// SHA-2 (FIPS 180-4)
+u8[.28] hash.sha2_224(string bytes)
+u8[.32] hash.sha2_256(string bytes)
+u8[.48] hash.sha2_384(string bytes)
+u8[.64] hash.sha2_512(string bytes)
+u8[.28] hash.sha2_512_224(string bytes)
+u8[.32] hash.sha2_512_256(string bytes)
+
+// SHA-3 (FIPS 202), and SHAKE, its extendable-output functions: as many bytes as asked for
+u8[.28] hash.sha3_224(string bytes)
+u8[.32] hash.sha3_256(string bytes)
+u8[.48] hash.sha3_384(string bytes)
+u8[.64] hash.sha3_512(string bytes)
+u8[.] hash.shake_128(string bytes, i64 n)
+u8[.] hash.shake_256(string bytes, i64 n)
 ```
 
 Incremental forms, for data that arrives in pieces:
 ```
-Sha256 h = new Sha256();
+Sha2_256 h = new Sha2_256();
 h.update(chunk);
-u8[.32] digest = h.finish();
+u8[.32] digest = h.finish();          // and h starts over
 println("${digest.hex()}");
+
+Shake_128 x = new Shake_128();
+x.update(chunk);
+u8[.] out = x.finish(64);
 ```
-`Crc32` works the same way.
+Each function has its class, named the same but capitalized (`Sha2_512_224`, `Sha3_384`, `Shake_256`), and `Crc32` works the same way.
 
 - **`hashmap` doesn't use these.** It uses its own keyed hash with a per-run seed (DESIGN §4.14).
-- **Later**: SHA-512, BLAKE3, HMAC, and SHA-1 and MD5 for checking old checksums.
+- **SHA-2 and SHA-3 are in portable C**: on one core of a recent x86, about 240 MB/s for SHA-256, 350 MB/s for SHA-512 and 330 MB/s for SHA3-256. OpenSSL's SHA-256 is about twice as fast, with the CPU's SHA instructions.
+- **A negative length for SHAKE fails with `INVALID`**, and gives no bytes. A `Shake_128` or `Shake_256` is left as it was, so `finish` can be called again.
+- **Later**: BLAKE3, HMAC, and SHA-1 and MD5 for checking old checksums.
 
 ### 8.4 `hex` and `base64`
 ```

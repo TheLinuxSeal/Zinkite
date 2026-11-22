@@ -1,0 +1,25 @@
+package zink.hash;
+
+// SHA-256 (FIPS 180-4), for data that arrives in pieces (STDLIB §8.3): update with each, then
+// finish.
+public class Sha2_256 {
+    // The runtime's state, kept in the object (zr_digest).
+    private u8[..~216] st = [];
+
+    public new() {
+        for (i64 i = 0; i < 216; i++) {
+            @_ = st +> 0;
+        }
+        hash.start(st, 2);
+    }
+
+    public mut void update(string chunk) { hash.add(st, chunk); }
+
+    // The digest. The object starts over afterwards.
+    public mut u8[.32] finish() {
+        u8[.32] out = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        hash.end(st, out);
+        hash.start(st, 2);
+        return out;
+    }
+}

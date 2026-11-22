@@ -4810,6 +4810,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             "codePoints" => ("CodePointIterator", true),
             "chunks" => ("ChunkIterator", false),
             "windows" => ("WindowIterator", false),
+            "repeat" => ("TextMethods", true),
             _ => return None,
         };
         let sliceable = match kind {

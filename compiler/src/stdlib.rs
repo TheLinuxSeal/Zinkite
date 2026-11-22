@@ -45,6 +45,7 @@ lib! {
     "zink.lang", "zink/lang/env.zn";
     "zink.lang", "zink/lang/EnvVar.zn";
     "zink.lang", "zink/lang/EnvIterator.zn";
+    "zink.lang", "zink/lang/TextMethods.zn";
     "zink.time", "zink/time/time.zn";
     "zink.time", "zink/time/Duration.zn";
     "zink.time", "zink/time/Instant.zn";
@@ -58,7 +59,18 @@ lib! {
     "zink.random", "zink/random/Rng.zn";
     "zink.random", "zink/random/random.zn";
     "zink.hash", "zink/hash/hash.zn";
-    "zink.hash", "zink/hash/Sha256.zn";
+    "zink.hash", "zink/hash/Sha2_224.zn";
+    "zink.hash", "zink/hash/Sha2_256.zn";
+    "zink.hash", "zink/hash/Sha2_384.zn";
+    "zink.hash", "zink/hash/Sha2_512.zn";
+    "zink.hash", "zink/hash/Sha2_512_224.zn";
+    "zink.hash", "zink/hash/Sha2_512_256.zn";
+    "zink.hash", "zink/hash/Sha3_224.zn";
+    "zink.hash", "zink/hash/Sha3_256.zn";
+    "zink.hash", "zink/hash/Sha3_384.zn";
+    "zink.hash", "zink/hash/Sha3_512.zn";
+    "zink.hash", "zink/hash/Shake_128.zn";
+    "zink.hash", "zink/hash/Shake_256.zn";
     "zink.hash", "zink/hash/Crc32.zn";
     "zink.encoding", "zink/encoding/hex.zn";
     "zink.encoding", "zink/encoding/base64.zn";

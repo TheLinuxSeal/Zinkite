@@ -12,7 +12,13 @@ public class random {
     public static Rng fromOs() { return Rng.ofSeed(cU64()); }
 
     // From the kernel: for keys, tokens and salts. Appends n bytes to out.
-    public static void secureBytes(u8[..>]& out, i64 n) { cBytes(out, n); }
+    // INVALID, and nothing appended, for a negative n.
+    public static void secureBytes(u8[..>]& out, i64 n) {
+        if (n < 0) {
+            return #status.INVALID;
+        }
+        cBytes(out, n);
+    }
 
     public static u64 secureU64() { return cU64(); }
 }

@@ -165,7 +165,12 @@ pub fn global(name: &str) -> Vec<Sig> {
         "exit" => vec![Sig::new(name, vec![Ty::u8()], Ty::Void)],
         "fail" => vec![Sig::new(name, vec![s()], Ty::Void)],
         "min" | "max" => vec![Sig::new(name, vec![t(), t()], t()).generic(vec![tp("#T", Ordered)])],
-        "clamp" => vec![Sig::new(name, vec![t(), t(), t()], t()).generic(vec![tp("#T", Ordered)])],
+        // INVALID, and 0, when lo > hi.
+        "clamp" => vec![
+            Sig::new(name, vec![t(), t(), t()], t())
+                .generic(vec![tp("#T", Ordered)])
+                .fails(),
+        ],
         "abs" => vec![Sig::new(name, vec![t()], t()).generic(vec![tp("#T", Number)])],
         _ => Vec::new(),
     }

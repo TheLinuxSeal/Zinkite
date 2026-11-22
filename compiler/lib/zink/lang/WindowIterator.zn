@@ -1,7 +1,8 @@
 package zink.lang;
 
 // Every run of n consecutive elements of an array, in order (STDLIB §7.1): none when the
-// array is shorter than n. Each is a view into the array. A size below 1 is a bug.
+// array is shorter than n. Each is a view into the array. A size below 1 fails with
+// INVALID, and the iterator gives nothing.
 public class WindowIterator<T> implements Iterator<T[:]> {
     private T[:] items;
     private i64 n;
@@ -9,7 +10,7 @@ public class WindowIterator<T> implements Iterator<T[:]> {
 
     static <U> WindowIterator<U> windows(U[:] items, i64 n) {
         if (n < 1) {
-            fail("windows: the size must be at least 1");
+            return #status.INVALID new WindowIterator<U>(items[0:0], 1);
         }
         return new WindowIterator<U>(items, n);
     }

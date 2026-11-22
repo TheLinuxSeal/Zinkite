@@ -3602,7 +3602,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                         name.name.as_str(),
                         "pad" | "zeroPad" | "hex" | "bin" | "oct" | "fixed" | "utf8"
                     ) && matches!(bt.unref(), Ty::Prim(_))
-                        || matches!(name.name.as_str(), "toUpper" | "toLower" | "repeat" | "hex")
+                        || matches!(name.name.as_str(), "toUpper" | "toLower" | "hex")
                             && matches!(bt.unref(), Ty::Slice(_) | Ty::View(_) | Ty::Array(..))
                 }
                 _ => false,
@@ -3728,15 +3728,6 @@ impl<'p, 'a> Gen<'p, 'a> {
                             "{{ zr_slice _s = {}; for (int64_t _j = 0; _j < _s.n; _j++) {{ uint8_t _c = ((uint8_t*)_s.p)[_j]; zr_w_byte({k}, (uint8_t)\"0123456789abcdef\"[_c >> 4]); zr_w_byte({k}, (uint8_t)\"0123456789abcdef\"[_c & 15]); }} }} ",
                             s,
                             k = k
-                        );
-                    }
-                    ("repeat", None) => {
-                        let s = self.conv(&v, &bt, &Ty::string(), e.span);
-                        let n = arg(self, pre);
-                        let _ = write!(
-                            writes,
-                            "for (int64_t _j = 0; _j < {}; _j++) zr_w_str({}, {}); ",
-                            n, k, s
                         );
                     }
                     _ => {
@@ -4149,10 +4140,18 @@ impl<'p, 'a> Gen<'p, 'a> {
                                 "({{ {} _a = {}, _b = {}; _a < _b ? _b : _a; }})",
                                 ct, vs[0], vs[1]
                             ),
-                            "clamp" => format!(
-                                "({{ {} _x = {}, _lo = {}, _hi = {}; _x < _lo ? _lo : _hi < _x ? _hi : _x; }})",
-                                ct, vs[0], vs[1], vs[2]
-                            ),
+                            // INVALID, and 0, when the range is empty.
+                            "clamp" => {
+                                let rt = self.result_ty(&t, span);
+                                format!(
+                                    "({{ {ct} _x = {}, _lo = {}, _hi = {}; {rt} _r = {{0, 0}}; if (_hi < _lo) _r.s = 22; else _r.v = _x < _lo ? _lo : _hi < _x ? _hi : _x; _r; }})",
+                                    vs[0],
+                                    vs[1],
+                                    vs[2],
+                                    ct = ct,
+                                    rt = rt
+                                )
+                            }
                             _ => {
                                 let neg = self.arith_code(BinOp::Sub, "0", "_a", &t, span);
                                 format!("({{ {} _a = {}; _a < 0 ? {} : _a; }})", ct, vs[0], neg)
@@ -4161,6 +4160,9 @@ impl<'p, 'a> Gen<'p, 'a> {
                         if !matches!(t, Ty::Prim(_)) && f != "min" && f != "max" {
                             let u = self.unsupported(span, "this function on non-numbers");
                             return ok(u, ret);
+                        }
+                        if f == "clamp" {
+                            return fail(code, t);
                         }
                         ok(code, t)
                     }

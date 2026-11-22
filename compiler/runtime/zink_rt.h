@@ -752,6 +752,7 @@ typedef struct { zr_i128 v; uint8_t s; } zr_res_i128;
 typedef struct { zr_u128 v; uint8_t s; } zr_res_u128;
 
 static ZR_UNUSED zr_res_i64 zr_find(zr_slice s, zr_slice x, int64_t from) {
+    if (from < 0 || from > s.n) { zr_res_i64 bad = {0, 22}; return bad; } /* INVALID */
     zr_res_i64 r = {zr_find_from(s, x, from), 0};
     if (r.v < 0) { r.v = 0; r.s = 195; } /* MISSING */
     return r;
@@ -1047,83 +1048,285 @@ static ZR_UNUSED uint32_t zr_crc32(uint32_t crc, zr_slice s) {
     return ~crc;
 }
 
-/* SHA-256 (FIPS 180-4). Its state lives in the Sha256 object's bytes. */
-typedef struct { uint32_t h[8]; uint64_t len; uint32_t used; uint8_t buf[64]; } zr_sha;
+/* SHA-2 (FIPS 180-4) and SHA-3 (FIPS 202). A hash object keeps this state in its own
+ * bytes, with the algorithm in it, so one init, update and final serve all twelve:
+ *   1 SHA-224    2 SHA-256    3 SHA-384    4 SHA-512    5 SHA-512/224    6 SHA-512/256
+ *   7 SHA3-224   8 SHA3-256   9 SHA3-384  10 SHA3-512  11 SHAKE128       12 SHAKE256
+ * The constants are derived from their definitions (cube and square roots of primes, the
+ * SHA-512/t IV function, Keccak's LFSR) and the results checked against Python's hashlib. */
+typedef struct {
+    uint32_t kind, used;     /* the algorithm; bytes waiting in buf, or absorbed into a */
+    uint64_t len;            /* bytes so far (SHA-2) */
+    union {
+        struct { uint32_t h[8]; uint8_t buf[64]; } s2;
+        struct { uint64_t h[8]; uint8_t buf[128]; } s5;
+        uint64_t a[25];
+    } u;
+} zr_digest;
 
-static void zr_sha_block(uint32_t *h, const uint8_t *b) {
-    static const uint32_t k[64] = {
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
-#define ZR_ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+#define ZR_DIGEST_SIZE 216
+typedef char zr_digest_fits[sizeof(zr_digest) == ZR_DIGEST_SIZE ? 1 : -1];
+
+static const uint32_t zr_sha2_k[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+static const uint32_t zr_sha2_iv256[8] = {
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+static const uint64_t zr_sha5_k[80] = {
+    0x428a2f98d728ae22ULL, 0x7137449123ef65cdULL, 0xb5c0fbcfec4d3b2fULL, 0xe9b5dba58189dbbcULL,
+    0x3956c25bf348b538ULL, 0x59f111f1b605d019ULL, 0x923f82a4af194f9bULL, 0xab1c5ed5da6d8118ULL,
+    0xd807aa98a3030242ULL, 0x12835b0145706fbeULL, 0x243185be4ee4b28cULL, 0x550c7dc3d5ffb4e2ULL,
+    0x72be5d74f27b896fULL, 0x80deb1fe3b1696b1ULL, 0x9bdc06a725c71235ULL, 0xc19bf174cf692694ULL,
+    0xe49b69c19ef14ad2ULL, 0xefbe4786384f25e3ULL, 0x0fc19dc68b8cd5b5ULL, 0x240ca1cc77ac9c65ULL,
+    0x2de92c6f592b0275ULL, 0x4a7484aa6ea6e483ULL, 0x5cb0a9dcbd41fbd4ULL, 0x76f988da831153b5ULL,
+    0x983e5152ee66dfabULL, 0xa831c66d2db43210ULL, 0xb00327c898fb213fULL, 0xbf597fc7beef0ee4ULL,
+    0xc6e00bf33da88fc2ULL, 0xd5a79147930aa725ULL, 0x06ca6351e003826fULL, 0x142929670a0e6e70ULL,
+    0x27b70a8546d22ffcULL, 0x2e1b21385c26c926ULL, 0x4d2c6dfc5ac42aedULL, 0x53380d139d95b3dfULL,
+    0x650a73548baf63deULL, 0x766a0abb3c77b2a8ULL, 0x81c2c92e47edaee6ULL, 0x92722c851482353bULL,
+    0xa2bfe8a14cf10364ULL, 0xa81a664bbc423001ULL, 0xc24b8b70d0f89791ULL, 0xc76c51a30654be30ULL,
+    0xd192e819d6ef5218ULL, 0xd69906245565a910ULL, 0xf40e35855771202aULL, 0x106aa07032bbd1b8ULL,
+    0x19a4c116b8d2d0c8ULL, 0x1e376c085141ab53ULL, 0x2748774cdf8eeb99ULL, 0x34b0bcb5e19b48a8ULL,
+    0x391c0cb3c5c95a63ULL, 0x4ed8aa4ae3418acbULL, 0x5b9cca4f7763e373ULL, 0x682e6ff3d6b2b8a3ULL,
+    0x748f82ee5defb2fcULL, 0x78a5636f43172f60ULL, 0x84c87814a1f0ab72ULL, 0x8cc702081a6439ecULL,
+    0x90befffa23631e28ULL, 0xa4506cebde82bde9ULL, 0xbef9a3f7b2c67915ULL, 0xc67178f2e372532bULL,
+    0xca273eceea26619cULL, 0xd186b8c721c0c207ULL, 0xeada7dd6cde0eb1eULL, 0xf57d4f7fee6ed178ULL,
+    0x06f067aa72176fbaULL, 0x0a637dc5a2c898a6ULL, 0x113f9804bef90daeULL, 0x1b710b35131c471bULL,
+    0x28db77f523047d84ULL, 0x32caab7b40c72493ULL, 0x3c9ebe0a15c9bebcULL, 0x431d67c49c100d4cULL,
+    0x4cc5d4becb3e42b6ULL, 0x597f299cfc657e2aULL, 0x5fcb6fab3ad6faecULL, 0x6c44198c4a475817ULL};
+static const uint64_t zr_sha5_iv512[8] = {
+    0x6a09e667f3bcc908ULL, 0xbb67ae8584caa73bULL, 0x3c6ef372fe94f82bULL, 0xa54ff53a5f1d36f1ULL,
+    0x510e527fade682d1ULL, 0x9b05688c2b3e6c1fULL, 0x1f83d9abfb41bd6bULL, 0x5be0cd19137e2179ULL};
+static const uint64_t zr_sha5_iv384[8] = {
+    0xcbbb9d5dc1059ed8ULL, 0x629a292a367cd507ULL, 0x9159015a3070dd17ULL, 0x152fecd8f70e5939ULL,
+    0x67332667ffc00b31ULL, 0x8eb44a8768581511ULL, 0xdb0c2e0d64f98fa7ULL, 0x47b5481dbefa4fa4ULL};
+static const uint64_t zr_sha5_iv224[8] = {
+    0x8c3d37c819544da2ULL, 0x73e1996689dcd4d6ULL, 0x1dfab7ae32ff9c82ULL, 0x679dd514582f9fcfULL,
+    0x0f6d2b697bd44da8ULL, 0x77e36f7304c48942ULL, 0x3f9d85a86a1d36c8ULL, 0x1112e6ad91d692a1ULL};
+static const uint64_t zr_sha5_iv256[8] = {
+    0x22312194fc2bf72cULL, 0x9f555fa3c84c64c2ULL, 0x2393b86b6f53b151ULL, 0x963877195940eabdULL,
+    0x96283ee2a88effe3ULL, 0xbe5e1e2553863992ULL, 0x2b0199fc2c85b8aaULL, 0x0eb72ddc81c52ca2ULL};
+static const uint32_t zr_sha2_iv224[8] = {
+    0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939, 0xffc00b31, 0x68581511, 0x64f98fa7, 0xbefa4fa4};
+static const uint64_t zr_keccak_rc[24] = {
+    0x0000000000000001ULL, 0x0000000000008082ULL, 0x800000000000808aULL, 0x8000000080008000ULL,
+    0x000000000000808bULL, 0x0000000080000001ULL, 0x8000000080008081ULL, 0x8000000000008009ULL,
+    0x000000000000008aULL, 0x0000000000000088ULL, 0x0000000080008009ULL, 0x000000008000000aULL,
+    0x000000008000808bULL, 0x800000000000008bULL, 0x8000000000008089ULL, 0x8000000000008003ULL,
+    0x8000000000008002ULL, 0x8000000000000080ULL, 0x000000000000800aULL, 0x800000008000000aULL,
+    0x8000000080008081ULL, 0x8000000000008080ULL, 0x0000000080000001ULL, 0x8000000080008008ULL};
+
+#define ZR_ROR32(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+#define ZR_ROR64(x, n) (((x) >> (n)) | ((x) << (64 - (n))))
+#define ZR_ROL64(x, n) (((x) << (n)) | ((x) >> (64 - (n))))
+
+static void zr_sha2_block(uint32_t *h, const uint8_t *b) {
     uint32_t w[64];
     for (int i = 0; i < 16; i++)
         w[i] = (uint32_t)b[4 * i] << 24 | (uint32_t)b[4 * i + 1] << 16 | (uint32_t)b[4 * i + 2] << 8 | b[4 * i + 3];
     for (int i = 16; i < 64; i++) {
-        uint32_t s0 = ZR_ROR(w[i - 15], 7) ^ ZR_ROR(w[i - 15], 18) ^ (w[i - 15] >> 3);
-        uint32_t s1 = ZR_ROR(w[i - 2], 17) ^ ZR_ROR(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        uint32_t s0 = ZR_ROR32(w[i - 15], 7) ^ ZR_ROR32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        uint32_t s1 = ZR_ROR32(w[i - 2], 17) ^ ZR_ROR32(w[i - 2], 19) ^ (w[i - 2] >> 10);
         w[i] = w[i - 16] + s0 + w[i - 7] + s1;
     }
     uint32_t a = h[0], bb = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
     for (int i = 0; i < 64; i++) {
-        uint32_t t1 = hh + (ZR_ROR(e, 6) ^ ZR_ROR(e, 11) ^ ZR_ROR(e, 25)) + ((e & f) ^ (~e & g)) + k[i] + w[i];
-        uint32_t t2 = (ZR_ROR(a, 2) ^ ZR_ROR(a, 13) ^ ZR_ROR(a, 22)) + ((a & bb) ^ (a & c) ^ (bb & c));
+        uint32_t t1 = hh + (ZR_ROR32(e, 6) ^ ZR_ROR32(e, 11) ^ ZR_ROR32(e, 25)) + ((e & f) ^ (~e & g)) + zr_sha2_k[i] + w[i];
+        uint32_t t2 = (ZR_ROR32(a, 2) ^ ZR_ROR32(a, 13) ^ ZR_ROR32(a, 22)) + ((a & bb) ^ (a & c) ^ (bb & c));
         hh = g; g = f; f = e; e = d + t1; d = c; c = bb; bb = a; a = t1 + t2;
     }
-#undef ZR_ROR
     h[0] += a; h[1] += bb; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
 }
 
-static ZR_UNUSED void zr_sha_init(zr_slice st) {
-    zr_sha s = {{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19}, 0, 0, {0}};
+static void zr_sha5_block(uint64_t *h, const uint8_t *b) {
+    uint64_t w[80];
+    for (int i = 0; i < 16; i++) {
+        uint64_t x = 0;
+        for (int k = 0; k < 8; k++) x = x << 8 | b[8 * i + k];
+        w[i] = x;
+    }
+    for (int i = 16; i < 80; i++) {
+        uint64_t s0 = ZR_ROR64(w[i - 15], 1) ^ ZR_ROR64(w[i - 15], 8) ^ (w[i - 15] >> 7);
+        uint64_t s1 = ZR_ROR64(w[i - 2], 19) ^ ZR_ROR64(w[i - 2], 61) ^ (w[i - 2] >> 6);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    uint64_t a = h[0], bb = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+    for (int i = 0; i < 80; i++) {
+        uint64_t t1 = hh + (ZR_ROR64(e, 14) ^ ZR_ROR64(e, 18) ^ ZR_ROR64(e, 41)) + ((e & f) ^ (~e & g)) + zr_sha5_k[i] + w[i];
+        uint64_t t2 = (ZR_ROR64(a, 28) ^ ZR_ROR64(a, 34) ^ ZR_ROR64(a, 39)) + ((a & bb) ^ (a & c) ^ (bb & c));
+        hh = g; g = f; f = e; e = d + t1; d = c; c = bb; bb = a; a = t1 + t2;
+    }
+    h[0] += a; h[1] += bb; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+}
+
+/* Keccak-f[1600]: 24 rounds of theta, rho and pi, chi, iota, unrolled, with the state in
+ * locals. The rotations and the lanes' new places are FIPS 202's, worked out once. */
+static void zr_keccak_f(uint64_t *st) {
+    uint64_t a0 = st[0], a1 = st[1], a2 = st[2], a3 = st[3], a4 = st[4];
+    uint64_t a5 = st[5], a6 = st[6], a7 = st[7], a8 = st[8], a9 = st[9];
+    uint64_t a10 = st[10], a11 = st[11], a12 = st[12], a13 = st[13], a14 = st[14];
+    uint64_t a15 = st[15], a16 = st[16], a17 = st[17], a18 = st[18], a19 = st[19];
+    uint64_t a20 = st[20], a21 = st[21], a22 = st[22], a23 = st[23], a24 = st[24];
+    for (int r = 0; r < 24; r++) {
+        uint64_t c0 = a0 ^ a5 ^ a10 ^ a15 ^ a20, c1 = a1 ^ a6 ^ a11 ^ a16 ^ a21, c2 = a2 ^ a7 ^ a12 ^ a17 ^ a22, c3 = a3 ^ a8 ^ a13 ^ a18 ^ a23, c4 = a4 ^ a9 ^ a14 ^ a19 ^ a24;
+        uint64_t d0 = c4 ^ ZR_ROL64(c1, 1), d1 = c0 ^ ZR_ROL64(c2, 1), d2 = c1 ^ ZR_ROL64(c3, 1), d3 = c2 ^ ZR_ROL64(c4, 1), d4 = c3 ^ ZR_ROL64(c0, 1);
+        uint64_t b0 = a0 ^ d0, b1 = ZR_ROL64(a6 ^ d1, 44), b2 = ZR_ROL64(a12 ^ d2, 43), b3 = ZR_ROL64(a18 ^ d3, 21), b4 = ZR_ROL64(a24 ^ d4, 14);
+        uint64_t b5 = ZR_ROL64(a3 ^ d3, 28), b6 = ZR_ROL64(a9 ^ d4, 20), b7 = ZR_ROL64(a10 ^ d0, 3), b8 = ZR_ROL64(a16 ^ d1, 45), b9 = ZR_ROL64(a22 ^ d2, 61);
+        uint64_t b10 = ZR_ROL64(a1 ^ d1, 1), b11 = ZR_ROL64(a7 ^ d2, 6), b12 = ZR_ROL64(a13 ^ d3, 25), b13 = ZR_ROL64(a19 ^ d4, 8), b14 = ZR_ROL64(a20 ^ d0, 18);
+        uint64_t b15 = ZR_ROL64(a4 ^ d4, 27), b16 = ZR_ROL64(a5 ^ d0, 36), b17 = ZR_ROL64(a11 ^ d1, 10), b18 = ZR_ROL64(a17 ^ d2, 15), b19 = ZR_ROL64(a23 ^ d3, 56);
+        uint64_t b20 = ZR_ROL64(a2 ^ d2, 62), b21 = ZR_ROL64(a8 ^ d3, 55), b22 = ZR_ROL64(a14 ^ d4, 39), b23 = ZR_ROL64(a15 ^ d0, 41), b24 = ZR_ROL64(a21 ^ d1, 2);
+        a0 = b0 ^ (~b1 & b2);
+        a1 = b1 ^ (~b2 & b3);
+        a2 = b2 ^ (~b3 & b4);
+        a3 = b3 ^ (~b4 & b0);
+        a4 = b4 ^ (~b0 & b1);
+        a5 = b5 ^ (~b6 & b7);
+        a6 = b6 ^ (~b7 & b8);
+        a7 = b7 ^ (~b8 & b9);
+        a8 = b8 ^ (~b9 & b5);
+        a9 = b9 ^ (~b5 & b6);
+        a10 = b10 ^ (~b11 & b12);
+        a11 = b11 ^ (~b12 & b13);
+        a12 = b12 ^ (~b13 & b14);
+        a13 = b13 ^ (~b14 & b10);
+        a14 = b14 ^ (~b10 & b11);
+        a15 = b15 ^ (~b16 & b17);
+        a16 = b16 ^ (~b17 & b18);
+        a17 = b17 ^ (~b18 & b19);
+        a18 = b18 ^ (~b19 & b15);
+        a19 = b19 ^ (~b15 & b16);
+        a20 = b20 ^ (~b21 & b22);
+        a21 = b21 ^ (~b22 & b23);
+        a22 = b22 ^ (~b23 & b24);
+        a23 = b23 ^ (~b24 & b20);
+        a24 = b24 ^ (~b20 & b21);
+        a0 ^= zr_keccak_rc[r];
+    }
+    st[0] = a0; st[1] = a1; st[2] = a2; st[3] = a3; st[4] = a4;
+    st[5] = a5; st[6] = a6; st[7] = a7; st[8] = a8; st[9] = a9;
+    st[10] = a10; st[11] = a11; st[12] = a12; st[13] = a13; st[14] = a14;
+    st[15] = a15; st[16] = a16; st[17] = a17; st[18] = a18; st[19] = a19;
+    st[20] = a20; st[21] = a21; st[22] = a22; st[23] = a23; st[24] = a24;
+}
+
+/* Keccak's rate in bytes: what each permutation absorbs or gives out. */
+static uint32_t zr_keccak_rate(uint32_t kind) {
+    static const uint8_t rate[6] = {144, 136, 104, 72, 168, 136};
+    return rate[kind - 7];
+}
+
+static ZR_UNUSED void zr_digest_init(zr_slice st, int64_t kind) {
+    zr_digest s;
+    memset(&s, 0, sizeof s);
+    s.kind = (uint32_t)kind;
+    switch (kind) {
+        case 1: memcpy(s.u.s2.h, zr_sha2_iv224, sizeof s.u.s2.h); break;
+        case 2: memcpy(s.u.s2.h, zr_sha2_iv256, sizeof s.u.s2.h); break;
+        case 3: memcpy(s.u.s5.h, zr_sha5_iv384, sizeof s.u.s5.h); break;
+        case 4: memcpy(s.u.s5.h, zr_sha5_iv512, sizeof s.u.s5.h); break;
+        case 5: memcpy(s.u.s5.h, zr_sha5_iv224, sizeof s.u.s5.h); break;
+        case 6: memcpy(s.u.s5.h, zr_sha5_iv256, sizeof s.u.s5.h); break;
+        default: break;
+    }
     memcpy(st.p, &s, sizeof s);
 }
 
-static ZR_UNUSED void zr_sha_update(zr_slice st, zr_slice data) {
-    zr_sha s;
-    memcpy(&s, st.p, sizeof s);
-    const uint8_t *p = (const uint8_t *)data.p;
-    int64_t n = data.n;
-    s.len += (uint64_t)n;
-    if (s.used) {
-        int64_t take = 64 - s.used < n ? 64 - s.used : n;
-        memcpy(s.buf + s.used, p, (size_t)take);
-        s.used += (uint32_t)take;
-        p += take;
-        n -= take;
-        if (s.used == 64) { zr_sha_block(s.h, s.buf); s.used = 0; }
+/* Feeds bytes to a SHA-2 state of the given block size, whole blocks straight from p. */
+#define ZR_SHA_ABSORB(blk, buf, block, h)                                          \
+    do {                                                                           \
+        if (s->used) {                                                             \
+            int64_t take = (blk) - s->used < n ? (blk) - s->used : n;              \
+            memcpy((buf) + s->used, p, (size_t)take);                              \
+            s->used += (uint32_t)take; p += take; n -= take;                       \
+            if (s->used == (blk)) { block(h, buf); s->used = 0; }                  \
+        }                                                                          \
+        while (n >= (blk)) { block(h, p); p += (blk); n -= (blk); }               \
+        if (n) { memcpy(buf, p, (size_t)n); s->used = (uint32_t)n; }               \
+    } while (0)
+
+static void zr_digest_absorb(zr_digest *s, const uint8_t *p, int64_t n) {
+    if (s->kind <= 2) {
+        s->len += (uint64_t)n;
+        ZR_SHA_ABSORB(64, s->u.s2.buf, zr_sha2_block, s->u.s2.h);
+    } else if (s->kind <= 6) {
+        s->len += (uint64_t)n;
+        ZR_SHA_ABSORB(128, s->u.s5.buf, zr_sha5_block, s->u.s5.h);
+    } else {
+        uint32_t rate = zr_keccak_rate(s->kind);
+        while (n > 0) {
+            if (s->used == 0 && n >= rate) {
+                /* A whole block, a lane at a time; the shifts compile to one load. */
+                for (uint32_t i = 0; i < rate / 8; i++) {
+                    const uint8_t *q = p + 8 * i;
+                    s->u.a[i] ^= (uint64_t)q[0] | (uint64_t)q[1] << 8 | (uint64_t)q[2] << 16 | (uint64_t)q[3] << 24 |
+                                 (uint64_t)q[4] << 32 | (uint64_t)q[5] << 40 | (uint64_t)q[6] << 48 | (uint64_t)q[7] << 56;
+                }
+                zr_keccak_f(s->u.a);
+                p += rate;
+                n -= rate;
+                continue;
+            }
+            s->u.a[s->used >> 3] ^= (uint64_t)*p++ << (8 * (s->used & 7));
+            n--;
+            if (++s->used == rate) { zr_keccak_f(s->u.a); s->used = 0; }
+        }
     }
-    while (n >= 64) { zr_sha_block(s.h, p); p += 64; n -= 64; }
-    if (n) { memcpy(s.buf, p, (size_t)n); s.used = (uint32_t)n; }
+}
+
+static ZR_UNUSED void zr_digest_update(zr_slice st, zr_slice data) {
+    zr_digest s;
+    memcpy(&s, st.p, sizeof s);
+    zr_digest_absorb(&s, (const uint8_t *)data.p, data.n);
     memcpy(st.p, &s, sizeof s);
 }
 
-/* The digest, into the 32 bytes at out. */
-static ZR_UNUSED void zr_sha_final(zr_slice st, zr_slice out) {
-    zr_sha s;
-    memcpy(&s, st.p, sizeof s);
-    uint64_t bits = s.len * 8;
-    uint8_t pad[72] = {0x80};
-    int64_t padn = s.used < 56 ? 56 - s.used : 120 - s.used;
-    for (int i = 0; i < 8; i++) pad[padn + i] = (uint8_t)(bits >> (56 - 8 * i));
-    zr_slice p = {pad, padn + 8};
-    s.len = 0;
-    memcpy(st.p, &s, sizeof s);
-    zr_sha_update(st, p);
-    memcpy(&s, st.p, sizeof s);
-    uint8_t *o = (uint8_t *)out.p;
-    for (int i = 0; i < 8; i++) {
-        o[4 * i] = (uint8_t)(s.h[i] >> 24);
-        o[4 * i + 1] = (uint8_t)(s.h[i] >> 16);
-        o[4 * i + 2] = (uint8_t)(s.h[i] >> 8);
-        o[4 * i + 3] = (uint8_t)s.h[i];
+/* The digest's bytes, out->n of them, appended to out; the state is used up. */
+static void zr_digest_end(zr_digest *s, uint8_t *o, int64_t n) {
+    if (s->kind <= 6) {
+        int big = s->kind > 2;
+        int blk = big ? 128 : 64, lenb = big ? 16 : 8;
+        uint64_t hi = s->len >> 61, lo = s->len << 3;
+        uint8_t pad[144] = {0x80};
+        int64_t padn = (int64_t)s->used < blk - lenb ? blk - lenb - s->used : 2 * blk - lenb - s->used;
+        for (int i = 0; i < 8; i++) pad[padn + lenb - 1 - i] = (uint8_t)(lo >> (8 * i));
+        if (big) for (int i = 0; i < 8; i++) pad[padn + 7 - i] = (uint8_t)(hi >> (8 * i));
+        zr_digest_absorb(s, pad, padn + lenb);
+        for (int64_t i = 0; i < n; i++)
+            o[i] = big ? (uint8_t)(s->u.s5.h[i / 8] >> (56 - 8 * (i % 8)))
+                       : (uint8_t)(s->u.s2.h[i / 4] >> (24 - 8 * (i % 4)));
+        return;
+    }
+    uint32_t rate = zr_keccak_rate(s->kind);
+    uint8_t domain = s->kind >= 11 ? 0x1f : 0x06;
+    s->u.a[s->used >> 3] ^= (uint64_t)domain << (8 * (s->used & 7));
+    s->u.a[(rate - 1) >> 3] ^= (uint64_t)0x80 << (8 * ((rate - 1) & 7));
+    zr_keccak_f(s->u.a);
+    for (int64_t i = 0, at = 0; i < n; i++, at++) {
+        if (at == rate) { zr_keccak_f(s->u.a); at = 0; }
+        o[i] = (uint8_t)(s->u.a[at >> 3] >> (8 * (at & 7)));
     }
 }
+
+/* A fixed-size digest into out, whose length is the digest's. */
+static ZR_UNUSED void zr_digest_final(zr_slice st, zr_slice out) {
+    zr_digest s;
+    memcpy(&s, st.p, sizeof s);
+    zr_digest_end(&s, (uint8_t *)out.p, out.n);
+}
+
+/* SHAKE's n bytes, appended to out. */
+static ZR_UNUSED void zr_digest_squeeze(zr_slice st, int64_t n, zr_vec *out) {
+    zr_digest s;
+    memcpy(&s, st.p, sizeof s);
+    zr_digest_end(&s, (uint8_t *)out->p + out->n, n);
+    out->n += n;
+}
+#undef ZR_SHA_ABSORB
 
 /* ------------------------------------------------------------ random (STDLIB §8.2) */
 

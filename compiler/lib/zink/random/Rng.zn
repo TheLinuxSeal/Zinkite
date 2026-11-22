@@ -46,10 +46,11 @@ public class Rng {
         return (f64) (nextU64() >> 11) * 1.1102230246251565e-16;
     }
 
-    // In [lo, hi), unbiased (Lemire's method). lo >= hi is a bug.
+    // In [lo, hi), unbiased (Lemire's method). INVALID, and 0, when lo >= hi: the range
+    // is empty.
     public mut <T implements int> T range(T lo, T hi) {
         if (lo >= hi) {
-            fail("range: lo must be below hi");
+            return #status.INVALID (T) 0;
         }
         // The span and the result in wrapping u128, which is right for every integer type.
         u128 span = (u128%) hi -% (u128%) lo;

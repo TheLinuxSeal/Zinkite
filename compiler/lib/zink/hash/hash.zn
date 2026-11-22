@@ -6,15 +6,92 @@ public class hash {
     private static extern("zr_fnv1a") u64 cFnv(string bytes);
     static extern("zr_crc32") u32 cCrc(u32 crc, string bytes);
 
+    // The SHA-2 and SHA-3 classes' state, with the runtime's number for each algorithm.
+    static extern("zr_digest_init") void start(u8[:]& st, i64 kind);
+    static extern("zr_digest_update") void add(u8[:]& st, string data);
+    static extern("zr_digest_final") void end(u8[:]& st, u8[:]& out);
+    static extern("zr_digest_squeeze") void squeeze(u8[:]& st, i64 n, u8[..>]& out);
+
     // FNV-1a, 64 bits.
     public static u64 fnv1a(string bytes) { return cFnv(bytes); }
 
     // CRC-32 with the IEEE polynomial, as gzip and zip use.
     public static u32 crc32(string bytes) { return cCrc(0, bytes); }
 
-    public static u8[.32] sha256(string bytes) {
-        Sha256 h = new Sha256();
+    // SHA-2.
+    public static u8[.28] sha2_224(string bytes) {
+        Sha2_224 h = new Sha2_224();
         h.update(bytes);
         return h.finish();
+    }
+
+    public static u8[.32] sha2_256(string bytes) {
+        Sha2_256 h = new Sha2_256();
+        h.update(bytes);
+        return h.finish();
+    }
+
+    public static u8[.48] sha2_384(string bytes) {
+        Sha2_384 h = new Sha2_384();
+        h.update(bytes);
+        return h.finish();
+    }
+
+    public static u8[.64] sha2_512(string bytes) {
+        Sha2_512 h = new Sha2_512();
+        h.update(bytes);
+        return h.finish();
+    }
+
+    public static u8[.28] sha2_512_224(string bytes) {
+        Sha2_512_224 h = new Sha2_512_224();
+        h.update(bytes);
+        return h.finish();
+    }
+
+    public static u8[.32] sha2_512_256(string bytes) {
+        Sha2_512_256 h = new Sha2_512_256();
+        h.update(bytes);
+        return h.finish();
+    }
+
+    // SHA-3, and SHAKE with as many bytes of output as asked for: INVALID, and none, for
+    // a negative n.
+    public static u8[.28] sha3_224(string bytes) {
+        Sha3_224 h = new Sha3_224();
+        h.update(bytes);
+        return h.finish();
+    }
+
+    public static u8[.32] sha3_256(string bytes) {
+        Sha3_256 h = new Sha3_256();
+        h.update(bytes);
+        return h.finish();
+    }
+
+    public static u8[.48] sha3_384(string bytes) {
+        Sha3_384 h = new Sha3_384();
+        h.update(bytes);
+        return h.finish();
+    }
+
+    public static u8[.64] sha3_512(string bytes) {
+        Sha3_512 h = new Sha3_512();
+        h.update(bytes);
+        return h.finish();
+    }
+
+    public static u8[.] shake_128(string bytes, i64 n) {
+        Shake_128 h = new Shake_128();
+        h.update(bytes);
+        u8[.] out @err = h.finish(n);
+        return #err out;
+    }
+
+    public static u8[.] shake_256(string bytes, i64 n) {
+        Shake_256 h = new Shake_256();
+        h.update(bytes);
+        u8[.] out @err = h.finish(n);
+        return #err out;
     }
 }

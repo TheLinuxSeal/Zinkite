@@ -1,0 +1,18 @@
+package zink.lang;
+
+// Text methods written in Zinkite (STDLIB §3). `s.repeat(n)` calls the package-private
+// `TextMethods.repeat(s, n)`, with the text as its first argument, as `s.lines()` calls
+// `LineIterator.lines(s)`.
+class TextMethods {
+    // n copies of s; INVALID, and no text, for a negative n.
+    static u8[.] repeat(string s, i64 n) {
+        u8[..>] out = [];
+        if (n < 0) {
+            return #status.INVALID out;
+        }
+        for (i64 i = 0; i < n; i++) {
+            out.append(s);
+        }
+        return out;
+    }
+}

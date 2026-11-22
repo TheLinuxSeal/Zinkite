@@ -3562,8 +3562,8 @@ import zink.cli.*;
 
 void main() {
     string t = "The quick brown fox jumps over the lazy dog";
-    println("${hash.fnv1a(t)} ${hash.crc32(t)} ${hash.sha256(t).hex()}");
-    Sha256 h = new Sha256();
+    println("${hash.fnv1a(t)} ${hash.crc32(t)} ${hash.sha2_256(t).hex()}");
+    Sha2_256 h = new Sha2_256();
     h.update("The quick brown ");
     h.update("fox jumps over the lazy dog");
     Crc32 c = new Crc32();
@@ -3763,5 +3763,135 @@ void main(string[.] args) {
         std::fs::read_to_string(&b)
             .unwrap()
             .ends_with("line 99999\ntail")
+    );
+}
+
+/// SHA-2 and SHA-3 (STDLIB §8.3): all twelve on nothing, "abc" and 1,000 bytes, SHAKE
+/// past one block of output, and in 37-byte pieces the same as all at once. The values
+/// are Python's hashlib; random data of every padding and block boundary agrees too.
+#[test]
+fn sha2_and_sha3() {
+    prints(
+        r##"import zink.hash.*;
+
+void all(string t) {
+    println("${hash.sha2_224(t).hex()} ${hash.sha2_256(t).hex()}");
+    println("${hash.sha2_384(t).hex()} ${hash.sha2_512(t).hex()}");
+    println("${hash.sha2_512_224(t).hex()} ${hash.sha2_512_256(t).hex()}");
+    println("${hash.sha3_224(t).hex()} ${hash.sha3_256(t).hex()}");
+    println("${hash.sha3_384(t).hex()} ${hash.sha3_512(t).hex()}");
+    u8[.] a = hash.shake_128(t, 200);
+    u8[.] b = hash.shake_256(t, 5);
+    println("${a.hex()} ${b.hex()}");
+}
+
+void main() {
+    u8[..>] m = [];
+    for (i64 i = 0; i < 1000; i++) {
+        m +> (u8) (i * 7 % 251);
+    }
+    all("");
+    all("abc");
+    all(m);
+    // In pieces, the same as all at once; finish starts the object over.
+    Sha2_512 h = new Sha2_512();
+    Sha3_384 k = new Sha3_384();
+    Shake_128 x = new Shake_128();
+    for (i64 i = 0; i < 1000; i += 37) {
+        i64 j = i + 37 < 1000 ? i + 37 : 1000;
+        h.update(m[i:j]);
+        k.update(m[i:j]);
+        x.update(m[i:j]);
+    }
+    u8[.] xs = x.finish(200);
+    u8[.] xo = hash.shake_128(m, 200);
+    println("${h.finish() == hash.sha2_512(m)} ${k.finish() == hash.sha3_384(m)} ${xs == xo}");
+    println("${h.finish() == hash.sha2_512("")} ${x.finish(0).len}");
+}
+"##,
+        "d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e
+6ed0dd02806fa89e25de060c19d3ac86cabb87d6a0ddd05c333b84f4 c672b8d1ef56ed28ab87c3622c5114069bdd3ad7b8f9737498d0c01ecef0967a
+6b4e03423667dbb73b6e15454f0eb1abd4597f9a1b078e3f5b5a6bc7 a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a
+0c63a75b845e4f7d01107d852e4c2485c51a50aaaa94fc61995e71bbee983a2ac3713831264adb47fb6bd1e058d5f004 a69f73cca23a9ac5c8b567dc185a756e97c982164fe25859e0d1dcc1475c80a615b2123af1f5f94c11e3e9402c3ac558f500199d95b6d3e301758586281dcd26
+7f9c2ba4e88f827d616045507605853ed73b8093f6efbc88eb1a6eacfa66ef263cb1eea988004b93103cfb0aeefd2a686e01fa4a58e8a3639ca8a1e3f9ae57e235b8cc873c23dc62b8d260169afa2f75ab916a58d974918835d25e6a435085b2badfd6dfaac359a5efbb7bcc4b59d538df9a04302e10c8bc1cbf1a0b3a5120ea17cda7cfad765f5623474d368ccca8af0007cd9f5e4c849f167a580b14aabdefaee7eef47cb0fca9767be1fda69419dfb927e9df07348b196691abaeb580b32def58538b8d23f877 46b9dd2b0b
+23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7 ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f
+4634270f707b6a54daae7530460842e20e37ed265ceee9a43e8924aa 53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7af23
+e642824c3f8cf24ad09234ee7d3c766fc9a3a5168d0c94ad73b46fdf 3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532
+ec01498288516fc926459f58e2c6ad8df9b473cb0fc08c2596da7cf0e49be4b298d88cea927ac7f539f1edf228376d25 b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0
+5881092dd818bf5cf8a3ddb793fbcba74097d5c526a6d35f97b83351940f2cc844c50af32acd3f2cdd066568706f509bc1bdde58295dae3f891a9a0fca5783789a41f8611214ce612394df286a62d1a2252aa94db9c538956c717dc2bed4f232a0294c857c730aa16067ac1062f1201fb0d377cfb9cde4c63599b27f3462bba4a0ed296c801f9ff7f57302bb3076ee145f97a32ae68e76ab66c48d51675bd49acc29082f5647584e6aa01b3f5af057805f973ff8ecb8b226ac32ada6f01c1fcd4818cb006aa5b4cd 4833666013
+b3bb83df5b19419d6efee61258cdd7bee0b86acaba1f71c6d07f9c08 59425e4412e296fc74736673ce067027f384203f59c0d2c3e6be7b13347b3ffc
+f1417a0e1c0e48cb613e3d98e2ecc4326a79f5fcb5d1bfb0f4b2461ebe45971161f3e0e6e4cfbdec32e6273a0bd56cf6 7e658e1b50b8375e8ffe4c26591de6ea5c387436a5169172ea07649fc85e7bc989471fad8307cb20b5bf2785bbfad2ef47945e5558c3be23aa8a08d7bae3e7d0
+bdb28b8d0b9716e3f0a0029e315414830c1a09e0ca62ee9bc5677cc4 e0de432912cc5bf2848384167bc36eefe1b66fd192acb08fb820b886420fc8b3
+5ba166a036c528a0d952f1c596c68f48807908c375835e69fb484d69 5fb531fe026618353eb601c3b227d68d6f935b8fb59177a76ad484ada72b7e32
+4a399833cf8524e10a3097c193b22edc5fa474435ba525169af5322d608986a2e3ced0ec121211971a74294a573ba777 459d9fbc2ed3407fa9a30834aa10d1554dfb51e98fe77434c58f52ae0bba671f9606a5f4829ee599433d3fff0257bc9aeaeaeee7cd2eed0a1024cd3b04e2e517
+5c309506792c1ac87cd838b0f16ee986e27fa28e6d936d8fd9004c33084bb616b90c12e42cd9e8f584c8be3b16a1b58212c6cdca5f063f19a076ce391062568747dbb1b0c1dbf41659b8ef1ced99fa99cc7883ee4aaaa509b5e0a078c9466fa27a11d55793dcd1d8a90eb4dd0ba8afcff315314f58efa129e8b36ee4e080b317f083f07ab8913ed2f4a2fb9426b3004c0a907a9f8c778546616ad8e757c293a6667ec87dcb4788f72a3cbcadb1aeccae711b80c130927e361cf040e2b3aaa7d9186bf7e718eb9d87 94156ae189
+true true true
+true 0
+",
+    );
+}
+
+/// An argument value a function can't take fails with INVALID and gives the zero value
+/// (STDLIB §1.3 rule 8): an empty range, a negative SHAKE length (the object is left as it
+/// was), a negative count of random bytes, clamp's bounds the wrong way round, a find
+/// start outside the text, and a chunk or window size below 1, whose iterator gives nothing.
+#[test]
+fn improper_arguments_fail_with_invalid() {
+    prints(
+        r##"import zink.hash.*;
+import zink.random.*;
+
+void main() {
+    Rng r = random.seeded(1);
+    i64 a @e1 = r.range(5, 1);
+    u8 b @e2 = r.range((u8) 3, (u8) 3);
+    i64 c @e3 = r.range(1, 7);
+    u8[.] s @e4 = hash.shake_128("abc", -1);
+    Shake_256 h = new Shake_256();
+    h.update("abc");
+    u8[.] t1 @e5 = h.finish(-5);
+    u8[.] t2 @e6 = h.finish(4);
+    u8[..>] k = [];
+    u8 e7 = @random.secureBytes(k, -3);
+    i64 cl @e8 = clamp(5, 10, 1);
+    f64 cf @e9 = clamp(2.5, 0.0, 1.0);
+    i64 f1 @e10 = "hello".find("l", 9);
+    i64 f2 @e11 = "hello".find("l", -1);
+    i64 f3 @e12 = "hello".find("l", 3);
+    i64 f4 @e13 = "hello".find("", 5);
+    println("${a} ${e1} ${b} ${e2} ${c > 0} ${e3} ${s.len} ${e4} ${t1.len} ${e5} ${t2.hex()} ${e6} ${k.len} ${e7}");
+    println("${cl} ${e8} ${cf} ${e9} ${f1} ${e10} ${f2} ${e11} ${f3} ${e12} ${f4} ${e13}");
+    i64[..>] xs = [1, 2, 3];
+    i64 n = 0;
+    ChunkIterator<i64> ci @e14 = xs.chunks(0);
+    while (i64[:] part : ci.next()) { n++; }
+    WindowIterator<i64> wi @e15 = xs.windows(-1);
+    while (i64[:] w : wi.next()) { n++; }
+    println("${n} ${e14} ${e15}");
+}
+"##,
+        "0 22 0 22 true 0 0 22 0 22 48336660 0 0 22\n0 22 1.0 0 0 22 0 22 3 0 5 0\n0 22 22\n",
+    );
+}
+
+/// `repeat` is `zink.lang`'s `TextMethods.repeat`, so it can fail: INVALID and no text for
+/// a negative count. It still works in interpolation and as an argument.
+#[test]
+fn repeat_fails_for_a_negative_count() {
+    prints(
+        r##"void main() {
+    u8[.] a = "ab".repeat(3);
+    u8[.] b @err = "ab".repeat(-2);
+    u8 e2 = @"x".repeat(0);
+    println("[${a}] [${b}] ${err} ${e2} [${"-".repeat(5)}] ${"=".repeat(4).len}");
+    string s = "xy";
+    u8[..>] grow = [];
+    grow.append(s.repeat(2));
+    println("${grow}");
+}
+"##,
+        "[ababab] [] 22 0 [-----] 4\nxyxy\n",
     );
 }
