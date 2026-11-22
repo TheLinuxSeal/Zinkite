@@ -84,14 +84,12 @@ public class hash {
     public static u8[.] shake_128(string bytes, i64 n) {
         Shake_128 h = new Shake_128();
         h.update(bytes);
-        u8[.] out @err = h.finish(n);
-        return #err out;
+        return ## h.finish(n);
     }
 
     public static u8[.] shake_256(string bytes, i64 n) {
         Shake_256 h = new Shake_256();
         h.update(bytes);
-        u8[.] out @err = h.finish(n);
-        return #err out;
+        return ## h.finish(n);
     }
 }

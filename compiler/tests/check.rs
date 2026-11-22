@@ -861,6 +861,86 @@ fn unread_statuses_draw_no_warning() {
     );
 }
 
+/// `@a` and `@@b` are `u8`s, and `@@@t` is a `Failure[..~32]` (DESIGN §7.3). Each appears at
+/// most once, `@@@` only as a destination, and `@@` only on something that can fail.
+#[test]
+fn deep_status_destinations() {
+    let f = "i64 f() { return #1 0; }\n";
+    ok(&format!(
+        "{}void main() {{ i64 p @a @@b @@@t = f(); u8 x = a + b; Failure first = t[0]; string w = first.function; i64 n = t.len; }}\n",
+        f
+    ));
+    ok(&format!(
+        "{}void main() {{ u8 a = 0; Failure[..~32] t = []; i64 p = 0; p @a @@@t = f(); @@a = f(); u8 s = @@f(); }}\n",
+        f
+    ));
+    rejects(
+        &format!("{}void main() {{ i64 p @a @a = f(); }}\n", f),
+        "this call already has a `@` destination",
+    );
+    rejects(
+        &format!("{}void main() {{ i64 p @@@@t = f(); }}\n", f),
+        "`@@@@` isn't a status destination",
+    );
+    rejects(
+        &format!("{}void main() {{ u8 s = @@@f(); }}\n", f),
+        "`@@@` can't read a status here",
+    );
+    rejects(
+        &format!("{}void main() {{ i64[..>] t = []; i64 p = 0; p @@@t = f(); }}\n", f),
+        "a trail goes into a Failure[..~32], and `t` is i64[..>]",
+    );
+    rejects(
+        &format!("{}void main() {{ i64 t = 0; i64 p = 0; p @@t = f(); }}\n", f),
+        "a status goes into a u8, and `t` is i64",
+    );
+    rejects(
+        &body("u8 s = @@5;"),
+        "`@@` reads the status of something that can fail, and this can't",
+    );
+}
+
+/// `return ## e;` (DESIGN §7.2): `e` can fail and has the function's result type, or is a
+/// call that returns nothing in a function or constructor that returns nothing. It makes the
+/// function one that can fail.
+#[test]
+fn return_pass_on() {
+    let f = "i64 f(i64 x) { return #1 x; }\nvoid v(i64 x) { if (x < 0) { return #1; } }\ni64 twice(i64 x) { return x * 2; }\n";
+    ok(&format!(
+        "{}i64 g(i64 x) {{ return ## f(x); }}\nvoid w(i64 x) {{ return ## v(x); }}\ni64[..>] a = [];\ni64 h(i64 i) {{ return ## a[i]; }}\nclass B {{ i64 n; new(i64 x) {{ n = x; return ## v(x); }} }}\nvoid main() {{ i64 y @e = g(1); @e = w(1); i64 z @e2 = h(0); B b @e3 = new B(1); }}\n",
+        f
+    ));
+    rejects(
+        &format!("{}i64 g(i64 x) {{ return ## x; }}\nvoid main() {{ }}\n", f),
+        "`##` passes on the status of something that can fail, and this can't",
+    );
+    rejects(
+        &format!("{}i64 g(i64 x) {{ return ## twice(x); }}\nvoid main() {{ }}\n", f),
+        "this never sets a status, so `##` has nothing to pass on",
+    );
+    rejects(
+        &format!("{}void g(i64 x) {{ return ## f(x); }}\nvoid main() {{ }}\n", f),
+        "`g` returns nothing, so `return ##` takes a call that returns nothing",
+    );
+    rejects(
+        &format!("{}string g(i64 x) {{ return ## f(x); }}\nvoid main() {{ }}\n", f),
+        "expected string, found i64",
+    );
+    // A lambda can fail too, so it can pass a status on (DESIGN §9.3).
+    ok(&format!(
+        "{}i64 g(i64 x) {{ func(i64 => i64) h = (i64 y) => {{ return ## f(y); }}; return ## h(x); }}\nvoid main() {{ i64 y @e = g(1); }}\n",
+        f
+    ));
+    rejects(
+        &format!("{}void main() {{ return ## v(1); }}\n", f),
+        "`main` can't set a status",
+    );
+    rejects(
+        &format!("{}i64 g(i64 x) {{ return ##; }}\nvoid main() {{ }}\n", f),
+        "`##` passes on a call's value and status, so a call comes after it",
+    );
+}
+
 #[test]
 fn repeat_loops() {
     ok(&body(

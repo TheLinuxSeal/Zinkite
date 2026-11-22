@@ -1895,8 +1895,10 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                             self.declare(&v.name);
                         }
                     }
-                    if let Some(Name::Ident(c)) = &v.capture {
-                        self.declare(c);
+                    for n in v.capture.iter().flat_map(|c| c.names()) {
+                        if let Name::Ident(c) = n {
+                            self.declare(c);
+                        }
                     }
                 }
             }
@@ -2061,8 +2063,10 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 capture,
                 body,
             } => {
-                if let Some(Name::Ident(c)) = capture {
-                    self.declare(c);
+                for n in capture.iter().flat_map(|c| c.names()) {
+                    if let Name::Ident(c) = n {
+                        self.declare(c);
+                    }
                 }
                 self.push_scope();
                 let mut val = Val::none();
@@ -2453,7 +2457,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 }
                 Val::none()
             }
-            E::Unary { expr, .. } | E::StatusRead(expr) | E::Cast { expr, .. } => {
+            E::Unary { expr, .. } | E::StatusRead { expr, .. } | E::Cast { expr, .. } => {
                 self.expr(expr);
                 Val::none()
             }

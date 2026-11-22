@@ -330,10 +330,11 @@ impl<'p, 'a> Gen<'p, 'a> {
                 self.line(&format!("self->f_{} = {};", f.name, v));
             }
         }
+        self.label_fn("new");
         self.block_stmts(&d.body.stmts);
         let end = self.record_ctor_end("0");
         self.line(&end);
-        let out = std::mem::take(&mut self.out);
+        let out = self.take_body();
         let _ = writeln!(self.bodies, "{} {{\n{}}}\n", sig, out);
         self.rec_ctor = None;
     }

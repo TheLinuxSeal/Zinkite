@@ -16,7 +16,7 @@
 - **Java-style syntax**: classes with methods in the body, interfaces, constructors, `static` members, lambdas. **No inheritance.**
 - **No manual memory management and no memory manager at runtime**: no heap, no allocator, no garbage collector, no reference counts. Memory lives on data stacks that the compiler assigns, and is freed when its scope ends, with one store (§3).
 - **Memory safety, checked at compile time**: no use-after-free and no dangling references, without lifetime annotations (§5.2).
-- **Runtime safety**: no undefined behavior. Every failure is a status code (§7), from a missing file to an index out of range. The caller reads it with `@`, or the program stops there with a message (§7.6). Nothing is thrown, and nothing else stops a program but returning from `main`.
+- **Runtime safety**: no undefined behavior. Every failure is a status code (§7), from a missing file to an index out of range. The caller reads it with `@`, or with `@@` also the failures nothing read inside the call; otherwise the program stops there with a message (§7.6). Nothing is thrown, and nothing else stops a program but returning from `main`.
 - **Fast data layouts**: nested data stored inline and contiguously, references that stay valid while arrays grow.
 - Small, fast-starting static binaries.
 
@@ -51,7 +51,7 @@ Left out to stay light: inheritance, exceptions, destructors, reflection, dynami
 | Status codes | Follow Linux's `errno` numbers (`NOT_FOUND` is `ENOENT`, 2); 1 means failed; Zinkite's own codes from 192 to 223; a program's own from 224 to 255 | Decided | 7.7 |
 | Value on failure | Always defined: every return supplies a value, and the standard library returns the zero value on failure | Decided | 7.5 |
 | Discarding | `_` takes any value or status and can never be read | Decided | 7.3 |
-| Failures nothing reads | A failed call, overflow, an index out of range, division by zero and similar stop the program with a message, unless `@` reads them | Decided | 7.6 |
+| Failures nothing reads | A failed call, overflow, an index out of range, division by zero and similar stop the program with a message and the failure's trail, unless `@` reads them; `@@` and `@@@` also catch those nothing read inside a call, abandoning it | Decided | 7.6 |
 | Cleanup | No destructors, as in Goose; `defer` runs a statement when its block ends; the runtime flushes and closes files still open at exit | Decided | 6.4 |
 | Number types | `i8`–`i128`, `u8`–`u128`, `f32`, `f64`, plus `bool`; no aliases; lengths and indexes are `i64` | Decided | 9.1 |
 | Literals | An integer literal is an `i64` and a float literal an `f64` unless where it is used says otherwise; Rust-style suffixes (`255u8`, `1.5f32`) | Decided | 9.1 |
@@ -674,7 +674,7 @@ defer @_ = cfg.close();         // runs when this block ends, however it ends
 - **`defer stmt;`** runs the statement when its enclosing block ends: at the closing brace, or on a `return`, `break` or `continue` that leaves the block.
   - Several defers run in reverse order.
   - A deferred statement can't itself `return`, `break`, `continue` or write a status.
-  - It doesn't run when the program stops (§7.6); this is Goose's `defer`.
+  - It doesn't run when the program stops (§7.6), as Goose's `defer` doesn't. It does run when `@@` abandons the call it's in (§7.6).
 - **Failures are reported with the status** (§7): `File.create`, `write` and `close` fail with a code such as `status.NOT_FOUND`, `status.PERMISSION` or `status.IO`. A deferred call that can fail needs its status captured or discarded: `defer @_ = d.close();` (§7.3). For a file that was written, call `close()` and check its status.
 - **A `File` is a handle** (Decided): a slot and a generation number in a table the runtime keeps, with the buffers in the runtime's own memory rather than in the value.
   - Copying a `File` copies the handle.
@@ -780,6 +780,7 @@ return #0 value;                   // explicit success (same as plain `return va
 return #(err) value;               // a u8 expression, such as another call's status
 return #(missing) value;           // a bool counts as 0 or 1
 return #1;                         // early exit from a void function or constructor
+return ## parsePort(text);         // the call's value and its status, passed on
 ```
 
 - **`#` takes** one of these:
@@ -788,7 +789,14 @@ return #1;                         // early exit from a void function or constru
   - `#( ... )` holding a `u8` or `bool` expression.
 
   Other integer types are an error: write `#((u8) n)` or `#(n != 0)`.
-- **A bare `@(...)` after `return`** is a compile error ("use `#(...)` to pass the status on").
+- **`return ## e;` passes on `e`'s value and the status `@` reads from it** (Decided 2026-11-22): `##` is `#` with the value too, as `@@` is `@` with more. It means exactly `T v @err = e; return #err v;`:
+  - it passes on one layer, as `@` reads it: the call's own failure, and any failure in the expression, such as an index in an argument, or `return ## a[i];`;
+  - in a function or constructor that returns nothing, `e` is a call that returns nothing, and only its status is passed on;
+  - it continues the failure's trail (§7.6), so a stop message says "`portOf` passed it on";
+  - `e` must be something that can fail: `return ## x;` and `return ## twice(x);`, for a `twice` that never sets a status, are compile errors that suggest `return x;`. It works in a lambda too (§9.3).
+
+  `return f();` keeps its meaning, a claim that `f` doesn't fail here: if it does, the program stops at that line. Making `return f();` pass the status on was considered and rejected: it would be the one place a status propagates without being written, and whether a function can fail would depend on a line that looks like any other return.
+- **A bare `@(...)` after `return`** is a compile error ("use `#(...)` to pass the status on", or `return ## f();`).
 - **Falling off the end of a function** returns status 0.
 - **There's no separate `flag` statement** for "mark now, return later". It can be added later without breaking anything (Appendix A.8).
 
@@ -816,6 +824,20 @@ if (err == status.EMPTY) { ... }
 - **A bare call in a condition tests its value**; `@` in front tests its status.
 - **`@` reads every failure in its expression**, not only a call's (§7.6): `i64 v @err = a[i] * w[j];` catches an index out of range or an overflow, and `@(n / d)` a division by zero.
 - **A status nothing reads stops the program when it's nonzero** (§7.6), so there's no warning for leaving one unread: `x = a.pop();` is a claim that it won't fail.
+- **`@@` and `@@@` also catch a failure nothing read inside the call** (Decided 2026-11-22), which abandons the call (§7.6), and `@@@` gives the failure's trail:
+
+  | Form | Catches | Gives |
+  |---|---|---|
+  | `x @a = f();` | `f`'s own failure, and every failure in the expression | `a`: the status |
+  | `x @@b = f();` | also a failure nothing read inside `f` | `b`: the outermost failure |
+  | `x @@@t = f();` | the same as `@@` | `t`: the trail, a `Failure[..~32]` |
+  | `x @a @@b = f();`, `x @a @@@t = f();`, `x @@b @@@t = f();`, `x @a @@b @@@t = f();` | the same as `@@` | each |
+
+  - **`@` alone is the only form that catches one layer.** Any capture with `@@` or `@@@` catches everything, and nothing stops the program.
+  - **`a` beside `@@` or `@@@`** is `f`'s own status when `f` finished, and `ABANDONED` (200, §7.7) when a failure nothing read inside it stopped it; `b` is then that failure. So `a` is never 0 when something failed, and `a != b` says that `f` was stopped rather than failing on its own.
+  - **`@@@` alone**: `t.len > 0` says whether anything failed, and `t[^1].code` is what `@@` would give.
+  - **In an expression**, `@@e` gives what `@@b` would: `if (@@handle(req)) { ... }`. `@@@` gives an array, so it's only a destination.
+  - **Each appears at most once** in a capture, in any order. A trail goes into a `Failure[..~32]`, declared with the variable or already there.
 - **`_` discards** (Decided). It can be assigned anything, and it can never be read:
   ```
   num @_ = f64.parse(key);        // keep the value, ignore the status on purpose: 0 if it failed
@@ -854,15 +876,39 @@ Every failure is a status, and the caller decides what to do with it. A call tha
 | a `switch` with no case for its value | `INVALID` |
 
 - **`@` reads them** (§7.3): `x @err = e;`, `@err = e;`, `@e`, and `while (T x : e)`. It covers its whole expression, so the first failure anywhere in `e` is caught, and the rest of `e` is skipped (§7.5).
-- **Without `@`, a failure stops the program**, at the line where it happened. The message names what failed and its status, and for a function of the program's own, where it returned the status:
+- **Without `@`, a failure stops the program**, at the line where it happened, unless an `@@` catches it (below). The message names what failed and its status, then the failure's trail through the program's own functions (below):
   ```
   tool.zn:12: `half` failed with INVALID, and nothing read its status
       `half` returned it at tool.zn:6
   tool.zn:20: index 5 is out of range for length 3
   ```
   The program flushes and closes open files, and exits with status 1. An embedded script returns the failure to its host through the C API.
+- **`@@` and `@@@` catch a failure nothing read inside the call** (§7.3), at any depth. The innermost one around the calls that led to it catches it, and the calls in between are abandoned at the line where it happened:
+  - nothing after that line runs in them, except their `defer`s, innermost first (§6.4), which see their variables as they were;
+  - the value is the zero value, as when `@` catches (§7.5);
+  - what they were changing through `&` arguments or a `mut` receiver may be left half-changed, such as a `JsonReader` that moved on without updating its state. So `@@` suits a boundary whose work can be thrown away, such as one request of a server, one test, or one command of a REPL, more than everyday error handling:
+    ```
+    while (Request req : server.next()) {
+        @@err = handle(req);      // a bad index deep inside fails this request only
+        if (err) {
+            errprintln("request failed: ${status.message(err)}");
+        }
+    }
+    ```
+  - a lambda called inside, such as a sort's comparator, is abandoned with the call that called it.
+- **The trail** says where a failure went through the program's own functions. Each entry is a `Failure`: the `function`, `file` and `line`, the `code` there, and whether it was `unread` there, the line that abandoned the call. The first entry is where the failure started:
+  - a failing `return` adds an entry. It continues the trail of the failure the function read last when its code is a status the function read (`return #err v;`, `return ## f();`), or it's in a branch that tests one (`if (err) { return #224 0; }`); any other failing `return` starts a new trail;
+  - a failure nothing read adds an `unread` entry;
+  - the library's functions add none, so a failure from the library, or from a check in the expression itself, starts its trail at the line that reads it;
+  - a trail longer than 32 keeps its first 24 entries and its last 8, and the stop message says how many it left out.
+  ```
+  ports.zn:27: `portOf` failed with INVALID, and nothing read its status
+      `parsePort` returned it at ports.zn:5
+      `portOf` passed it on at ports.zn:19
+  ```
+- **The cost** is only on the failing path and at `@@` itself. `@@` saves a jump point with `setjmp`, a few nanoseconds, and a `defer` while one is active saves another. A failing `return` writes an entry, a few stores, into one fixed buffer of 32 entries, 512 bytes. A `@@@` destination is about 1.5 KB on the caller's stack, and filling it copies the trail only when something failed. Code that uses none of them runs as before.
 - **A function stops nothing itself.** It fails by returning a status (§7.2), and only its caller can stop the program, by not reading it. There is no `fail` and no `exit`: returning from `main` is the only way a program ends (§8.6).
-- **Lambdas are functions of their own**: `@` around a call that takes one doesn't catch failures in its body.
+- **Lambdas are functions of their own**: `@` around a call that takes one doesn't catch a failure nothing read in its body; `@@` does, abandoning the call. A status the lambda returns is the status of the call it was passed to, or of the call through a `func` value (§9.3).
 - **What no program can catch**, and stops it all the same:
   - stack overflow (each stack ends in a guard page);
   - exceeding `#max_memory_mb` (§8.2);
@@ -942,6 +988,7 @@ if (err) {
   | `TYPE` | 197 | Wrong kind of value: `asI64()` on a string in a parsed tree (`STDLIB.md` §9.2) |
   | `GPU` | 198 | A graphics API call failed (`STDLIB.md` §10.6) |
   | `OUT_OF_DATE` | 199 | A window's surface changed, so the swapchain must be rebuilt (`STDLIB.md` §10.6) |
+  | `ABANDONED` | 200 | The call didn't finish: a failure nothing read inside it stopped it, and `@@` caught that (§7.3, §7.6) |
 
 - **The numbers are Linux's generic table**, which x86-64, AArch64 and RISC-V share. A port to a system with other numbers would translate its errors into these.
 - **Exit statuses**: the value `u8 main` returns becomes the exit status. Common codes don't collide with the shell's special values (126, 127, and 129–192 for death by signals 1–64). Zinkite's own codes start at 192, which overlaps only signal 64, one that programs rarely receive. Scripts that check particular exit codes should still return fixed numbers of their own.
@@ -1179,6 +1226,10 @@ rows.sort((Row a, Row b) => { return a.num < b.num; });     // a block body
 - **`func(A, B => R)`** is the type of a function that takes an `A` and a `B` and returns an `R`. Both sides are always written, with `void` for "none".
 - **Lambdas passed as parameters are compile-time values**, as in Goose. `filter` is compiled with the lambda inlined, so it costs what the handwritten loop would, and the lambda may capture anything in scope.
 - **A `func` stored in a variable, field or array can't capture.** It is a plain function pointer. Stored closures that capture are Open (§17).
+- **A lambda can fail, as any function can** (Decided 2026-11-22). `return #code v;` and `return ## f();` work in its body:
+  - a call through a `func` value is a call that can fail: `@` reads its status, and one nothing reads stops the program at the call (§7.6). Every `func` can fail, so the type doesn't say it;
+  - a lambda passed to a built-in fails that call with its status, such as `@err = rows.sort(cmp);`. The call stops at once and leaves what it was changing part-way, such as an array half sorted;
+  - the cost: a `func` returns its status beside its value, as a function that can fail does (§12.5). Measured over 10⁹ calls through a pointer, an `i64` result costs the same, 1.4 ns, with clang, and up to 0.25 ns more with gcc or for a `string` result, which then comes back through memory. A built-in's inlined lambda costs nothing more unless it fails. A `func` value stays an 8-byte pointer.
 - **Captures are read-only**: a captured variable must never be assigned after its initialization (Java's "effectively final" rule).
 - Method references such as `this::close`: Open.
 
@@ -1393,7 +1444,7 @@ A small C static library linked into every program. It holds:
 There is no allocator, no counting and no collector. With dead-code elimination and a static build it is tens of KB.
 
 ### 12.3 Stacks and failures
-- **No unwinding.** There are no exceptions: failures are status codes (§7), and one nothing reads stops the program where it happened (§7.6). No unwind tables, landing pads or per-call error checks are needed.
+- **Unwinding only for `@@`.** There are no exceptions: failures are status codes (§7), and one nothing reads stops the program where it happened, or jumps with `longjmp` to the innermost `@@`, through a record for each `defer` on the way (§7.6). No unwind tables, landing pads or per-call error checks are needed.
 - **Stack overflow**: the call stack and every data stack end in an unmapped guard page. Touching one stops the program, through a signal handler running on a separate small stack. Functions with frames larger than a page touch each page in order (stack probes), so a large frame can't jump past the guard page.
 
 ### 12.4 Dispatch (Decided)
@@ -1740,6 +1791,10 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 **A failure nothing reads stops the program**
 56. Overflow, `x / 0`, `MIN / -1`, an out-of-range index, a failed call whose status nothing reads, stack overflow, and exceeding `#max_memory_mb` each stop the program with a message naming the source line and exit status 1, after flushing open files; for a function of the program's own, the message also says where it returned the status.
 56a. `x @err = a[i] * w[j];` with `i` out of range gives `x` 0 and `err` `RANGE`; `@(n / 0)` is `DOMAIN`; in `x @err = f(g())`, a failing `g` gives its status and `f` isn't called; `T& r @err = a[9]` on a shorter array refers to a zero value of its own; `fail(...)` and `exit(...)` are compile errors.
+56b. With `f` calling `g` and not reading its failure, `x @a @@b @@@t = f();` gives `a` `ABANDONED`, `b` `g`'s status, and a trail of `g`'s return and `f`'s unread line; `x @a = f();` stops the program at `f`'s line; `x @a @@@t = f();` catches it too. An index out of range or a division by zero deep inside is caught the same way; the abandoned functions' `defer`s run, innermost first, with their variables' latest values; the innermost `@@` catches; `while (T x : f()) @@why` ends at such a failure.
+56c. A failure passed on with `return #err v;`, or replaced with `if (err) { return #224 0; }`, continues the trail of the one read; a function that reads and handles one, then returns a failure of its own, starts a new trail; a failure from `pop` starts at the line that reads it; a trail of 41 entries keeps 32, the first 24 and the last 8, and the stop message says it left 10 out. `x @a @a = f();`, `x @@@@t = f();`, `u8 s = @@@f();` and a trail into an `i64[..>]` are compile errors.
+56d. `return ## f(x);` gives `f`'s value and status to the caller, and the trail says it passed it on; `return ## a[i];` passes on `RANGE`; `return ## push(x);` in a `void` function or a constructor passes on the call's status; `return ## hash.shake_128(s, n);` builds the array where the caller says; `return ## x;`, `return ## twice(x);`, `return ##;` and `##` in `main` are compile errors.
+56e. A `func` value whose lambda returns `#status.INVALID 0` gives INVALID to `x @err = f(3);`, and stops the program at `f(3);` when nothing reads it, with the trail naming `lambda`; a function taking a `func` passes its failure on with `return ## f(x);`. A `sort` whose comparator fails gives the comparator's status and leaves the array part-sorted; `fold`, `findIndex` and `any` fail with their lambdas' statuses.
 57. At the limits of every integer type, signed and unsigned, `+` stops the program, `+%`, `-%` and `*%` wrap, and `+|`, `-|` and `*|` saturate; `MIN % -1` is 0.
 58. `long`, `byte` and `double` are compile errors that name the new type, and `int` and `float` used as types are errors that say they are bounds and suggest `i64` and `f64`; `u8 b = 300;` is a compile error; `var x = 5;` is an `i64`; `i64 big = 100000 * 100000;` doesn't overflow; `i64 n = someI32;` compiles without a cast, and `i32 m = someI64;` needs one.
 59. A program printing many lines, run as `zink run tool.zn | head -1`, exits quietly with no error output.
@@ -1865,7 +1920,7 @@ Superseded on 2026-11-17. The benchmarks in §15 showed it 1.2–3.2× slower on
 - memory that comes back as soon as it is unused, in long-running programs.
 
 ### A.2 Exceptions
-The previous design used Java's `try`/`catch`/`finally`/`throw`, with `Error` for bugs and `Exception` for expected failures (`DESIGN-refcount.md` §12.7). Replaced by the status code (§7) and by stopping the program on bugs (§7.6), so nothing is thrown and there is no unwinding. What was lost: an exception could carry a message and details with the error. A status carries only the reason (§7.7), and the caller writes the message.
+The previous design used Java's `try`/`catch`/`finally`/`throw`, with `Error` for bugs and `Exception` for expected failures (`DESIGN-refcount.md` §12.7). Replaced by the status code (§7) and by stopping the program on bugs (§7.6), so nothing is thrown, and only `@@` unwinds (§7.6). What was lost: an exception could carry a message and details with the error. A status carries only the reason (§7.7), and `@@@` where it went; the caller writes the message.
 
 ### A.3 Goose's multi-frame return
 `return err from load` returns from several frames at once, checked statically, with no unwinder and no `Result` type. Considered as the error mechanism and not chosen: a status per call was preferred.

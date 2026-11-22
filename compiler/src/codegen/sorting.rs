@@ -199,7 +199,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             bad = self.on_fail(
                 34,
                 format!(
-                    "zr_fail({}, \"selectNth: the position is out of range\")",
+                    "zr_stop({}, 34, \"selectNth: the position is out of range\")",
                     loc
                 )
             ),

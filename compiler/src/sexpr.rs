@@ -217,13 +217,15 @@ pub fn expr(e: &Expr) -> String {
             capture,
             value,
         } => {
-            let cap = capture
-                .as_ref()
-                .map_or(String::new(), |c| format!(" @{}", name(c)));
+            let cap = capture.as_ref().map_or(String::new(), capture_text);
             format!("({}{} {} {})", assign(*op), cap, expr(target), expr(value))
         }
         ExprKind::StatusAssign { capture, value } => {
-            format!("(@= {} {})", name(capture), expr(value))
+            let dest = match (&capture.one, &capture.deep, &capture.trail) {
+                (Some(n), None, None) => name(n),
+                _ => capture_text(capture).trim_start().to_string(),
+            };
+            format!("(@= {} {})", dest, expr(value))
         }
         ExprKind::Cond { cond, then, els } => {
             format!("(? {} {} {})", expr(cond), expr(then), expr(els))
@@ -250,7 +252,9 @@ pub fn expr(e: &Expr) -> String {
             };
             format!("({} {})", o, expr(e))
         }
-        ExprKind::StatusRead(e) => format!("(@ {})", expr(e)),
+        ExprKind::StatusRead { expr: e, deep } => {
+            format!("({} {})", if *deep { "@@" } else { "@" }, expr(e))
+        }
         ExprKind::Cast {
             ty: t,
             mode,
@@ -299,6 +303,17 @@ pub fn expr(e: &Expr) -> String {
     }
 }
 
+/// Status destinations, each after a space: ` @a @@b @@@t`.
+fn capture_text(c: &Capture) -> String {
+    let mut out = String::new();
+    for (ats, n) in [("@", &c.one), ("@@", &c.deep), ("@@@", &c.trail)] {
+        if let Some(n) = n {
+            out.push_str(&format!(" {}{}", ats, name(n)));
+        }
+    }
+    out
+}
+
 /// The kind of a statement, with its main parts, on one line.
 pub fn stmt(s: &Stmt) -> String {
     match &s.kind {
@@ -308,10 +323,7 @@ pub fn stmt(s: &Stmt) -> String {
                 .decls
                 .iter()
                 .map(|v| {
-                    let cap = v
-                        .capture
-                        .as_ref()
-                        .map_or(String::new(), |c| format!(" @{}", name(c)));
+                    let cap = v.capture.as_ref().map_or(String::new(), capture_text);
                     let init = v
                         .init
                         .as_ref()
@@ -348,9 +360,7 @@ pub fn stmt(s: &Stmt) -> String {
                         .join(", ")
                 ),
             };
-            let cap = capture
-                .as_ref()
-                .map_or(String::new(), |c| format!(" @{}", name(c)));
+            let cap = capture.as_ref().map_or(String::new(), capture_text);
             format!("(repeat {} : {}{})", t, expr(source), cap)
         }
         StmtKind::DoWhile { cond, .. } => format!("(do-while {})", expr(cond)),
@@ -378,6 +388,7 @@ pub fn stmt(s: &Stmt) -> String {
                 Some(StatusWrite::Int(n)) => format!(" #{}", n),
                 Some(StatusWrite::Name(q)) => format!(" #{}", q.text()),
                 Some(StatusWrite::Expr(e)) => format!(" #({})", expr(e)),
+                Some(StatusWrite::Pass) => " ##".to_string(),
             };
             format!(
                 "(return{}{})",
@@ -400,9 +411,7 @@ pub fn stmt(s: &Stmt) -> String {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            let cap = capture
-                .as_ref()
-                .map_or(String::new(), |c| format!(" @{}", name(c)));
+            let cap = capture.as_ref().map_or(String::new(), capture_text);
             format!("(destructure ({}){} {})", ts, cap, expr(value))
         }
         StmtKind::Defer(s) => format!("(defer {})", stmt(s)),

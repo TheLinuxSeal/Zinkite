@@ -763,6 +763,7 @@ pub fn status_code(name: &str) -> Option<u8> {
         "TYPE" => 197,
         "GPU" => 198,
         "OUT_OF_DATE" => 199,
+        "ABANDONED" => 200,
         _ => return None,
     })
 }
@@ -789,6 +790,6 @@ mod tests {
             assert_eq!(super::status_code(name), code.parse().ok(), "{}", name);
             n += 1;
         }
-        assert_eq!(n, 33);
+        assert_eq!(n, 34);
     }
 }

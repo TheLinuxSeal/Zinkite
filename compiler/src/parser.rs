@@ -1440,12 +1440,7 @@ impl Parser {
             }
         };
         loop {
-            let capture = if self.at(P::At) {
-                self.bump();
-                Some(self.name("a status variable after `@`")?)
-            } else {
-                None
-            };
+            let capture = self.capture()?;
             let init = if self.eat(P::Assign) {
                 Some(self.expr()?)
             } else {
@@ -1485,12 +1480,8 @@ impl Parser {
         if let Some(target) = self.try_loop_target() {
             let source = self.expr()?;
             self.expect(P::RParen, "`)` after the repeat loop's call")?;
-            let capture = if self.at(P::At)
-                && matches!(self.tok_at(1), Tok::Ident(_) | Tok::Underscore)
-                && self.tok_at(2) == &Tok::P(P::LBrace)
-            {
-                self.bump();
-                Some(self.name("a status variable")?)
+            let capture = if self.capture_len(P::LBrace).is_some() {
+                self.capture()?
             } else {
                 None
             };
@@ -1608,7 +1599,22 @@ impl Parser {
     fn return_stmt(&mut self) -> PResult<StmtKind> {
         self.bump();
         let status = if self.at(P::Hash) {
-            self.bump();
+            let hash = self.bump().span;
+            if self.at(P::Hash) && self.span().start == hash.end {
+                // `return ## f();`: the call's value and status (DESIGN §7.2).
+                self.bump();
+                if self.at(P::Semi) {
+                    let span = self.span();
+                    self.error(span, "`##` passes on a call's value and status, so a call comes after it: `return ## f();`");
+                    return Err(Fail);
+                }
+                let value = self.expr()?;
+                self.expect(P::Semi, "`;` after the return value")?;
+                return Ok(StmtKind::Return {
+                    status: Some(StatusWrite::Pass),
+                    value: Some(value),
+                });
+            }
             Some(match self.tok().clone() {
                 Tok::Int { value, .. } => {
                     self.bump();
@@ -1668,11 +1674,7 @@ impl Parser {
             }
         }
         self.expect(P::RParen, "`)` after the targets")?;
-        let capture = if self.eat(P::At) {
-            Some(self.name("a status variable after `@`")?)
-        } else {
-            None
-        };
+        let capture = self.capture()?;
         self.expect(P::Assign, "`=` in the destructuring")?;
         let value = self.expr()?;
         self.expect(P::Semi, "`;` after the destructuring")?;
@@ -1774,17 +1776,85 @@ impl Parser {
     }
 
     fn at_status_dest(&self) -> bool {
-        self.at(P::At)
-            && matches!(self.tok_at(1), Tok::Ident(_) | Tok::Underscore)
-            && self.tok_at(2) == &Tok::P(P::Assign)
+        self.capture_len(P::Assign).is_some()
+    }
+
+    /// How many `@`s side by side start `n` tokens on: 2 for `@@`, 3 for `@@@`.
+    fn ats_at(&self, n: usize) -> usize {
+        let mut k = 0;
+        while self.tok_at(n + k) == &Tok::P(P::At) {
+            if k > 0 {
+                let prev = self.toks[self.pos + n + k - 1].span;
+                let this = self.toks[self.pos + n + k].span;
+                if prev.end != this.start {
+                    break;
+                }
+            }
+            k += 1;
+        }
+        k
+    }
+
+    /// When status destinations, such as `@a @@b`, start here and `follow` comes after
+    /// them: how many tokens they take.
+    fn capture_len(&self, follow: P) -> Option<usize> {
+        let mut n = 0;
+        loop {
+            let k = self.ats_at(n);
+            if k == 0 {
+                return (n > 0 && self.tok_at(n) == &Tok::P(follow)).then_some(n);
+            }
+            if !matches!(self.tok_at(n + k), Tok::Ident(_) | Tok::Underscore) {
+                return None;
+            }
+            n += k + 1;
+        }
+    }
+
+    /// Status destinations (DESIGN §7.3): `@a` for the call's own status, `@@b` for the
+    /// outermost failure inside it, `@@@t` for the trail, each at most once.
+    fn capture(&mut self) -> PResult<Option<Capture>> {
+        let mut c = Capture::default();
+        let mut any = false;
+        while self.at(P::At) {
+            let start = self.span();
+            let k = self.ats_at(0);
+            for _ in 0..k {
+                self.bump();
+            }
+            let at = self.since(start);
+            let name = self.name("a status variable after `@`")?;
+            let slot = match k {
+                1 => &mut c.one,
+                2 => &mut c.deep,
+                3 => &mut c.trail,
+                _ => {
+                    self.error_help(
+                        at,
+                        format!("`{}` isn't a status destination", "@".repeat(k)),
+                        "`@a` takes the call's own status, `@@b` any failure inside it, and `@@@t` the trail (DESIGN §7.3)",
+                    );
+                    return Err(Fail);
+                }
+            };
+            if slot.is_some() {
+                self.error(
+                    at,
+                    format!("this call already has a `{}` destination", "@".repeat(k)),
+                );
+                return Err(Fail);
+            }
+            *slot = Some(name);
+            any = true;
+        }
+        Ok(any.then_some(c))
     }
 
     fn assignment(&mut self) -> PResult<Expr> {
         let start = self.span();
         if self.at_status_dest() {
             // `@err = e` (rule 7)
-            self.bump();
-            let capture = self.name("a status variable")?;
+            let capture = self.capture()?.unwrap_or_default();
             self.bump(); // `=`
             let value = Box::new(self.assignment()?);
             return Ok(Expr {
@@ -1794,8 +1864,7 @@ impl Parser {
         }
         let lhs = self.conditional()?;
         let capture = if self.at_status_dest() {
-            self.bump();
-            Some(self.name("a status variable")?)
+            self.capture()?
         } else {
             None
         };
@@ -1920,10 +1989,22 @@ impl Parser {
             });
         }
         if self.at(P::At) {
-            self.bump();
+            let k = self.ats_at(0);
+            for _ in 0..k {
+                self.bump();
+            }
+            if k > 2 {
+                let at = self.since(start);
+                self.error_help(
+                    at,
+                    format!("`{}` can't read a status here", "@".repeat(k)),
+                    "`@@@` gives a trail, as a destination beside the call: `x @@err @@@trail = f();` (DESIGN §7.3)",
+                );
+                return Err(Fail);
+            }
             let expr = Box::new(self.postfix()?);
             return Ok(Expr {
-                kind: ExprKind::StatusRead(expr),
+                kind: ExprKind::StatusRead { expr, deep: k == 2 },
                 span: self.since(start),
             });
         }

@@ -9,8 +9,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
-    self, AssignOp, BinOp, CaseLabel, Expr, ExprKind as E, LambdaBody, LocalType, Name, PostfixOp,
-    Stmt, StmtKind as S, StrPart, SwitchBody, Target, UnaryOp,
+    self, AssignOp, BinOp, Capture, CaseLabel, Expr, ExprKind as E, LambdaBody, LocalType, Name,
+    PostfixOp, Stmt, StmtKind as S, StrPart, SwitchBody, Target, UnaryOp,
 };
 use crate::builtins::{self, Need, NumCaps, Origin, SeqKind, Sig};
 use crate::diag::{Diagnostic, Severity};
@@ -178,7 +178,7 @@ fn failing_status(st: &ast::StatusWrite) -> bool {
         ast::StatusWrite::Name(q) => {
             q.parts.len() == 2 && q.parts[0].name == "status" && q.parts[1].name != "OK"
         }
-        ast::StatusWrite::Expr(_) => false,
+        ast::StatusWrite::Expr(_) | ast::StatusWrite::Pass => false,
     }
 }
 
@@ -1221,7 +1221,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             } => {
                 let label = self.take_label();
                 if let Some(c) = capture {
-                    self.declare_name(c, Ty::u8());
+                    self.declare_capture(c);
                     if !matches!(body.kind, S::Block(_)) {
                         self.err(
                             body.span,
@@ -1489,9 +1489,23 @@ impl<'p, 'a> Checker<'p, 'a> {
                 );
             }
         }
+        // `return ## e;` passes on what `@` would read from `e` (DESIGN §7.2).
+        let pass = matches!(status, Some(ast::StatusWrite::Pass));
+        if let (true, Some(v)) = (pass, value)
+            && kind != FnKind::Lambda
+        {
+            self.pass_on(kind, &ret, &name, v, span);
+            self.flow = Flow::unreachable();
+            return;
+        }
         match kind {
             FnKind::Lambda => {
                 let t = match value {
+                    // `return ## f();` gives the lambda `f`'s type, and its status.
+                    Some(v) if pass => match self.pass_value(v, None) {
+                        Ty::Void => Ty::Void,
+                        t => self.var_type(&t, v.span),
+                    },
                     Some(v) => {
                         let t = self.expr(v, None);
                         self.var_type(&t, v.span)
@@ -1540,11 +1554,11 @@ impl<'p, 'a> Checker<'p, 'a> {
                     self.err(span, msg);
                 }
                 (Some(v), r) => {
-                    if matches!(v.kind, E::StatusRead(_)) && *r != Ty::u8() && !r.is_unknown() {
+                    if matches!(v.kind, E::StatusRead { .. }) && *r != Ty::u8() && !r.is_unknown() {
                         self.err_help(
                             v.span,
                             "`@` after `return` reads a status as a value",
-                            "to pass a status on, write `return #(err) value;` (DESIGN §7.2)",
+                            "to pass a call's status on with its value, write `return ## f();` (DESIGN §7.2)",
                         );
                     }
                     let t = self.expr(v, Some(r));
@@ -1564,8 +1578,80 @@ impl<'p, 'a> Checker<'p, 'a> {
         self.flow = Flow::unreachable();
     }
 
+    /// `return ## e;` (DESIGN §7.2): `e` is something that can fail, with the function's
+    /// result type, or a call that returns nothing in a function or constructor that
+    /// returns nothing.
+    fn pass_on(&mut self, kind: FnKind, ret: &Ty, name: &str, v: &Expr, span: Span) {
+        let want = match kind {
+            FnKind::Lambda => None,
+            FnKind::Init => {
+                self.err(span, "`return` isn't allowed in a field initializer");
+                None
+            }
+            FnKind::Ctor => Some(Ty::Void),
+            FnKind::Method | FnKind::Main => Some(ret.clone()),
+        };
+        let t = match &want {
+            Some(Ty::Void) | None => self.pass_value(v, None),
+            Some(r) => self.pass_value(v, Some(r)),
+        };
+        match &want {
+            Some(Ty::Void) => {
+                if t != Ty::Void && !t.is_unknown() {
+                    self.err(
+                        v.span,
+                        format!(
+                            "`{}` returns nothing, so `return ##` takes a call that returns nothing, and this gives {}",
+                            name,
+                            self.show(&t)
+                        ),
+                    );
+                }
+                if kind == FnKind::Ctor {
+                    self.check_ctor_end(span, false);
+                }
+            }
+            Some(r) => {
+                self.expect(&t, r, v);
+            }
+            None => {}
+        }
+    }
+
+    /// The value of `return ## v;`, which must be something that can fail.
+    fn pass_value(&mut self, v: &Expr, want: Option<&Ty>) -> Ty {
+        if matches!(
+            strip_parens(v).kind,
+            E::Ident(_)
+                | E::Int { .. }
+                | E::Float { .. }
+                | E::Str(_)
+                | E::Char(_)
+                | E::Bool(_)
+                | E::Null
+                | E::This
+        ) {
+            self.err_help(
+                v.span,
+                "`##` passes on the status of something that can fail, and this can't",
+                "write `return x;`; for an operator expression, put it in parentheses: `return ## (a / b);` (DESIGN §7.2)",
+            );
+        }
+        self.last_can_fail = None;
+        let t = self.expr_c(v, want, true);
+        if self.last_can_fail == Some(false) {
+            self.err_help(
+                v.span,
+                "this never sets a status, so `##` has nothing to pass on",
+                "write `return f();` (DESIGN §7.2)",
+            );
+        }
+        t
+    }
+
     fn status_write(&mut self, st: &ast::StatusWrite, span: Span) {
         match st {
+            ast::StatusWrite::Pass => {}
             ast::StatusWrite::Int(n) => {
                 if *n > 255 {
                     self.err(span, "a status is a u8, from 0 to 255 (DESIGN §7.2)");
@@ -1730,8 +1816,30 @@ impl<'p, 'a> Checker<'p, 'a> {
                 self.locals[id].slot = Some(slot);
             }
             if let Some(c) = &v.capture {
-                self.declare_name(c, Ty::u8());
+                self.declare_capture(c);
             }
+        }
+    }
+
+    /// Declares the destinations of `T x @a @@b @@@t = e;`: the statuses are `u8`s and the
+    /// trail a `Failure[..~32]` (DESIGN §7.3).
+    fn declare_capture(&mut self, c: &Capture) {
+        for n in c.statuses() {
+            self.declare_name(n, Ty::u8());
+        }
+        if let Some(n) = &c.trail {
+            let t = self.prog.trail_ty();
+            self.declare_name(n, t);
+        }
+    }
+
+    /// The destinations of `x @a @@b @@@t = e;`, which already exist.
+    fn capture_dest(&mut self, c: &Capture) {
+        for n in c.statuses() {
+            self.status_dest(n, false);
+        }
+        if let Some(n) = &c.trail {
+            self.status_dest(n, true);
         }
     }
 
@@ -1938,13 +2046,13 @@ impl<'p, 'a> Checker<'p, 'a> {
         }
     }
 
-    fn destructure(&mut self, targets: &[Target], capture: Option<&Name>, value: &Expr) {
+    fn destructure(&mut self, targets: &[Target], capture: Option<&Capture>, value: &Expr) {
         let vt = self.expr_c(value, None, capture.is_some());
         if let Some(c) = capture {
             if targets.iter().any(|t| matches!(t, Target::Decl(..))) {
-                self.declare_name(c, Ty::u8());
+                self.declare_capture(c);
             } else {
-                self.status_dest(c);
+                self.capture_dest(c);
             }
         }
         let n = targets.len();
@@ -1989,7 +2097,8 @@ impl<'p, 'a> Checker<'p, 'a> {
         }
     }
 
-    fn status_dest(&mut self, c: &Name) {
+    /// An existing variable a status goes into, or with `trail`, a trail.
+    fn status_dest(&mut self, c: &Name, trail: bool) {
         let Name::Ident(id) = c else { return };
         if self.lookup_local(&id.name).is_some() || self.field_type_quiet(&id.name) {
             self.write_name(&id.name, id.span);
@@ -2015,7 +2124,19 @@ impl<'p, 'a> Checker<'p, 'a> {
                 }
             },
         };
-        if !matches!(t.unref(), Ty::Prim(Prim::U8) | Ty::Unknown) {
+        if trail {
+            let want = self.prog.trail_ty();
+            if *t.unref() != want && !t.is_unknown() && !want.is_unknown() {
+                self.err(
+                    id.span,
+                    format!(
+                        "a trail goes into a Failure[..~32], and `{}` is {}",
+                        id.name,
+                        self.show(&t)
+                    ),
+                );
+            }
+        } else if !matches!(t.unref(), Ty::Prim(Prim::U8) | Ty::Unknown) {
             self.err(
                 id.span,
                 format!(
@@ -2436,7 +2557,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                 value,
             } => self.assign(*op, target, capture.as_ref(), value, e.span),
             E::StatusAssign { capture, value } => {
-                self.status_dest(capture);
+                self.capture_dest(capture);
                 self.expr_c(value, None, true);
                 Ty::Void
             }
@@ -2497,7 +2618,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                 Ty::bool()
             }
             E::Unary { op, expr } => self.unary(*op, expr, want),
-            E::StatusRead(x) => {
+            E::StatusRead { expr: x, deep } => {
                 // Anything that can fail can be read (DESIGN §7.6); a name or a literal can't.
                 if matches!(
                     strip_parens(x).kind,
@@ -2510,7 +2631,8 @@ impl<'p, 'a> Checker<'p, 'a> {
                         | E::Null
                         | E::This
                 ) {
-                    self.err_help(x.span, "`@` reads the status of something that can fail, and this can't", "for an operator expression, put it in parentheses: `@(a / b)` (DESIGN §7.3)");
+                    let at = if *deep { "@@" } else { "@" };
+                    self.err_help(x.span, format!("`{}` reads the status of something that can fail, and this can't", at), format!("for an operator expression, put it in parentheses: `{}(a / b)` (DESIGN §7.3)", at));
                 }
                 self.expr_c(x, None, true);
                 Ty::u8()
@@ -3137,13 +3259,13 @@ impl<'p, 'a> Checker<'p, 'a> {
         &mut self,
         op: AssignOp,
         target: &Expr,
-        capture: Option<&Name>,
+        capture: Option<&Capture>,
         value: &Expr,
         span: Span,
     ) -> Ty {
         let consumed = capture.is_some();
         if let Some(c) = capture {
-            self.status_dest(c);
+            self.capture_dest(c);
         }
         if matches!(target.kind, E::Discard) {
             if op != AssignOp::Assign {
@@ -4392,6 +4514,8 @@ impl<'p, 'a> Checker<'p, 'a> {
             Ty::Func(ps, r) => {
                 let mut sig = Sig::new(name, ps.clone(), (**r).clone());
                 sig.origin = Origin::Value;
+                // Every function value can fail (DESIGN §9.3).
+                sig.can_fail = true;
                 self.resolve_call(name, vec![sig], None, args, span, consumed)
             }
             Ty::Unknown => {
@@ -6272,7 +6396,7 @@ pub(crate) fn expr_children(e: &Expr) -> Vec<&Expr> {
             v
         }
         E::Paren(x)
-        | E::StatusRead(x)
+        | E::StatusRead { expr: x, .. }
         | E::Unary { expr: x, .. }
         | E::Cast { expr: x, .. }
         | E::Postfix { expr: x, .. }

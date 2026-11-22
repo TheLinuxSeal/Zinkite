@@ -1,0 +1,12 @@
+package zink.lang;
+
+// One entry of a failure's trail, as `@@@t` gives it (DESIGN §7.6): a line in the program
+// that returned the status, passed it on, or left it unread, which abandoned the call
+// it was in. The first entry is where the failure started.
+public class Failure {
+    public string function;     // the function the line is in
+    public string file;
+    public i64 line;
+    public u8 code;             // the status there
+    public bool unread;         // nothing read it there
+}

@@ -92,6 +92,7 @@ DESIGN §7.7 lists them too.
 | `NO_MEMORY` | 12 | `ENOMEM` | Cannot allocate memory | the graphics bindings, when host or GPU memory runs out (§10.6) |
 | `GPU` | 198 | Zinkite | A graphics API call failed; the binding gives the exact code | `vendor.gl`, `vendor.vulkan` (§10.6) |
 | `OUT_OF_DATE` | 199 | Zinkite | The window's surface changed, so the swapchain must be rebuilt | `vendor.vulkan` (§10.6) |
+| `ABANDONED` | 200 | Zinkite | Abandoned: a failure inside wasn't read | `@a` beside `@@` or `@@@`, for a call a failure nothing read inside it stopped (DESIGN §7.3) |
 
 - **Malformed input fails with `INVALID`**: bad JSON, an unterminated CSV quote, a bad glob pattern. `i64.parse("abc")` already does the same. The parser's `ParseError` says where.
 - **Exceeding a nesting limit fails with `FULL`**, the same code as a push on a full capped array.
@@ -130,6 +131,16 @@ string status.name(u8 code)      // "NOT_FOUND"; the C name ("ESRCH") for errno 
 
 - **Named codes** are constants on `status`: `status.OK`, `status.FAILED`, `status.NOT_FOUND`, … (DESIGN §7.7, and §1.4 here). A name that isn't one is a compile error.
 - **There is no `exit` and no `fail`** (DESIGN §7.6). A state the program believes impossible fails like anything else, `return #status.FAILED x;`, and a caller that doesn't read that stops the program at its line. Only returning from `main` ends a program (DESIGN §8.6).
+- **A trail entry**, from `x @@err @@@trail = f();` (DESIGN §7.3, §7.6), is a `Failure`:
+  ```
+  class Failure {
+      string function;    // the function the line is in: `parsePort`, or `Class.method`
+      string file;
+      i64 line;
+      u8 code;            // the status there
+      bool unread;        // nothing read it there, which abandoned the call
+  }
+  ```
 
 ### 2.3 Environment: `env`
 
@@ -661,7 +672,7 @@ Methods that change the array need fixed-size elements, and an array or a writab
 
 **Sorting.** Every sort works in place, on an array or a writable view, with fixed-size elements. Most come in three forms (DESIGN §6.5):
 - **`()`** uses `T`'s natural order, and needs `T implements ordered`;
-- **`(less)`** takes a comparator, a `func(T, T => bool)` that says whether its first argument goes before its second;
+- **`(less)`** takes a comparator, a `func(T, T => bool)` that says whether its first argument goes before its second. A comparator, key or predicate that fails fails the call with its status, and the call stops there (DESIGN §9.3);
 - **`By(key)`** takes a key function, a `func(T => K)` with `K implements ordered`, and compares the keys in their natural order.
 
 | Methods | Algorithm | Time (worst case) | Scratch space | Stable |

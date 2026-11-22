@@ -272,8 +272,7 @@ public class Args {
         if (!given) {
             return fallback;
         }
-        i64 v @err = i64.parse(get(name, ""));
-        return #err v;
+        return ## i64.parse(get(name, ""));
     }
 
     // INVALID.
@@ -285,8 +284,7 @@ public class Args {
         if (!given) {
             return fallback;
         }
-        f64 v @err = f64.parse(get(name, ""));
-        return #err v;
+        return ## f64.parse(get(name, ""));
     }
 
     // Every value of an option given more than once: -I a -I b.

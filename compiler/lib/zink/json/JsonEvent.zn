@@ -64,8 +64,7 @@ public class JsonEvent {
         if (!json.isInt(text)) {
             return #status.TYPE 0;
         }
-        i64 n @err = i64.parse(text);
-        return #err n;
+        return ## i64.parse(text);
     }
 
     // TYPE for anything but a NUMBER; a number beyond f64's range reads as ±infinity.
@@ -73,7 +72,6 @@ public class JsonEvent {
         if (kind != JsonToken.NUMBER) {
             return #status.TYPE 0.0;
         }
-        f64 x @err = f64.parse(text);
-        return #err x;
+        return ## f64.parse(text);
     }
 }

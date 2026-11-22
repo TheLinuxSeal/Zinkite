@@ -187,6 +187,27 @@ pub enum Lookup {
 }
 
 impl<'a> Program<'a> {
+    /// What `@@@t` gives: `Failure[..~32]`, from `zink.lang` (DESIGN §7.3).
+    pub fn trail_ty(&self) -> Ty {
+        match self
+            .classes
+            .iter()
+            .position(|c| c.name == "Failure" && c.package == "zink.lang")
+        {
+            Some(id) => Ty::Array(
+                Box::new(Ty::Class(id, Vec::new())),
+                ArrayKind {
+                    start: '.',
+                    cursor: '.',
+                    end: '~',
+                    cap: CapKind::Capped,
+                    size: 32,
+                },
+            ),
+            None => Ty::Unknown,
+        }
+    }
+
     pub fn collect(files: &'a [ast::File]) -> Program<'a> {
         let mut prog = Program {
             files: Vec::new(),

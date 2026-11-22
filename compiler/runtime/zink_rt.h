@@ -2,6 +2,7 @@
  * Data stacks, output, failures, checked arithmetic, and the core of the library. */
 
 #include <errno.h>
+#include <setjmp.h>
 #include <math.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -73,29 +74,158 @@ static ZR_UNUSED int64_t zr_walk(const uint8_t *e, uint64_t c, int64_t (*sz)(con
 
 static void zr_flush(void);
 
+/* The runtime's own failures, such as running out of address space: nothing catches them. */
 static ZR_NORETURN ZR_UNUSED void zr_fail(const char *file, int line, const char *msg) {
     zr_flush();
     fprintf(stderr, "%s:%d: %s\n", file, line, msg);
     exit(1);
 }
 
-/* Where the last function to fail returned its status (DESIGN §7.6). */
-static const char *zr_at_file;
-static int zr_at_line;
-
-static ZR_UNUSED void zr_set_at(const char *file, int line) {
-    zr_at_file = file;
-    zr_at_line = line;
-}
+/* A line that can fail, and the function it's in. The library's have no function, add
+ * nothing to the trail, and live only while they're reported. */
+typedef struct { const char *fn; const char *file; int line; } zr_site;
 
 static const char *zr_status_name(uint8_t s);
 
-/* A call failed and nothing read its status: the program stops, at the call. `own` says
- * the call was to a function of the program's, which recorded where it returned it. */
-static ZR_NORETURN ZR_UNUSED void zr_unread(const char *file, int line, uint8_t st, const char *what, int own) {
+/* ---- the trail: where the latest failure was returned, passed on, and left unread. A
+ * longer one keeps its first 24 entries and its last 8. */
+typedef struct { const zr_site *site; uint8_t code; uint8_t unread; } zr_trail_entry;
+#define ZR_TRAIL 32
+#define ZR_TRAIL_HEAD 24
+static zr_trail_entry zr_trail[ZR_TRAIL];
+static int64_t zr_trail_n;          /* entries added, counting those dropped */
+static uint64_t zr_trail_gen;       /* which trail it is */
+static int zr_trail_live;           /* the latest failure added to it, and nothing has read it */
+
+static void zr_trail_add(const zr_site *s, uint8_t code, int unread, int fresh) {
+    if (fresh) {
+        zr_trail_gen++;
+        zr_trail_n = 0;
+    }
+    int64_t i = zr_trail_n < ZR_TRAIL ? zr_trail_n
+        : ZR_TRAIL_HEAD + (zr_trail_n - ZR_TRAIL_HEAD) % (ZR_TRAIL - ZR_TRAIL_HEAD);
+    zr_trail[i] = (zr_trail_entry){s, code, (uint8_t)unread};
+    zr_trail_n++;
+    zr_trail_live = 1;
+}
+
+/* Entry m of the trail, counting from its start, if it's kept: all of the first 24, and
+ * the last 8 of a longer one. */
+static zr_trail_entry *zr_trail_ord(int64_t m) {
+    return &zr_trail[m < ZR_TRAIL ? m : ZR_TRAIL_HEAD + (m - ZR_TRAIL_HEAD) % (ZR_TRAIL - ZR_TRAIL_HEAD)];
+}
+
+/* A function of the program's returns a failure. It adds to the trail of the failure it
+ * read last when `g` says that one is still the latest, and starts a new trail otherwise. */
+static ZR_UNUSED void zr_trail_ret(const zr_site *s, uint8_t code, uint64_t g) {
+    zr_trail_add(s, code, 0, !(g && g == zr_trail_gen));
+}
+
+/* A failure was read: its trail, when the failure added to one, for passing it on. */
+static ZR_UNUSED uint64_t zr_trail_claim(void) {
+    uint64_t g = zr_trail_live ? zr_trail_gen : 0;
+    zr_trail_live = 0;
+    return g;
+}
+
+/* `@@@t` (DESIGN §7.3): how many entries the trail of a failure with status `st`, read at
+ * `s`, has for `t`, after `zr_trail_item` gives them. `*g` is the trail the reader claimed;
+ * a failure that added to none, from the library or from a check in the expression itself,
+ * starts one where it's read. */
+static const zr_site zr_lib_site = {NULL, "zink", 0};
+static ZR_UNUSED int64_t zr_trail_take(const zr_site *s, uint8_t st, uint64_t *g) {
+    if (!st) return 0;
+    if (!(*g && *g == zr_trail_gen)) {
+        zr_trail_add(s->fn ? s : &zr_lib_site, st, 0, 1);
+        *g = zr_trail_gen;
+    }
+    zr_trail_live = 0;
+    return zr_trail_n < ZR_TRAIL ? zr_trail_n : ZR_TRAIL;
+}
+
+/* Entry k of the kept trail, in order, the dropped middle of a long one skipped. */
+static ZR_UNUSED zr_trail_entry *zr_trail_item(int64_t k) {
+    int64_t n = zr_trail_n;
+    return zr_trail_ord(k < ZR_TRAIL_HEAD || n <= ZR_TRAIL ? k : n - (ZR_TRAIL - k));
+}
+
+static ZR_UNUSED zr_slice zr_ctext(const char *p) {
+    zr_slice r = {(void *)(p ? p : ""), p ? (int64_t)strlen(p) : 0};
+    return r;
+}
+
+/* The trail's first `upto` entries, before a stop: the header line names the failure
+ * `st`, and "it" is that failure here. */
+static void zr_trail_print(int64_t upto, uint8_t st) {
+    int64_t n = zr_trail_n;
+    int64_t tail = n > ZR_TRAIL ? n - (ZR_TRAIL - ZR_TRAIL_HEAD) : ZR_TRAIL_HEAD;
+    zr_trail_entry *prev = NULL;
+    for (int64_t m = 0; m < upto; m++) {
+        if (m >= ZR_TRAIL_HEAD && m < tail) {
+            fprintf(stderr, "    ... %lld more\n", (long long)(tail - m));
+            m = tail - 1;
+            continue;
+        }
+        zr_trail_entry *e = zr_trail_ord(m);
+        const char *what = e->code == st ? "it" : zr_status_name(e->code);
+        const char *fn = e->site->fn ? e->site->fn : "?";
+        if (e->unread) fprintf(stderr, "    `%s` didn't read %s at %s:%d\n", fn, what, e->site->file, e->site->line);
+        else if (prev && prev->code == e->code) fprintf(stderr, "    `%s` passed %s on at %s:%d\n", fn, what, e->site->file, e->site->line);
+        else fprintf(stderr, "    `%s` returned %s at %s:%d\n", fn, what, e->site->file, e->site->line);
+        prev = e;
+    }
+}
+
+/* ---- `@@` (DESIGN §7.6): a failure nothing reads jumps to the innermost one, through the
+ * defers of the functions it abandons. Each `@@`, and each defer while one is active, is a
+ * record on this stack. */
+typedef struct zr_catch { struct zr_catch *prev; char *scratch; jmp_buf jb; uint8_t st; } zr_catch;
+static zr_catch *zr_catch_top;
+static char *zr_scratch_top;
+
+static ZR_UNUSED void zr_catch_enter(zr_catch *k) {
+    k->prev = zr_catch_top;
+    k->scratch = zr_scratch_top;
+    k->st = 0;
+    zr_catch_top = k;
+}
+
+static ZR_UNUSED void zr_catch_leave(zr_catch *k) { zr_catch_top = k->prev; }
+
+/* Jumps to the innermost record, if there is one, with status `st`. */
+static ZR_UNUSED void zr_abandon(uint8_t st) {
+    zr_catch *k = zr_catch_top;
+    if (!k) return;
+    zr_catch_top = k->prev;
+    zr_scratch_top = k->scratch;
+    k->st = st;
+    longjmp(k->jb, 1);
+}
+
+/* After a defer an abandoned function ran: on to the next record. */
+static ZR_NORETURN ZR_UNUSED void zr_abandon_on(uint8_t st) {
+    zr_abandon(st);
+    zr_fail("zink runtime", 0, "an abandoned call has nowhere to go");
+}
+
+/* A check failed and nothing reads it: an `@@` catches it, or the program stops here. */
+static ZR_NORETURN ZR_UNUSED void zr_stop(const zr_site *s, uint8_t st, const char *msg) {
+    if (s->fn) zr_trail_add(s, st, 1, 1);
+    zr_abandon(st);
     zr_flush();
-    fprintf(stderr, "%s:%d: `%s` failed with %s, and nothing read its status\n", file, line, what, zr_status_name(st));
-    if (own && zr_at_file) fprintf(stderr, "    `%s` returned it at %s:%d\n", what, zr_at_file, zr_at_line);
+    fprintf(stderr, "%s:%d: %s\n", s->file, s->line, msg);
+    exit(1);
+}
+
+/* A call failed and nothing read its status: an `@@` catches it, or the program stops,
+ * at the call, with the trail that led there. */
+static ZR_NORETURN ZR_UNUSED void zr_unread(const zr_site *s, uint8_t st, const char *what) {
+    int64_t before = zr_trail_live ? zr_trail_n : 0;
+    if (s->fn) zr_trail_add(s, st, 1, !zr_trail_live);
+    zr_abandon(st);
+    zr_flush();
+    fprintf(stderr, "%s:%d: `%s` failed with %s, and nothing read its status\n", s->file, s->line, what, zr_status_name(st));
+    zr_trail_print(before, st);
     exit(1);
 }
 
@@ -122,7 +252,7 @@ static ZR_UNUSED void *zr_stack(int site) {
 
 /* The scratch stack holds temporaries, such as interpolated text passed to a function,
  * which are released at the end of their statement (DESIGN §4.11). */
-static char *zr_scratch_base, *zr_scratch_top;
+static char *zr_scratch_base;
 
 static ZR_UNUSED int64_t zr_sm(void) {
     if (!zr_scratch_base) zr_scratch_base = zr_scratch_top = (char *)zr_stack(0);
@@ -863,16 +993,16 @@ static ZR_UNUSED int zr_cmp_su128(zr_i128 a, zr_u128 b) { return a < 0 ? -1 : (z
 #define ZR_IX_CLAMP(i, n, fail) ({ int64_t _zxi = (i), _zxn = (n); if (_zxn == 0) { fail; } \
     _zxi < 0 ? 0 : _zxi >= _zxn ? _zxn - 1 : _zxi; })
 
-static ZR_NORETURN ZR_UNUSED void zr_ix_fail(const char *f, int l, int64_t i, int64_t n) {
+static ZR_NORETURN ZR_UNUSED void zr_ix_fail(const zr_site *s, int64_t i, int64_t n) {
     char msg[96];
     snprintf(msg, sizeof msg, "index %lld is out of range for length %lld", (long long)i, (long long)n);
-    zr_fail(f, l, msg);
+    zr_stop(s, 34, msg);
 }
 
-static ZR_NORETURN ZR_UNUSED void zr_range_fail(const char *f, int l, int64_t i, int64_t j, int64_t n) {
+static ZR_NORETURN ZR_UNUSED void zr_range_fail(const zr_site *s, int64_t i, int64_t j, int64_t n) {
     char msg[96];
     snprintf(msg, sizeof msg, "slice %lld:%lld is out of range for length %lld", (long long)i, (long long)j, (long long)n);
-    zr_fail(f, l, msg);
+    zr_stop(s, 34, msg);
 }
 
 /* What a reference caught by `@` refers to when the expression failed: a zero value of its
@@ -2519,6 +2649,7 @@ static const char *zr_status_name(uint8_t s) {
         case 197: return "TYPE";
         case 198: return "GPU";
         case 199: return "OUT_OF_DATE";
+        case 200: return "ABANDONED";
         default: snprintf(buf, sizeof buf, "%d", s); return buf;
     }
 }
@@ -2535,10 +2666,21 @@ static ZR_UNUSED zr_slice zr_status_message(uint8_t s) {
         case 195: m = "No such key or element"; break;
         case 196: m = "Position out of range"; break;
         case 197: m = "Wrong kind of value"; break;
+        case 200: m = "Abandoned: a failure inside wasn't read"; break;
         default:
             if (s < 192) m = strerror(s);
             else { snprintf(buf, sizeof buf, "Error %d", s); m = buf; }
     }
     (void)zr_status_names;
     return zr_lit(m, (int64_t)strlen(m));
+}
+
+/* status.name (STDLIB §1.4): the name of DESIGN §7.7, the C name for an operating-system
+ * code without one where the C library knows it, and "" for a program's own. */
+extern const char *strerrorname_np(int) __attribute__((weak));
+static ZR_UNUSED zr_slice zr_status_name_text(uint8_t s) {
+    const char *n = zr_status_name(s);
+    if (s >= 224) n = "";
+    else if (n[0] >= '0' && n[0] <= '9' && s < 192 && strerrorname_np && strerrorname_np(s)) n = strerrorname_np(s);
+    return zr_lit(n, (int64_t)strlen(n));
 }

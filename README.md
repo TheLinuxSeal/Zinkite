@@ -84,6 +84,8 @@ $ zink grepish.zn -n the notes.txt
   ```
   tool.zn:12: `open` failed with NOT_FOUND, and nothing read its status
   ```
+  `@@err` also catches one that nothing read deeper inside the call, and
+  `@@@trail` says where it went, so a server can fail one request and carry on.
   Nothing else stops a program, and there is no `exit`: it ends when `main`
   returns.
 - **Arrays that say what they allow.** `T[..>]` only grows at the end,

@@ -46,6 +46,7 @@ lib! {
     "zink.lang", "zink/lang/EnvVar.zn";
     "zink.lang", "zink/lang/EnvIterator.zn";
     "zink.lang", "zink/lang/TextMethods.zn";
+    "zink.lang", "zink/lang/Failure.zn";
     "zink.time", "zink/time/time.zn";
     "zink.time", "zink/time/Duration.zn";
     "zink.time", "zink/time/Instant.zn";

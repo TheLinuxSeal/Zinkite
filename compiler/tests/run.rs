@@ -4042,12 +4042,10 @@ fn jsonfmt_reindents_sorts_and_reports_errors() {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
+        // jsonfmt stops reading at the first error, which can close the pipe first.
+        if let Err(e) = child.stdin.take().unwrap().write_all(input.as_bytes()) {
+            assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{}", e);
+        }
         let o = child.wait_with_output().unwrap();
         (
             o.status.code().unwrap_or(-1),
@@ -4232,5 +4230,406 @@ fn valid_utf8_is_strict() {
 }
 "##,
         "true true false false false false false true \n",
+    );
+}
+
+/// `@@` and `@@@` also catch a failure nothing read inside the call, abandoning it (DESIGN
+/// §7.6): `@` then reads ABANDONED and `@@` the failure itself; the trail says where it was
+/// returned and where nothing read it. Without them, the program stops where nothing read
+/// it. `@` with `@@@` catches the same; `@@` in an expression gives the failure.
+#[test]
+fn deep_reads_catch_what_nothing_read_inside() {
+    let r = run(
+        r##"i64 parsePort(string s) {
+    i64 n @err = i64.parse(s);
+    if (err) {
+        return #status.INVALID 0;
+    }
+    if (n < 1 || n > 65535) {
+        return #status.RANGE 0;
+    }
+    return n;
+}
+
+i64 portOf(string addr) {
+    i64 colon @none = addr.find(":");
+    if (none) {
+        return #status.MISSING 0;
+    }
+    return parsePort(addr[colon + 1:addr.len]);
+}
+
+void show(Failure[..~32] t) {
+    for (var f : t) {
+        println("    ${f.function} ${status.name(f.code)} ${f.file}:${f.line}${f.unread ? " unread" : ""}");
+    }
+}
+
+void main(string[.] args) {
+    string[.] addrs = ["example.com:8080", "example.com", "example.com:http"];
+    for (string a : addrs) {
+        i64 p @one @@all @@@t = portOf(a);
+        println("${a}: ${p} ${status.name(one)} ${status.name(all)} ${t.len}");
+        show(t);
+        i64 q @one2 @@@t2 = portOf(a);
+        println("  ${q} ${status.name(one2)} ${t2.len}");
+    }
+    u8 s = @@portOf("x:y");
+    u8 s1 = @portOf("x");
+    i64 v = 0;
+    u8 e = 0;
+    v @@e = portOf("x:z");
+    @@e = portOf("x:z");
+    @@_ = portOf("x:z");
+    println("${s} ${s1} ${e}");
+    i64 last = portOf(args[0]);
+    println("end");
+}
+"##,
+        &["x:80000"],
+    );
+    assert_eq!(
+        r.stdout,
+        "example.com:8080: 8080 OK OK 0\n  8080 OK 0\n\
+         example.com: 0 MISSING MISSING 1\n    portOf MISSING prog.zn:15\n  0 MISSING 1\n\
+         example.com:http: 0 ABANDONED INVALID 2\n    parsePort INVALID prog.zn:4\n    portOf INVALID prog.zn:17 unread\n  0 ABANDONED 2\n\
+         22 195 22\n"
+    );
+    assert_eq!(
+        r.stderr,
+        "prog.zn:17: `parsePort` failed with RANGE, and nothing read its status\n    `parsePort` returned it at prog.zn:7\n"
+    );
+    assert_eq!(r.code, 1);
+}
+
+/// What a call abandoned by `@@` leaves (DESIGN §6.4, §7.6): every `defer` in the functions
+/// it abandons runs, innermost first, seeing the variables as they were when it stopped.
+/// The innermost `@@` catches; a check deep inside, such as an index or a division by zero,
+/// abandons the calls as an unread failure does; a repeat loop with `@@why` ends at one.
+#[test]
+fn abandoned_calls_run_their_defers() {
+    prints(
+        r##"i64[..>] log = [];
+
+i64 inner(i64 i) {
+    defer log +> 1;
+    i64 count = 10;
+    defer log +> count;
+    count = 20;
+    i64[..>] a = [1, 2, 3];
+    {
+        defer log +> 3;
+        return a[i];
+    }
+}
+
+i64 middle(i64 i) {
+    defer log +> 4;
+    i64 r = inner(i);
+    return r * 2;
+}
+
+i64 outer(i64 i) {
+    i64 v @@why = middle(i);
+    if (why) {
+        log +> 100 + (i64) why;
+    }
+    return v;
+}
+
+i64 divide(i64 a, i64 b) { return a / b; }
+
+i64[..>] items = [5, 6, 7];
+
+i64 step(i64 k) {
+    if (k >= 5) {
+        return #status.END 0;
+    }
+    return items[k];
+}
+
+void main() {
+    i64 ok = outer(1);
+    println("${ok} ${log}");
+    log.clear();
+    i64 bad = outer(7);
+    println("${bad} ${log}");
+    log.clear();
+    i64 n @@all = outer(9);
+    println("${n} ${all} ${log}");
+    i64 d @@e @@@t = divide(1, 0);
+    println("${d} ${status.name(e)} ${t.len} ${t[0].function} ${t[0].line} ${t[0].unread}");
+    i64 k = 0;
+    i64 hits = 0;
+    while (i64 q : step(k)) @@why {
+        hits++;
+        k++;
+    }
+    println("${hits} ${status.name(why)}");
+}
+"##,
+        "4 [3, 20, 1, 4]\n0 [3, 20, 1, 4, 134]\n0 0 [3, 20, 1, 4, 134]\n0 DOMAIN 1 divide 29 true\n3 RANGE\n",
+    );
+}
+
+/// The trail (DESIGN §7.6): a failure passed on adds to the trail of the one read, and so
+/// does a code of the function's own returned where it tests that status; any other failure
+/// starts a new one. A failure from the library, or one `pop` gives, starts at the line that
+/// reads it. A long trail keeps its first 24 entries and its last 8.
+#[test]
+fn the_trail_says_where_a_failure_went() {
+    let exe = build(
+        r##"i64[..~] items = [];
+
+i64 load(string s) {
+    i64 n @err = i64.parse(s);
+    if (err) {
+        return #status.INVALID 0;
+    }
+    return n;
+}
+
+i64 config(string s) {
+    i64 n @err = load(s);
+    if (err) {
+        return #224 0;
+    }
+    return n;
+}
+
+i64 handled(string s) {
+    i64 n @err = load(s);
+    if (n < 1) {
+        return #status.RANGE 0;
+    }
+    return n;
+}
+
+i64 popped() {
+    i64 v @err = items.pop();
+    return #err v;
+}
+
+i64 down(i64 n) {
+    if (n == 0) {
+        return #status.MISSING 0;
+    }
+    i64 v @err = down(n - 1);
+    return #err v;
+}
+
+void show(string what, Failure[..~32] t) {
+    print(what);
+    for (var f : t) {
+        print(" ${f.function}:${f.line}:${f.code}");
+    }
+    println("");
+}
+
+void main(string[.] args) {
+    i64 a @@e1 @@@t1 = config("x");
+    show("config", t1);
+    i64 b @@e2 @@@t2 = handled("x");
+    show("handled", t2);
+    i64 c @@e3 @@@t3 = popped();
+    show("popped", t3);
+    i64 d @@e4 @@@t4 = items.pop();
+    show("pop", t4);
+    i64 e @@e5 @@@t5 = down(40);
+    println("down ${t5.len} ${t5[0].line} ${t5[23].line} ${t5[24].line} ${t5[31].line} ${t5[31].code}");
+    if (args[0] == "config") { i64 x = config("y"); }
+    if (args[0] == "down") { i64 x = down(40); }
+}
+"##,
+    );
+    let r = exec(&exe, &["config"]);
+    assert_eq!(
+        r.stdout,
+        "config load:6:22 config:14:224\nhandled handled:22:34\npopped popped:29:192\npop main:55:192\ndown 32 34 37 37 37 195\n"
+    );
+    assert_eq!(
+        r.stderr,
+        "prog.zn:59: `config` failed with 224, and nothing read its status\n    `load` returned INVALID at prog.zn:6\n    `config` returned it at prog.zn:14\n"
+    );
+    let r = exec(&exe, &["down"]);
+    let lines: Vec<&str> = r.stderr.lines().collect();
+    assert_eq!(lines[0], "prog.zn:60: `down` failed with MISSING, and nothing read its status");
+    assert_eq!(lines[1], "    `down` returned it at prog.zn:34");
+    assert_eq!(lines[2], "    `down` passed it on at prog.zn:37");
+    assert_eq!(lines[25], "    ... 10 more");
+    assert_eq!(lines[26], "    `down` passed it on at prog.zn:37");
+    assert_eq!(lines.len(), 33);
+}
+
+/// `status.name` (STDLIB §1.4): the names of DESIGN §7.7, the C name of an operating-system
+/// code without one, and "" for a program's own codes.
+#[test]
+fn status_names() {
+    prints(
+        r##"void main() {
+    println("${status.name(0)} ${status.name(2)} ${status.name(3)} ${status.name(200)} [${status.name(230)}] ${status.message(200)}");
+}
+"##,
+        "OK NOT_FOUND ESRCH ABANDONED [] Abandoned: a failure inside wasn't read\n",
+    );
+}
+
+/// `return ## e;` passes on `e`'s value and the status `@` reads from it (DESIGN §7.2): a
+/// call's, an index's, a `void` call's in a function or constructor that returns nothing,
+/// and an array's built where the caller says. The trail says it was passed on.
+#[test]
+fn return_pass_on() {
+    let exe = build(
+        r##"import zink.hash.*;
+
+i64 parsePort(string s) {
+    i64 n @err = i64.parse(s);
+    if (err) {
+        return #status.INVALID 0;
+    }
+    return n;
+}
+
+i64 portOf(string addr) {
+    i64 colon @none = addr.find(":");
+    if (none) {
+        return #status.MISSING 0;
+    }
+    return ## parsePort(addr[colon + 1:addr.len]);
+}
+
+i64[..~] stack = [];
+
+void push(i64 x) {
+    if (x < 0) {
+        return #status.INVALID;
+    }
+    stack +> x;
+}
+
+void pushThen(i64 x) {
+    push(1);
+    return ## push(x);
+}
+
+u8[.] digest(string s, i64 n) {
+    return ## hash.shake_128(s, n);
+}
+
+i64 at(i64 i) {
+    return ## stack[i];
+}
+
+class Box {
+    i64 v;
+    new(i64 x) {
+        v = x;
+        return ## push(x);
+    }
+}
+
+void main(string[.] args) {
+    i64 p @err @@@t = portOf("example.com:http");
+    println("${p} ${status.name(err)} ${t.len} ${t[1].function} ${t[1].line} ${t[1].unread}");
+    i64 q @e2 = portOf("example.com:8080");
+    @e2 = pushThen(-1);
+    println("${q} ${status.name(e2)} ${stack.len}");
+    u8[.] d @e3 = digest("abc", 4);
+    u8[.] d2 @e4 = digest("abc", -1);
+    println("${d.len} ${e3} ${d2.len} ${status.name(e4)}");
+    i64 a @e5 = at(0);
+    i64 b @e6 = at(9);
+    Box k @e7 = new Box(-5);
+    println("${a} ${e5} ${b} ${status.name(e6)} ${status.name(e7)}");
+    if (args[0] == "stop") { i64 x = portOf("y:z"); }
+}
+"##,
+    );
+    let r = exec(&exe, &["go"]);
+    assert_eq!(
+        r.stdout,
+        "0 INVALID 2 portOf 16 false\n8080 INVALID 1\n4 0 0 INVALID\n1 0 0 RANGE INVALID\n"
+    );
+    let r = exec(&exe, &["stop"]);
+    assert_eq!(
+        r.stderr,
+        "prog.zn:62: `portOf` failed with INVALID, and nothing read its status\n    `parsePort` returned it at prog.zn:6\n    `portOf` passed it on at prog.zn:16\n"
+    );
+}
+
+/// Every function value can fail (DESIGN §9.3): a call through one gives the lambda's
+/// status, which `@` reads, and which stops the program when nothing does. A lambda passed
+/// to a built-in fails that call, which stops partway: `sort`, `fold`, `findIndex`, `any`.
+/// `return ##` works in a lambda, and the trail names it.
+#[test]
+fn lambdas_can_fail() {
+    let exe = build(
+        r##"i64 applyTwice(func(i64 => i64) f, i64 x) {
+    i64 once @err = f(x);
+    if (err) {
+        return #err 0;
+    }
+    return ## f(once);
+}
+
+bool even(i64 x) {
+    if (x < 0) {
+        return #status.RANGE false;
+    }
+    return x % 2 == 0;
+}
+
+void main(string[.] args) {
+    func(i64 => i64) half = (i64 x) => {
+        if (x % 2 != 0) {
+            return #status.INVALID 0;
+        }
+        return x / 2;
+    };
+    func(string => i64) parse = (string s) => { return ## i64.parse(s); };
+    i64 a @e1 = half(8);
+    i64 b @e2 = half(3);
+    i64 c @e3 = applyTwice(half, 12);
+    i64 d @e4 @@@t = applyTwice(half, 6);
+    i64 p @e5 = parse("42");
+    i64 q @e6 = parse("x");
+    println("${a} ${e1} ${b} ${e2} ${c} ${e3} ${d} ${e4} ${p} ${e5} ${q} ${e6} ${t[0].function}:${t[0].line} ${t[1].function}:${t[1].line}");
+    i64[..>] xs = [5, 3, 7, 1];
+    u8 s1 = 0;
+    @s1 = xs.sort((i64 x, i64 y) => {
+        if (x == 7) {
+            return #status.INVALID false;
+        }
+        return x < y;
+    });
+    i64 sum @s2 = xs.fold(0, (i64 acc, i64 x) => {
+        if (x > 6) {
+            return #status.RANGE acc;
+        }
+        return acc + x;
+    });
+    i64 at @s3 = xs.findIndex((i64 x) => { return ## even(x - 4); });
+    bool any @s4 = xs.any((i64 x) => { return ## even(x - 2); });
+    i64 at2 @s5 = xs.findIndex((i64 x) => { return ## even(x + 1); });
+    println("${status.name(s1)} ${xs} ${sum} ${status.name(s2)} ${at} ${status.name(s3)} ${any} ${status.name(s4)} ${at2} ${s5}");
+    if (args[0] == "value") { i64 z = half(5); }
+    if (args[0] == "sort") { xs.sort((i64 x, i64 y) => { if (x == 7) { return #status.INVALID false; } return x < y; }); }
+}
+"##,
+    );
+    let r = exec(&exe, &["go"]);
+    assert_eq!(
+        r.stdout,
+        "4 0 0 22 3 0 0 22 42 0 0 22 lambda:19 applyTwice:6\nINVALID [3, 5, 1, 7] 0 RANGE 0 RANGE false RANGE 0 0\n"
+    );
+    let r = exec(&exe, &["value"]);
+    assert_eq!(
+        r.stderr,
+        "prog.zn:49: `half` failed with INVALID, and nothing read its status\n    `lambda` returned it at prog.zn:19\n"
+    );
+    let r = exec(&exe, &["sort"]);
+    assert_eq!(
+        r.stderr,
+        "prog.zn:50: `sort` failed with INVALID, and nothing read its status\n    `lambda` returned it at prog.zn:50\n"
     );
 }

@@ -16,6 +16,32 @@ pub enum Name {
     Discard(Span),
 }
 
+/// The status destinations after a target (DESIGN §7.3): `@a` takes the status of the
+/// call itself, `@@b` the outermost failure anywhere inside it, and `@@@t` its trail.
+/// Either of the last two also catches a failure nothing read inside the call.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Capture {
+    pub one: Option<Name>,
+    pub deep: Option<Name>,
+    pub trail: Option<Name>,
+}
+
+impl Capture {
+    /// Whether it catches failures nothing read inside the call, too (DESIGN §7.6).
+    pub fn catches_inside(&self) -> bool {
+        self.deep.is_some() || self.trail.is_some()
+    }
+
+    /// The `u8` destinations: `@a` and `@@b`.
+    pub fn statuses(&self) -> impl Iterator<Item = &Name> {
+        self.one.iter().chain(self.deep.iter())
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &Name> {
+        self.one.iter().chain(self.deep.iter()).chain(self.trail.iter())
+    }
+}
+
 /// `a.b.c`
 #[derive(Clone, Debug, PartialEq)]
 pub struct QualName {
@@ -318,7 +344,7 @@ pub enum StmtKind {
     Repeat {
         target: LoopTarget,
         source: Expr,
-        capture: Option<Name>,
+        capture: Option<Capture>,
         body: Box<Stmt>,
     },
     DoWhile {
@@ -346,7 +372,7 @@ pub enum StmtKind {
     },
     Destructure {
         targets: Vec<Target>,
-        capture: Option<Name>,
+        capture: Option<Capture>,
         value: Expr,
     },
     Defer(Box<Stmt>),
@@ -378,8 +404,8 @@ pub struct LocalDecl {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LocalDeclarator {
     pub name: Ident,
-    /// `@err`
-    pub capture: Option<Name>,
+    /// `@err`, `@@err`, `@@@trail`
+    pub capture: Option<Capture>,
     pub init: Option<Expr>,
 }
 
@@ -414,6 +440,8 @@ pub enum StatusWrite {
     Int(u128),
     Name(QualName),
     Expr(Expr),
+    /// `return ## e;`: `e`'s value and its status, as `@` reads it (DESIGN §7.2).
+    Pass,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -500,12 +528,12 @@ pub enum ExprKind {
     Assign {
         op: AssignOp,
         target: Box<Expr>,
-        capture: Option<Name>,
+        capture: Option<Capture>,
         value: Box<Expr>,
     },
-    /// `@err = e`
+    /// `@err = e`, `@@err = e`, `@@@trail = e`
     StatusAssign {
-        capture: Name,
+        capture: Capture,
         value: Box<Expr>,
     },
     Cond {
@@ -527,8 +555,8 @@ pub enum ExprKind {
         op: UnaryOp,
         expr: Box<Expr>,
     },
-    /// `@e`
-    StatusRead(Box<Expr>),
+    /// `@e`, or `@@e` (`deep`), which also catches failures nothing read inside it
+    StatusRead { expr: Box<Expr>, deep: bool },
     Cast {
         ty: CastTarget,
         mode: CastMode,

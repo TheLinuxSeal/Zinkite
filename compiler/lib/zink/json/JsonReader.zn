@@ -96,8 +96,7 @@ public class JsonReader {
                 state = 4;
                 return new JsonEvent(JsonToken.KEY, raw, line, col);
             }
-            JsonEvent v @err = value(c, col);
-            return #err v;
+            return ## value(c, col);
         }
         return none();
     }

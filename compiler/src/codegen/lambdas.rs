@@ -6,6 +6,14 @@
 use super::*;
 use crate::ast::LambdaBody;
 
+/// Where a status that an inlined lambda returns goes (DESIGN §9.3): to the `@` reading
+/// the call it's passed to, or, with none, to a stop at that call. `action` has `%%ST%%`
+/// where the status goes.
+pub(super) struct LambdaFail {
+    pub action: String,
+    pub used: bool,
+}
+
 pub(super) struct PendingLambda {
     pub name: String,
     pub params: Vec<ast::Param>,
@@ -37,6 +45,8 @@ impl<'p, 'a> Gen<'p, 'a> {
         if let Some(n) = self.fn_types.get(&sig) {
             return n.clone();
         }
+        // Every function value can fail (DESIGN §9.3): it returns its value and a status.
+        let rc = self.ret_c_of(r, true, span);
         let name = format!("zfn{}", self.fn_types.len());
         let params = if pcs.is_empty() {
             "void".to_string()
@@ -59,18 +69,57 @@ impl<'p, 'a> Gen<'p, 'a> {
     /// A call of the function `f` on `args`, C lvalues of its parameter types. A lambda
     /// is inlined, each parameter bound to its argument in place, so nothing is copied;
     /// any other function value is called through its pointer.
+    /// A status it returns is the status of the call it's passed to (DESIGN §9.3): the
+    /// `@` reading that call gets it, or the program stops there.
     pub(super) fn apply(&mut self, f: &Expr, args: &[String]) -> String {
-        let saved = self.catching.take();
+        let mut saved = self.catching.take();
+        let action = match &saved {
+            Some(k) => format!("{{ {} = %%ST%%; goto {}; }}", k.cs, k.cl),
+            None => {
+                let (name, span) = self
+                    .call_names
+                    .last()
+                    .cloned()
+                    .unwrap_or(("lambda".to_string(), f.span));
+                let loc = self.loc(span);
+                format!("zr_unread({}, %%ST%%, {})", loc, c_string(name.as_bytes()))
+            }
+        };
+        self.lambda_fail.push(LambdaFail { action, used: false });
         let code = self.apply_inner(f, args);
+        let used = self.lambda_fail.pop().is_some_and(|l| l.used);
+        if used && let Some(k) = &mut saved {
+            k.used = true;
+        }
         self.catching = saved;
         code
     }
 
+    /// When the status `st`, a C name, is nonzero, what the innermost `apply` said to do.
+    pub(super) fn lambda_failed(&mut self, st: &str) -> String {
+        match self.lambda_fail.last_mut() {
+            Some(l) => {
+                l.used = true;
+                format!("if ({}) {}", st, l.action.replace("%%ST%%", st))
+            }
+            None => String::new(),
+        }
+    }
+
     fn apply_inner(&mut self, f: &Expr, args: &[String]) -> String {
         let Some((params, body)) = as_lambda(f) else {
+            // A function value, called through its pointer.
             let ft = settle(&self.ty(f));
             let fv = self.expr(f, &ft);
-            return format!("({})({})", fv, args.join(", "));
+            let (_, ret) = self.fn_sig(f);
+            let t = self.tmp("fr");
+            let call = format!("({})({})", fv, args.join(", "));
+            if ret == Ty::Void {
+                let fail = self.lambda_failed(&t);
+                return format!("({{ uint8_t {} = {}; {}; }})", t, call, fail);
+            }
+            let fail = self.lambda_failed(&format!("{}.s", t));
+            return format!("({{ __auto_type {t} = {}; {}; {t}.v; }})", call, fail, t = t);
         };
         let (ptys, ret) = self.fn_sig(f);
         let mut binds = String::new();
@@ -181,9 +230,10 @@ impl<'p, 'a> Gen<'p, 'a> {
             self.file = l.file;
             let saved_subst = std::mem::replace(&mut self.subst, l.subst.clone());
             let saved_cargs = std::mem::replace(&mut self.cur_cargs, l.cargs.clone());
-            self.begin_fn(l.class, l.ret.clone(), false, false, false);
+            self.begin_fn(l.class, l.ret.clone(), true, false, false);
+            self.label_fn("lambda");
             let span = l.params.first().map_or(Span::default(), |p| p.ty.span);
-            let rc = self.cty(&l.ret, span);
+            let rc = self.ret_c_of(&l.ret, true, span);
             let ps = self.params_c(&l.params, &l.ptys);
             let sig = format!(
                 "static {} {}({})",
@@ -202,21 +252,27 @@ impl<'p, 'a> Gen<'p, 'a> {
                     if l.ret == Ty::Void {
                         let c = self.expr_stmt_code(x);
                         self.line(&format!("{};", c));
+                        self.line("return 0;");
                     } else {
                         let v = self.expr(x, &l.ret);
                         if self.used_scratch {
                             self.line(&format!(
-                                "int64_t _sm = zr_sm(); {} _r = {}; zr_sr(_sm); return _r;",
+                                "int64_t _sm = zr_sm(); {} _r = {{{}, 0}}; zr_sr(_sm); return _r;",
                                 rc, v
                             ));
                         } else {
-                            self.line(&format!("return {};", v));
+                            self.line(&format!("return ({}){{{}, 0}};", rc, v));
                         }
                     }
                 }
-                LambdaBody::Block(b) => self.block_stmts(&b.stmts),
+                LambdaBody::Block(b) => {
+                    self.block_stmts(&b.stmts);
+                    if l.ret == Ty::Void {
+                        self.line("return 0;");
+                    }
+                }
             }
-            let out = std::mem::take(&mut self.out);
+            let out = self.take_body();
             let _ = writeln!(self.bodies, "{} {{\n{}}}\n", sig, out);
             self.subst = saved_subst;
             self.cur_cargs = saved_cargs;
@@ -225,15 +281,49 @@ impl<'p, 'a> Gen<'p, 'a> {
 
     /// `return` inside an inlined lambda's block: set its result, run its own defers,
     /// and jump to its end. False outside one.
-    pub(super) fn inline_return(&mut self, value: Option<&Expr>) -> bool {
+    /// A status it returns, `return #st v;` or `return ## f();`, is the status of the call
+    /// the lambda is passed to (`apply`), with an entry in the trail.
+    pub(super) fn inline_return(
+        &mut self,
+        status: Option<&ast::StatusWrite>,
+        value: Option<&Expr>,
+        span: Span,
+    ) -> bool {
         let Some((rv, label, rt)) = self.inline_ret.last().cloned() else {
             return false;
         };
+        let pass = matches!(status, Some(ast::StatusWrite::Pass));
+        let mut st = "0".to_string();
         if let Some(v) = value {
-            let c = self.expr(v, &rt);
-            self.line(&format!("{} = {};", rv, c));
+            if pass {
+                let (val, pre, one, _) = self.with_status_in(v, &rt, false);
+                self.line(&pre);
+                if rt != Ty::Void {
+                    self.line(&format!("{} = {};", rv, val));
+                }
+                st = one;
+            } else {
+                let c = self.expr(v, &rt);
+                self.line(&format!("{} = {};", rv, c));
+            }
+        }
+        if !pass {
+            st = self.status_text(status);
         }
         self.run_defers(0);
+        if st != "0" {
+            let t = self.tmp("ls");
+            self.line(&format!("uint8_t {} = {};", t, st));
+            let passes_on = self.passes_on(status);
+            let label_was = self.fn_label.clone();
+            if !label_was.is_empty() {
+                self.fn_label = "lambda".to_string();
+            }
+            self.set_at(&format!("{} != 0", t), &t, passes_on, span);
+            self.fn_label = label_was;
+            let fail = self.lambda_failed(&t);
+            self.line(&format!("{};", fail));
+        }
         self.line(&format!("goto {};", label));
         true
     }

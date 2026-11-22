@@ -48,21 +48,18 @@ public class Command {
     public Exit run() {
         u8[..>] out = [];
         u8[..>] errs = [];
-        Exit e @st = go(out, errs, 0);
-        return #st e;
+        return ## go(out, errs, 0);
     }
 
     // stdout appended to out.
     public Exit output(u8[..>]& out) {
         u8[..>] errs = [];
-        Exit e @st = go(out, errs, 1);
-        return #st e;
+        return ## go(out, errs, 1);
     }
 
     // stdout and stderr captured separately.
     public Exit outputBoth(u8[..>]& out, u8[..>]& errs) {
-        Exit e @st = go(out, errs, 3);
-        return #st e;
+        return ## go(out, errs, 3);
     }
 
     // Runs alongside this program, with its stdin, stdout and stderr; input and timeout

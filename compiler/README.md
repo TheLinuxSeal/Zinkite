@@ -48,8 +48,7 @@ Done:
   called as methods;
 - arrays: which methods and operators each slot type allows, slices and
   writable views;
-- statuses: `#` and `@`, repeat loops, and a warning when a status that can be
-  nonzero is dropped;
+- statuses: `#`, `@`, `@@` and `@@@`, and repeat loops;
 - statements: `switch` (exhaustive as an expression), `yield`, labels, `defer`,
   tuples, for-each over every kind of collection and iterator, and missing
   `return`s;
@@ -121,8 +120,11 @@ maps, sets and pools, calling C, and for-each over arrays, maps, sets, pools and
 iterators. Every failure is a status (DESIGN §7.6): `@` reads any in its expression,
 calls, indexes, arithmetic and casts alike, by jumping to a local label where the
 status is read; one that nothing reads stops the program at its line, naming what
-failed, and for the program's own functions where the status was returned, with exit
-status 1. That check is one predictable branch after a call that can fail. All eight
+failed and its trail through the program's own functions, with exit status 1. That
+check is one predictable branch after a call that can fail. `@@` and `@@@` catch such a
+failure deep inside too: a `setjmp` at the `@@`, which the stop jumps back to instead,
+through a catch record for each `defer` on the way; the trail is a fixed buffer of 32
+entries that each failing `return` writes to. All eight
 examples run: `cachesim`, `csvsort`, `dirwalk`, `jsonfmt`, `linebuf`, `sortlines`,
 `stats` and `wordfreq`.
 

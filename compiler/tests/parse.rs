@@ -476,6 +476,38 @@ fn rule7_status_destinations() {
     assert_eq!(stmt("u8 err = @f();"), "(local u8 err = (@ (call f)))");
 }
 
+/// `@a`, `@@b` and `@@@t` side by side, in declarations, assignments, status-only
+/// destinations, destructuring and repeat loops, and `@@` in an expression (DESIGN §7.3).
+#[test]
+fn deep_status_destinations() {
+    assert_eq!(
+        stmt("i64 p @a @@b @@@t = portOf(x);"),
+        "(local i64 p @a @@b @@@t = (call portOf x))"
+    );
+    assert_eq!(stmt("i64 p @@@t = f();"), "(local i64 p @@@t = (call f))");
+    assert_eq!(stmt("p @@b = f();"), "(= @@b p (call f))");
+    assert_eq!(stmt("@a @@_ = f();"), "(@= @a @@_ (call f))");
+    assert_eq!(stmt("@@b = f();"), "(@= @@b (call f))");
+    assert_eq!(
+        stmt("(i64 a, i64 b) @@why @@@t = pair();"),
+        "(destructure (i64 a, i64 b) @@why @@@t (call pair))"
+    );
+    assert_eq!(
+        stmt("while (Request q : server.next()) @@why { }"),
+        "(repeat Request q : (call server.next) @@why)"
+    );
+    assert_eq!(stmt("u8 s = @@f();"), "(local u8 s = (@@ (call f)))");
+}
+
+/// `return ## f();` passes on a call's value and status (DESIGN §7.2); `return #1 x;` is
+/// unchanged, and `##` needs a value after it.
+#[test]
+fn return_pass_on() {
+    assert_eq!(stmt("return ## f(x);"), "(return ## (call f x))");
+    assert_eq!(stmt("return ## a[i];"), "(return ## (index a i))");
+    assert_eq!(stmt("return #1 x;"), "(return #1 x)");
+}
+
 #[test]
 fn rule12_while_headers() {
     assert_eq!(stmt("while (a ? b : c) { }"), "(while (? a b c))");

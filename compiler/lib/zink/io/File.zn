@@ -40,32 +40,27 @@ public class File {
 
     // For reading.
     public static File open(string path) {
-        File f @err = opened(path, 0);
-        return #err f;
+        return ## opened(path, 0);
     }
 
     // For writing, created or truncated.
     public static File create(string path) {
-        File f @err = opened(path, 1);
-        return #err f;
+        return ## opened(path, 1);
     }
 
     // For writing at the end, created if missing.
     public static File append(string path) {
-        File f @err = opened(path, 2);
-        return #err f;
+        return ## opened(path, 2);
     }
 
     // For writing; it must not exist yet, so it works as a lock file.
     public static File createNew(string path) {
-        File f @err = opened(path, 3);
-        return #err f;
+        return ## opened(path, 3);
     }
 
     // For reading and writing, without truncating.
     public static File update(string path) {
-        File f @err = opened(path, 4);
-        return #err f;
+        return ## opened(path, 4);
     }
 
     // Appends up to max bytes to buf, and returns how many: END at the end of the file.

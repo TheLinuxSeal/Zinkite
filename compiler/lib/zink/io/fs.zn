@@ -16,14 +16,12 @@ public class fs {
 
     // Follows symbolic links. NOT_FOUND, PERMISSION.
     public static Stat stat(string path) {
-        Stat s @err = statOf(path, 1);
-        return #err s;
+        return ## statOf(path, 1);
     }
 
     // Doesn't follow them.
     public static Stat lstat(string path) {
-        Stat s @err = statOf(path, 0);
-        return #err s;
+        return ## statOf(path, 0);
     }
 
     private static Stat statOf(string path, i32 follow) {

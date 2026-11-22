@@ -284,6 +284,7 @@ statement     = block
               | "break" [ IDENT ] ";"
               | "continue" [ IDENT ] ";"
               | "return" [ status_write ] [ expression | tuple_expr ] ";"
+              | "return" "##" expression ";"                        (* the value and its status *)
               | destructure ";"
               | "defer" ( block | expression ";" )
               | "yield" expression ";"
@@ -295,7 +296,8 @@ statement     = block
 local_decl    = local_type local_declarator { "," local_declarator } ;
 local_type    = type | "var" [ "&" ] ;
 local_declarator = IDENT [ status_capture ] [ "=" expression ] ;
-status_capture   = "@" name ;
+status_capture   = status_dest { status_dest } ;          (* @err @@all @@@trail *)
+status_dest      = ( "@" | "@@" | "@@@" ) name ;
 status_write  = "#" ( INT | qualified_name | "(" expression ")" ) ;
 
 destructure   = "(" target "," target { "," target } ")" [ status_capture ] "=" ( expression | tuple_expr ) ;
@@ -322,18 +324,20 @@ Checked after parsing:
   - an `INT` must be from 0 to 255, and a `qualified_name` must name a `u8` constant, such as `status.FULL`, or a `u8` or `bool` variable, such as `why`;
   - the expression in `#( ... )` must have type `u8` or `bool` (a `bool` counts as 0 or 1), so `#(count)` with an `i64` `count` is an error;
   - `return #1;` without a value is allowed only in a `void` method or a constructor;
-  - `return @(g());` is an error that suggests `return #(@(g()));`.
+  - `return @(g());` is an error that suggests `return #(@(g()));`, or `return ## g();`.
+  - `return ## e;` (`#`s side by side) passes on `e`'s value and the status `@` would read from it. `e` must be able to fail, and have the function's result type, or be a call that returns nothing in a function or constructor that returns nothing. It works in a lambda too, which can fail as any function can (DESIGN §9.3).
 - **Multiple results** (DESIGN §9.5):
   - a tuple type appears only as a return type or a function type's result;
   - a destructuring either declares every target or assigns to existing ones; `_` works in both, and `(string a, b) = f();` is an error;
   - a `tuple_expr` appears only after `return`, on the right of a destructuring, and as a lambda's expression body;
   - a call returning a tuple can't be used inside a larger expression.
-- **Status captures in declarations**: a `local_declarator` with `@name` needs an initializer, and the declaration must have exactly one declarator. It declares `name` as a new `u8` along with the variable: `Item x @err = a.pop();`. Assignments that capture statuses are in §6.
+- **Status captures in declarations**: a `local_declarator` with a status capture needs an initializer, and the declaration must have exactly one declarator. It declares each name along with the variable: a `u8` for `@err` and `@@err`, and a `Failure[..~32]` for `@@@trail` (DESIGN §7.3): `Item x @err = a.pop();`. Assignments that capture statuses are in §6.
+- **Status destinations** (DESIGN §7.3): `@@` and `@@@` are `@`s written side by side. A capture has at most one of each of `@`, `@@` and `@@@`, in any order; `@@@@` is an error.
 - **Conditions** (in `if`, `while`, `do`, `for`, `?:`, and the operands of `!`, `&&` and `||`) take a `bool` or an unsigned integer, which counts as false when 0 (DESIGN §9.4). An assignment can't be a condition by itself: `if (x = 0)` is an error.
 - **Repeat loops** (DESIGN §9.4): `while (T x : call)` makes the call before every pass and ends when its status is nonzero.
   - The expression after `:` must be one `@` accepts: a call, an array operator, or a parenthesized one (§6). It must be able to fail, and a call to a method that never sets a status is an error that suggests `while (true)`. A `void` call can't be the source: write `while (!@f())`.
   - The header only declares; it can't assign existing variables.
-  - A status capture after the header declares a `u8` in the enclosing block and needs a block body, so in `while (T x : f()) @err = g();` the `@err = g();` is the body.
+  - A status capture after the header declares its names in the enclosing block, as a declaration's does, and needs a block body, so in `while (T x : f()) @err = g();` the `@err = g();` is the body.
 - **For-each over an iterator variable** is an error that suggests the repeat loop (DESIGN §9.4). An iterator expression, such as `text.lines()`, is fine.
 - **`defer`** runs its statement when the enclosing block ends, in reverse order of the `defer`s (DESIGN §6.4). The deferred expression must be one that could be an expression statement, and the deferred code can't contain a `return`, a `break` or `continue` that leaves it, a status write, or another `defer`.
 - **`yield`** gives the value of a `switch` expression from a block arm.
@@ -391,7 +395,7 @@ additive       = multiplicative { ( "+" | "-" | "+%" | "-%" | "+|" | "-|" ) mult
 multiplicative = unary { ( "*" | "/" | "%" | "*%" | "*|" ) unary } ;
 
 unary          = ( "+" | "-" | "!" | "~" | "++" | "--" ) unary
-               | "@" postfix                                    (* the call's status *)
+               | ( "@" | "@@" ) postfix                         (* the call's status *)
                | "(" cast_type [ "%" | "|" ] ")" unary         (* checked, wrapping, saturating *)
                | postfix ;
 cast_type      = primitive_type | IDENT ;                       (* IDENT: a type parameter in scope *)
@@ -431,9 +435,9 @@ Checked after parsing:
   Reading `_` anywhere, or using it with a compound assignment or `.=`, is an error.
 - **Status captures in assignments** (DESIGN §7.3):
   - they take only `=`, not compound operators;
-  - in `x @err = f();` and `@err = f();`, `err` must already be a `u8` variable;
+  - in `x @err = f();` and `@err = f();`, `err` must already be a `u8` variable, and in `x @@@t = f();`, `t` a `Failure[..~32]`;
   - to declare one, use a declaration (`Item x @err = f();`, §5) or `u8 err = @f();`.
-- **The operand of `@`** must be a call, an array operator, or a parenthesized one: `@a.pop()`, `@(a +> x)`. `@a + b` parses as `(@a) + b` and is an error that asks for parentheses.
+- **The operand of `@`** must be a call, an array operator, or a parenthesized one: `@a.pop()`, `@(a +> x)`. `@a + b` parses as `(@a) + b` and is an error that asks for parentheses. The same holds for `@@`. `@@@` gives a trail, so it appears only as a destination: `u8 s = @@@f();` is an error.
 - **Array operators**:
   - inserts take an array on the left and return it, so they chain: `a +> 1 +> 2`;
   - removes are postfix and return the removed value;
@@ -465,7 +469,7 @@ Checked after parsing:
    - `x @failed = f();`: `@` follows, not an `IDENT`;
 5. **Slot brackets or index brackets**: after a type, `[` starts slots or `[:]`; after an expression, `[` starts an index or a slice; at the start of an operand, `[` starts an array literal.
 6. **Index modes**: `%`, `|` or `^` directly after `[`, and `^` directly after a slice's `:`, is a mode marker, not an operator. None of them can start an expression, so this never conflicts.
-7. **`@`**: `@ IDENT =` or `@ _ =` (with `=`, not `==`) names a status destination directly after an assignment target, and at the start of any expression statement: one standing alone, after `defer`, in a `switch` arm, or in a `for` update. Directly after a repeat loop's header, `@ IDENT` followed by `{` is the loop's status capture (§5). Anywhere else, `@` reads a status.
+7. **`@`**: one or more status destinations followed by `=` (not `==`), each `@`, `@@` or `@@@` then an `IDENT` or `_`, name where statuses go, directly after an assignment target, and at the start of any expression statement: one standing alone, after `defer`, in a `switch` arm, or in a `for` update. Directly after a repeat loop's header, destinations followed by `{` are the loop's status capture (§5). Anywhere else, `@` and `@@` read a status.
 8. **`#`**: see §1.6. A `#` that isn't a directive may appear only right after `return`.
 9. **Members**: after modifiers, `new (` starts a constructor. Otherwise the parser reads optional type parameters (`<T implements ordered>`), a return type (`void`, a type, or a tuple type in parentheses) and a name; `(` next means a method, anything else a field.
 10. **`switch`**: at the start of a statement it is a statement; anywhere else it is an expression.
