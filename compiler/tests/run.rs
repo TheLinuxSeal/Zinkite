@@ -4461,6 +4461,54 @@ void main(string[.] args) {
     assert_eq!(lines.len(), 33);
 }
 
+/// A variable-size record built in place keeps the status of what built it: a call's,
+/// with its value, and a constructor's. Reading it claims the trail, so a failure passed
+/// on says so (DESIGN §3.3, §7.6).
+#[test]
+fn records_built_in_place_keep_their_status() {
+    let exe = build(
+        r##"class Item {
+    u8[.*] sku;
+    i32 qty;
+
+    new(string sku, i32 qty) {
+        this.sku = sku;
+        this.qty = qty;
+        if (qty < 0) { return #status.INVALID; }
+    }
+}
+
+Item parse(string line) {
+    (string code, string rest) = line.splitFirst(":");
+    i32 n @err = i32.parse(rest.trim());
+    if (err) { return #err new Item(code, 0); }
+    return new Item(code, n);
+}
+
+Item fromCtor() {
+    Item it @e = new Item("z", -1);
+    if (e) { return #e it; }
+    return it;
+}
+
+void main(string[.] args) {
+    Item a @e1 = parse("SKU-9:lots");
+    Item b @e2 = parse("SKU-7:3");
+    Item c @e3 = fromCtor();
+    println("${e1} ${a.sku} ${e2} ${b.sku} ${b.qty} ${e3}");
+    if (args[0] == "stop") { Item d = fromCtor(); }
+}
+"##,
+    );
+    let r = exec(&exe, &["go"]);
+    assert_eq!(r.stdout, "22 SKU-9 0 SKU-7 3 22\n", "stderr: {}", r.stderr);
+    let r = exec(&exe, &["stop"]);
+    assert_eq!(
+        r.stderr,
+        "prog.zn:30: `fromCtor` failed with INVALID, and nothing read its status\n    `Item.new` returned it at prog.zn:8\n    `fromCtor` passed it on at prog.zn:21\n"
+    );
+}
+
 /// `status.name` (STDLIB §1.4): the names of DESIGN §7.7, the C name of an operating-system
 /// code without one, and "" for a program's own codes.
 #[test]

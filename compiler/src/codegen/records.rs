@@ -148,16 +148,26 @@ impl<'p, 'a> Gen<'p, 'a> {
                 }
                 // A call builds its record at `cur` (DESIGN §3.3); any other record is
                 // copied there.
+                let status = self.build_status.take();
                 if matches!(e.kind, E::Call { .. }) {
                     self.direct_result = Some(cur.to_string());
                 }
-                let v = self.expr(e, t);
+                // `Item it @err = parse(line);`: the call's status goes to `err`.
+                let (v, pre, set) = match status {
+                    Some(sv) => {
+                        let (val, pre, one, _) = self.with_status_in(e, t, false);
+                        (val, pre, format!("{} = {}; ", sv, one))
+                    }
+                    None => (self.expr(e, t), String::new(), String::new()),
+                };
                 self.direct_result = None;
                 let f = self.size_fn(t, e.span);
                 format!(
-                    "{{ const uint8_t *_rs = (const uint8_t *)&({}); int64_t _rz = {}(_rs); if (_rs != {c}) memmove({c}, _rs, (size_t)_rz); {c} += _rz; }} ",
+                    "{{ {}const uint8_t *_rs = (const uint8_t *)&({}); int64_t _rz = {}(_rs); if (_rs != {c}) memmove({c}, _rs, (size_t)_rz); {c} += _rz; {}}} ",
+                    pre,
                     v,
                     f,
+                    set,
                     c = cur
                 )
             }
@@ -234,8 +244,12 @@ impl<'p, 'a> Gen<'p, 'a> {
             for (a, p) in args.iter().zip(&params) {
                 cs.push(self.arg_code(&a.expr, p));
             }
+            // The reader claims the failure's trail, to pass it on (DESIGN §7.6).
             let sink = match status {
-                Some(v) => format!("{} = _ks; ", v),
+                Some(v) => {
+                    self.uses_zg = true;
+                    format!("{} = _ks; if (_ks) _zg = zr_trail_claim(); ", v)
+                }
                 None => "(void)_ks; ".into(),
             };
             return format!(
