@@ -3583,9 +3583,9 @@ impl<'p, 'a> Checker<'p, 'a> {
                 let int_only = matches!(
                     op,
                     AssignOp::Rem
-                        | AssignOp::WrapAdd
-                        | AssignOp::WrapSub
-                        | AssignOp::WrapMul
+                        | AssignOp::CheckAdd
+                        | AssignOp::CheckSub
+                        | AssignOp::CheckMul
                         | AssignOp::SatAdd
                         | AssignOp::SatSub
                         | AssignOp::SatMul
@@ -4039,9 +4039,9 @@ impl<'p, 'a> Checker<'p, 'a> {
         let int_only = matches!(
             op,
             BinOp::Rem
-                | BinOp::WrapAdd
-                | BinOp::WrapSub
-                | BinOp::WrapMul
+                | BinOp::CheckAdd
+                | BinOp::CheckSub
+                | BinOp::CheckMul
                 | BinOp::SatAdd
                 | BinOp::SatSub
                 | BinOp::SatMul
@@ -6358,9 +6358,9 @@ fn is_status_source(e: &Expr) -> bool {
 fn fold(op: BinOp, a: i128, b: i128) -> Option<i128> {
     use BinOp::*;
     match op {
-        Add | WrapAdd | SatAdd => a.checked_add(b),
-        Sub | WrapSub | SatSub => a.checked_sub(b),
-        Mul | WrapMul | SatMul => a.checked_mul(b),
+        Add | CheckAdd | SatAdd => a.checked_add(b),
+        Sub | CheckSub | SatSub => a.checked_sub(b),
+        Mul | CheckMul | SatMul => a.checked_mul(b),
         Div => a.checked_div(b),
         Rem => a.checked_rem(b),
         BitAnd => Some(a & b),
@@ -6396,14 +6396,14 @@ fn op_text(op: BinOp) -> &'static str {
         Shr => ">>",
         Add => "+",
         Sub => "-",
-        WrapAdd => "+%",
-        WrapSub => "-%",
+        CheckAdd => "+#",
+        CheckSub => "-#",
         SatAdd => "+|",
         SatSub => "-|",
         Mul => "*",
         Div => "/",
         Rem => "%",
-        WrapMul => "*%",
+        CheckMul => "*#",
         SatMul => "*|",
     }
 }
@@ -6421,9 +6421,9 @@ fn compound_op(op: AssignOp) -> &'static str {
         Xor => "^",
         Shl => "<<",
         Shr => ">>",
-        WrapAdd => "+%",
-        WrapSub => "-%",
-        WrapMul => "*%",
+        CheckAdd => "+#",
+        CheckSub => "-#",
+        CheckMul => "*#",
         SatAdd => "+|",
         SatSub => "-|",
         SatMul => "*|",

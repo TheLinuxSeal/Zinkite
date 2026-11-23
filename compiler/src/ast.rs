@@ -141,6 +141,9 @@ pub enum Modifier {
     Mut,
     /// A C function, with its C name when that differs: `extern("glClearColor")`.
     Extern(Option<String>),
+    /// Compiled once more for each wider vector unit, the widest the CPU has chosen when
+    /// it runs (DESIGN §12.8). A keyword only here, so `simd` is still a name elsewhere.
+    Simd,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -653,9 +656,9 @@ pub enum AssignOp {
     Xor,
     Shl,
     Shr,
-    WrapAdd,
-    WrapSub,
-    WrapMul,
+    CheckAdd,
+    CheckSub,
+    CheckMul,
     SatAdd,
     SatSub,
     SatMul,
@@ -681,14 +684,14 @@ pub enum BinOp {
     Shr,
     Add,
     Sub,
-    WrapAdd,
-    WrapSub,
+    CheckAdd,
+    CheckSub,
     SatAdd,
     SatSub,
     Mul,
     Div,
     Rem,
-    WrapMul,
+    CheckMul,
     SatMul,
 }
 

@@ -11,7 +11,7 @@ class Slot { string key; i32 count; }
 // FNV-1a, as the C++ and Rust open-addressed rows hash.
 u64 fnv(string s) {
     u64 h = 14695981039346656037;
-    for (u8 b : s) { h = (h ^ b) *% 1099511628211; }
+    for (u8 b : s) { h = (h ^ b) * 1099511628211; }
     return h;
 }
 

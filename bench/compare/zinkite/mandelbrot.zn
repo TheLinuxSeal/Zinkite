@@ -44,7 +44,7 @@ void main() {
     }
     // FNV-1a over the bitmap.
     u64 h = 14695981039346656037;
-    for (u8 b : image) { h = (h ^ b) *% 1099511628211; }
+    for (u8 b : image) { h = (h ^ b) * 1099511628211; }
     println("${image.len}");
     println("${inside}");
     println("${h}");

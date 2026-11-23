@@ -48,7 +48,7 @@ void emitSku(u8[..>]& out, u64 seed) {
 // FNV-1a, the checksum the other rows compute.
 u64 fnv(string s) {
     u64 h = 14695981039346656037;
-    for (u8 b : s) { h = (h ^ b) *% 1099511628211; }
+    for (u8 b : s) { h = (h ^ b) * 1099511628211; }
     return h;
 }
 
@@ -82,7 +82,7 @@ void main() {
     for (i64 i = 0; i < N; i++) {
         seed = xsNext(seed);
         (u64 hh, i64 l) = handle(seed);
-        h = h ^ (hh *% 31 +% (u64) i);
+        h = h ^ (hh * 31 + (u64) i);
         bytes += l;
     }
     println("${N}");

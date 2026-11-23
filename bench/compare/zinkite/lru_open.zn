@@ -42,7 +42,7 @@ i32[..~] free = [];
 Slot[..>] slots = [];
 u64 mask = 0;
 
-i64 home(i32 key) { return (i64) ((((u64) key *% 0x9E3779B97F4A7C15) >> 24) & mask); }
+i64 home(i32 key) { return (i64) ((((u64) key * 0x9E3779B97F4A7C15) >> 24) & mask); }
 
 // The slot holding `key`, or the empty slot where it would go.
 i64 find(i32 key) {
@@ -155,7 +155,7 @@ void main() {
     i64 vals = 0;
     i32 cur = pool[HEAD].next;
     while (cur != TAIL) {
-        walk = walk *% 31 +% (u64) pool[cur].key;
+        walk = walk * 31 + (u64) pool[cur].key;
         vals += pool[cur].val;
         cur = pool[cur].next;
     }

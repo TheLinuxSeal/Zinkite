@@ -114,7 +114,7 @@ void main() {
     i64 vals = 0;
     Node&? cur = head.next;
     while (cur != null && cur.key >= 0) {
-        walk = walk *% 31 +% (u64) cur.key;
+        walk = walk * 31 + (u64) cur.key;
         vals += cur.val;
         cur .= cur.next;
     }

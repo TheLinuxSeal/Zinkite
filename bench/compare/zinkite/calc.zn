@@ -158,13 +158,13 @@ i32 parseFactor(Expr[..>]& pool) {
 u64 eval(Expr[:] pool, i32 i) {
     Expr& e = pool[i];
     if (e.kind == Kind.NUM) { return (u64) e.a; }
-    if (e.kind == Kind.NEG) { return 0 -% eval(pool, e.a); }
+    if (e.kind == Kind.NEG) { return 0 - eval(pool, e.a); }
     if (e.kind == Kind.PAREN) { return eval(pool, e.a); }
     u64 a = eval(pool, e.a);
     u64 b = eval(pool, e.b);
-    if (e.op == '+') { return a +% b; }
-    if (e.op == '-') { return a -% b; }
-    if (e.op == '*') { return a *% b; }
+    if (e.op == '+') { return a + b; }
+    if (e.op == '-') { return a - b; }
+    if (e.op == '*') { return a * b; }
     return a / b;                        // fails with DOMAIN when b is 0
 }
 
@@ -195,7 +195,7 @@ void main() {
         corrupt(s);
         chars += text.len;
         u64 v @@err = runOne();
-        if (err == 0) { ok++; sum = sum *% 31 +% v; }
+        if (err == 0) { ok++; sum = sum * 31 + v; }
         else if (err == E_EOF) { eofs++; }
         else if (err == E_PAREN) { parens++; }
         else if (err == E_TOKEN) { tokens++; }

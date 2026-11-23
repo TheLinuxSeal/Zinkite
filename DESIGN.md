@@ -51,11 +51,13 @@ Left out to stay light: inheritance, exceptions, destructors, reflection, dynami
 | Status codes | Follow Linux's `errno` numbers (`NOT_FOUND` is `ENOENT`, 2); 1 means failed; Zinkite's own codes from 192 to 223; a program's own from 224 to 255 | Decided | 7.7 |
 | Value on failure | Always defined: every return supplies a value, and the standard library returns the zero value on failure | Decided | 7.5 |
 | Discarding | `_` takes any value or status and can never be read | Decided | 7.3 |
-| Failures nothing reads | A failed call, overflow, an index out of range, division by zero and similar stop the program with a message and the failure's trail, unless `@` reads them; `@@` and `@@@` also catch those nothing read inside a call, abandoning it | Decided | 7.6 |
+| Failures nothing reads | A failed call, an overflow in `+#`, an index out of range, division by zero and similar stop the program with a message and the failure's trail, unless `@` reads them; `@@` and `@@@` also catch those nothing read inside a call, abandoning it | Decided | 7.6 |
 | Cleanup | No destructors, as in Goose; `defer` runs a statement when its block ends; the runtime flushes and closes files still open at exit | Decided | 6.4 |
 | Number types | `i8`–`i128`, `u8`–`u128`, `f32`, `f64`, plus `bool`; no aliases; lengths and indexes are `i64` | Decided | 9.1 |
 | Literals | An integer literal is an `i64` and a float literal an `f64` unless where it is used says otherwise; Rust-style suffixes (`255u8`, `1.5f32`) | Decided | 9.1 |
 | Casts | `(u8) n` stops when the value doesn't fit; `(u8%) n` wraps and `(u8\|) n` saturates; `u8.from(n)` fails with `RANGE` instead | Decided | 9.1 |
+| `simd` functions | Compiled also for AVX2 and AVX-512, with the widest the CPU has chosen at run time; same results, since floats aren't contracted | Decided (2026-11-23) | 12.8 |
+| Integer overflow | `+`, `-` and `*` wrap, in every build; `+#`, `-#` and `*#` fail with `RANGE`; division by zero fails with `DOMAIN` | Decided (2026-11-22) | 9.2 |
 | Mixed integer types | Allowed when one type holds every value of the other, and the result has that type; otherwise a cast; comparisons between any two integer types are exact | Decided | 9.2 |
 | Generic bounds | Built in: `sint`, `uint`, `int`, `float`, `number`, `ordered`, `hashable`, combined with `&`; a class is `ordered` by declaring `compareTo` | Decided | 10.1 |
 | Characters | No `char` type: a code point is a `u32`, and `'a'` is an integer literal (ASCII-only when used as a `u8`) | Decided | 9.1 |
@@ -310,7 +312,7 @@ The sign says insert (`+`) or remove (`-`); the symbol says where: `<` start, `^
 - The cursor methods require a cursor slot other than `.`.
 
 ### 4.10 Indexing (Decided)
-- **`a[i]`** is checked. Out of range fails with `RANGE`, which stops the program unless `@` reads it (§7.6).
+- **`a[i]`** is checked. Out of range fails with `RANGE`, which stops the program unless `@` reads it (§7.6). In a counted loop, one test before the loop often stands for every check inside it (§14.2).
 - **`a[^k]`** is element `len - k`, so `a[^1]` is the last element. `a[^0]`, or `k > len`, is out of range.
   - `^k` is bracket syntax only: not a value, can't be stored or passed.
   - Slices can use it: `a[2:^1]`.
@@ -824,7 +826,7 @@ if (err == status.EMPTY) { ... }
 - **Unsigned integers work as conditions** (§9.4), so `if (err)` tests whether the call failed.
 - **`while (T x : call)` repeats a call until its status is nonzero** (§9.4).
 - **A bare call in a condition tests its value**; `@` in front tests its status.
-- **`@` reads every failure in its expression**, not only a call's (§7.6): `i64 v @err = a[i] * w[j];` catches an index out of range or an overflow, and `@(n / d)` a division by zero.
+- **`@` reads every failure in its expression**, not only a call's (§7.6): `i64 v @err = a[i] *# w[j];` catches an index out of range or an overflow, and `@(n / d)` a division by zero.
 - **A status nothing reads stops the program when it's nonzero** (§7.6), so there's no warning for leaving one unread: `x = a.pop();` is a claim that it won't fail.
 - **`@@` and `@@@` also catch a failure nothing read inside the call** (Decided 2026-11-22), which abandons the call (§7.6), and `@@@` gives the failure's trail:
 
@@ -871,7 +873,7 @@ Every failure is a status, and the caller decides what to do with it. A call tha
 | Failure | Status |
 |---|---|
 | a call that fails | its own |
-| integer overflow, including `MIN / -1` and unary `-` | `RANGE` |
+| an overflow in `+#`, `-#` or `*#` (§9.2) | `RANGE` |
 | an index or a slice out of range | `RANGE` |
 | a cast that doesn't fit, such as `(u8) n` when `n` is 300 (§9.1) | `RANGE` |
 | `x / 0` and `x % 0` | `DOMAIN` |
@@ -918,7 +920,7 @@ Every failure is a status, and the caller decides what to do with it. A call tha
   - a C function called through `extern` that crashes or exits.
 
 The explicit forms that don't fail remain for code that wants another outcome:
-- `+%` and the other wrapping operators (§9.2);
+- `+`, `-` and `*`, which wrap, and `+|`, `-|` and `*|`, which saturate (§9.2);
 - the wrapping and saturating casts `(u8%) n` and `(u8|) n`, and `u8.from(n)`, which fails with `status.RANGE` (§9.1);
 - `a[%i]`, `a[|i]` and `getOr` (§4.10);
 - `divOr`.
@@ -1188,11 +1190,14 @@ void main(string[.] args) {
 - **No integers narrower than a byte** (`i4`, `u4`) for now. A value can't be addressed below a byte, so they would only save space when packed into classes and arrays, and those can't hand out references (Open, §17).
 
 ### 9.2 Integer arithmetic
-- **Integer overflow stops the program** (§7.6), for signed and unsigned types alike. That covers `+`, `-`, `*`, unary `-`, `++` and `--` when the result doesn't fit the type (so `0u32 - 1` stops), and also `x / 0`, `x % 0` and `MIN / -1`. `MIN % -1` is 0, its mathematical value. The check is one branch on the CPU's overflow flag, as in Swift.
+- **`+`, `-`, `*`, unary `-`, `++` and `--` wrap** (Decided 2026-11-22), modulo 2^width, for signed and unsigned types alike and in every build: `i64.MAX + 1` is `i64.MIN`, `0u32 - 1` is `u32.MAX`, and `-i64.MIN` is `i64.MIN`. Compound forms such as `+=` do the same.
+- **`+#`, `-#` and `*#` check**, with compound forms such as `+#=`: an overflow fails with `RANGE`, which `@` reads or which stops the program (§7.6). `#` is the status symbol (§7.2), so `a +# b` reads as an add that can give a status. They take integers only.
+- **Division checks its divisor**: `x / 0` and `x % 0` fail with `DOMAIN`. `MIN / -1` wraps to `MIN`, as `-MIN` does, and `MIN % -1` is 0, its mathematical value.
+- **Why wrapping is the default.** A check on every operation cost Zinkite more than anything else measured against Goose, C++ and Rust (`bench/compare`): `levenshtein`'s three checked additions per cell, `spectralnorm`'s index formula and `fib`'s recursion ran 1.5 to 2.5 times as long as the unchecked code, and no compiler can prove such checks away, since whether data overflows depends on the data. Java, Go and C# wrap the same way, and Goose and Rust do in their release builds. Zinkite wraps in every build, so a program means one thing however it is built. Wrapping can't break memory safety, since indexes are still checked, and a cast that doesn't fit still fails (§9.1), as values crossing types is where silent truncation does the most harm. Code that wants a wrong-sized value caught writes `+#`; the library does where it promises a failure, as in `sum()`, `abs`, `Duration` and `Timestamp`.
 - **Bitwise operators and shifts never fail.** `>>` is an arithmetic shift on signed types and a logical shift on unsigned ones, so Java's `>>>` isn't needed and is gone.
-- **Wrapping is written explicitly**: `+%`, `-%`, `*%`, and compound forms such as `+%=`.
+- **`+%`, `-%` and `*%` are gone**: they were the wrapping operators while `+` checked, and now `+` wraps. Each is a compile error that names its replacement.
 - **`a.divOr(b, 0)`** gives 0 instead of dividing by zero.
-- **Saturating is written explicitly too**: `+|`, `-|`, `*|`, and compound forms such as `+|=`. The cursor operators use `^` (§4.8), so the two don't clash.
+- **Saturating is written explicitly**: `+|`, `-|`, `*|`, and compound forms such as `+|=`. The cursor operators use `^` (§4.8), so the two don't clash.
 - **Mixing integer types** (Decided). An arithmetic or bitwise operator on two different integer types works when one type holds every value of the other (§9.1), and the result has that type. Otherwise it's a compile error that suggests a cast. A third, wider type is never chosen.
   ```
   // b: u8, n: i32, c: u32, d: i32, h: u64, len: i64
@@ -1507,6 +1512,27 @@ writeBytes(1, msg, (u64) msg.len);
 - **Only files in `zink.*` packages may declare them**, and only the library's own files may declare a `zink.*` package (§8.4). A program that wants a C function declares it under the C function's own name.
 - **Handles stay handles.** A `File` or `Dir` holds a private 64-bit handle: the descriptor, and a generation that closing bumps. A copy of a closed `File` fails with `BAD_HANDLE` even after the descriptor is reused (§6.4), and since the handle is private, a program can't make one from a number.
 
+### 12.8 `simd` functions (Decided 2026-11-23)
+- **`simd` before a function or method** compiles it three times: for baseline x86-64 under its own name, and for AVX2 and for AVX-512, chosen once, at the first call, by what the CPU and its operating system support. It is for the function holding a hot loop, so the C compiler can vectorize it with the widest vectors the machine has, where the rest of the program is built for every x86-64:
+  ```
+  simd void matMul(i64 n, f64[:] a, f64[:] b, f64[:]& c) {
+      for (i64 i = 0; i < n; i++) {
+          f64[:]& ci = c[i * n:i * n + n];
+          for (i64 k = 0; k < n; k++) {
+              f64 aik = a[i * n + k];
+              f64[:] bk = b[k * n:k * n + n];
+              for (i64 j = 0; j < n; j++) { ci[j] += aik * bk[j]; }
+          }
+      }
+  }
+  ```
+- **The AVX2 version** is built for AVX2 with FMA, BMI1, BMI2 and POPCNT (about x86-64-v3), **the AVX-512 one** adds AVX-512 F, BW, CD, DQ and VL (x86-64-v4). The baseline calls the widest one the CPU has, so callers see one function and nothing about the choice.
+- **Every version gives the same results.** Floats are never contracted: `a * x + y` rounds the multiply and then the add, in the versions with FMA too, so a program prints the same digits on every machine. Integer and index semantics are the language's everywhere.
+- **The functions it calls are their own**, called as usual, though the C compiler may inline small ones into each version, which then get the wider instructions too. A call to a `simd` function from another goes through the choice again, which costs a load and a branch; it is meant for the outer function, not for a small one called in the loop.
+- **Only clang on x86-64 builds the wider versions**, as Goose's `simd fn` is built. With gcc or on other CPUs the baseline is all there is.
+- **`simd` is a keyword only as a modifier**, before a method's return type or type parameters, so it can still name a variable or a class, as `root` can (GRAMMAR §1.3). It goes on functions and methods with a body: not on fields, constructors, `extern` functions, or `main`.
+- **Why**: matmul ran 1.1 times as long as Goose's, which marks its kernel `simd fn` and so runs it with AVX-512 here; with `simd`, Zinkite's does too, and is within 4% (`bench/compare`).
+
 ---
 
 ## 13. Embedding in other programs (Open)
@@ -1535,12 +1561,17 @@ Whichever is chosen, the host sets program settings through the API (precedence 
 - Shipped as C source inside `zink` and compiled with the program's C, once per C compiler and set of flags, then cached. Users never see it.
 
 ### 14.2 What emitting C requires
-- **C without undefined behaviour.** Checked arithmetic goes through `__builtin_add_overflow` and its siblings, and wrapping arithmetic (`+%`) through unsigned types. `-fwrapv` and `-fno-strict-aliasing` are safety nets, not the plan.
+- **C without undefined behaviour.** Wrapping arithmetic goes through unsigned types, checked arithmetic (`+#`) through `__builtin_add_overflow` and its siblings, and `MIN / -1` through a negation, since the C division would trap. `-fwrapv` and `-fno-strict-aliasing` are safety nets, not the plan.
 - **Names**: Zinkite identifiers are mangled into C identifiers that can't clash with C keywords, the C library or the runtime.
 - **`#line` directives**, so C compiler messages and debuggers point at `.zn` lines.
 - **The status** in a small returned struct, and large results built through a destination pointer (§12.5).
 - **Finding the system C compiler** for `zink build` and `zink run -O`: `$CC`, then `clang`, then `gcc`, and `cc` as a last resort (Decided). Clang comes first because, measured on Zinkite programs, its code was as fast as gcc's or faster (by a quarter to a third on sorting and text) and it compiled faster at `-O0`. A missing one is an error that suggests installing clang or gcc.
 - **Checking the generated C** under both clang and gcc, at `-O0` and `-O2`, since all four must give the same results (§18).
+- **Index checks out of counted loops** (Decided 2026-11-23). A `for` loop that declares an integer counter and steps it by `++`, `--`, `+=` or `-=`, with a condition bounding it in the direction it moves, and whose body indexes an array at the counter plus terms the loop doesn't change (`a[i + 1]`, `src[y * W + x - 1]`, or through a local declared at the top of the body as such a sum), is generated twice:
+  - **A test before it**, computed in 128 bits, compares the first and the last index each access can reach with the array's length, and checks that the counter can't wrap. When it passes, a copy of the loop without those checks runs; otherwise the loop with them runs, and fails at the iteration it always did, after the same output.
+  - **What can't change**: a term is a literal, a `.len`, or a local the loop doesn't write and that no reference anywhere in the program could reach; a static only when the body calls nothing that could write it. An array's length can't change when it's fixed (`T[.k]`), when it's a view the loop doesn't rebind, or when it's a local's own array that only the loop's own code could resize, and doesn't. Anything else, and the loop is generated once, checked.
+  - **Only innermost loops**, so a body is generated at most twice; and not a loop that only copies one element to another, which without its checks the C compiler turns into a call to `memmove`, slower on the short copies such loops make.
+  - **Why**: levenshtein's inner loop indexes three views. With a check on each access it took 1.9 times as long as Goose's, which proves them away (`checkfree`); with the test before the loop, 1.1 times (`bench/compare`). The C compiler doesn't do this itself, since each check's stop belongs to its own iteration.
 
 ### 14.3 Build order (Decided)
 1. **Write the reference rules** as a specification before any compiler code. They decide what is safe, and Goose's author credits this kind of spec work for much of that language's quality. Drafted: `REFERENCES.md`.
@@ -1793,13 +1824,13 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 55. `if (err)` with a `u8` `err`, `while (n)` with a `u32` `n`, and `!err` compile; `if (n)` with an `i64` `n`, `bool b = err;` and `if (x = 0)` are compile errors.
 
 **A failure nothing reads stops the program**
-56. Overflow, `x / 0`, `MIN / -1`, an out-of-range index, a failed call whose status nothing reads, stack overflow, and exceeding `#max_memory_mb` each stop the program with a message naming the source line and exit status 1, after flushing open files; for a function of the program's own, the message also says where it returned the status.
+56. An overflow in `+#`, `x / 0`, an out-of-range index, a failed call whose status nothing reads, stack overflow, and exceeding `#max_memory_mb` each stop the program with a message naming the source line and exit status 1, after flushing open files; for a function of the program's own, the message also says where it returned the status.
 56a. `x @err = a[i] * w[j];` with `i` out of range gives `x` 0 and `err` `RANGE`; `@(n / 0)` is `DOMAIN`; in `x @err = f(g())`, a failing `g` gives its status and `f` isn't called; `T& r @err = a[9]` on a shorter array refers to a zero value of its own; `fail(...)` and `exit(...)` are compile errors.
 56b. With `f` calling `g` and not reading its failure, `x @a @@b @@@t = f();` gives `a` `ABANDONED`, `b` `g`'s status, and a trail of `g`'s return and `f`'s unread line; `x @a = f();` stops the program at `f`'s line; `x @a @@@t = f();` catches it too. An index out of range or a division by zero deep inside is caught the same way; the abandoned functions' `defer`s run, innermost first, with their variables' latest values; the innermost `@@` catches; `while (T x : f()) @@why` ends at such a failure.
 56c. A failure passed on with `return #err v;`, or replaced with `if (err) { return #224 0; }`, continues the trail of the one read; a function that reads and handles one, then returns a failure of its own, starts a new trail; a failure from `pop` starts at the line that reads it; a trail of 41 entries keeps 32, the first 24 and the last 8, and the stop message says it left 10 out. `x @a @a = f();`, `x @@@@t = f();`, `u8 s = @@@f();` and a trail into an `i64[..>]` are compile errors.
 56d. `return ## f(x);` gives `f`'s value and status to the caller, and the trail says it passed it on; `return ## a[i];` passes on `RANGE`; `return ## push(x);` in a `void` function or a constructor passes on the call's status; `return ## hash.shake_128(s, n);` builds the array where the caller says; `return ## x;`, `return ## twice(x);`, `return ##;` and `##` in `main` are compile errors.
 56e. A `func` value whose lambda returns `#status.INVALID 0` gives INVALID to `x @err = f(3);`, and stops the program at `f(3);` when nothing reads it, with the trail naming `lambda`; a function taking a `func` passes its failure on with `return ## f(x);`. A `sort` whose comparator fails gives the comparator's status and leaves the array part-sorted; `fold`, `findIndex` and `any` fail with their lambdas' statuses.
-57. At the limits of every integer type, signed and unsigned, `+` stops the program, `+%`, `-%` and `*%` wrap, and `+|`, `-|` and `*|` saturate; `MIN % -1` is 0.
+57. At the limits of every integer type, signed and unsigned, `+`, `-`, `*` and unary `-` wrap, `+#`, `-#` and `*#` stop the program, and `+|`, `-|` and `*|` saturate; `MIN / -1` is `MIN` and `MIN % -1` is 0; `+%` is a compile error that suggests `+` and `+#`.
 58. `long`, `byte` and `double` are compile errors that name the new type, and `int` and `float` used as types are errors that say they are bounds and suggest `i64` and `f64`; `u8 b = 300;` is a compile error; `var x = 5;` is an `i64`; `i64 big = 100000 * 100000;` doesn't overflow; `i64 n = someI32;` compiles without a cast, and `i32 m = someI64;` needs one.
 59. A program printing many lines, run as `zink run tool.zn | head -1`, exits quietly with no error output.
 
@@ -1903,6 +1934,10 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 134. With `string path` in scope, `path.base(x)` calls the variable's method; outside that scope it names the `path` class.
 135. `summarize(ints)` with an `i64[..>]` instantiates `T = i64`; `max(a, b)` with a `u8` and a `u32` is a compile error.
 136. Using a feature still open in §17 is a compile error that names it; calling `stableSort` or importing `zink.json` isn't.
+
+**Speed without changing results** (§12.8, §14.2)
+137. A counted loop whose indexes are in range runs without their checks, and one whose indexes go out of range stops at the same iteration, after the same output, as without the test; a loop whose bound a reference could change, or whose array a removal or a call could shrink, keeps its checks.
+138. A `simd` function gives the same results as without `simd`, `0.1 * 10.0 - 1.0` being 0 in every version; `simd` on a field, a constructor or `main` is a compile error, and `simd` still names a variable or a class.
 
 ---
 

@@ -42,7 +42,7 @@ Reserved keywords:
 
 The unused keywords are reserved so the compiler can explain why they aren't available: there is no inheritance (DESIGN §6.1), nothing is thrown (DESIGN §7), there are no destructors (`delete()` suggests `defer`, DESIGN §6.4), the number types are spelled `i32`, `u8`, `f64` and so on, and code points are `u32` (DESIGN §9.1).
 
-`root` is a keyword only at the start of a type declaration (`root Parser { ... }`, DESIGN §6.6), so variables and fields may still be named `root`.
+`root` is a keyword only at the start of a type declaration (`root Parser { ... }`, DESIGN §6.6), so variables and fields may still be named `root`. `simd` is one only as a modifier (DESIGN §12.8): where a declaration's modifiers are read, followed by a keyword, `<`, `(`, or a type that isn't directly followed by `;`, `=`, `,` or `(`. So `simd i64 f()` and `simd Vec f()` mark a function, while `simd x;` declares a field of a class named `simd`, and `simd f()` a function returning one.
 
 `hashmap`, `hashset` and `pool` are built-in generic type names (DESIGN §4.14, `STDLIB.md` §7), and `sint`, `uint`, `int`, `float`, `number`, `ordered` and `hashable` are built-in generic bounds (DESIGN §10.1). They aren't keywords, but no declaration may reuse them. `int` and `float` used as a type are errors that suggest `i64` and `f64`.
 
@@ -80,9 +80,9 @@ ESCAPE    = "\" ( "n" | "t" | "r" | "0" | "\" | "'" | '"' | "$" | "u{" HEXDIGIT 
 ### 1.5 Operators and punctuation
 ```
 (  )  {  }  [  ]  ;  ,  .  :  ?  @  #  $  =>  &
-=  .=  +=  -=  *=  /=  %=  &=  |=  ^=  <<=  >>=  +%=  -%=  *%=  +|=  -|=  *|=
+=  .=  +=  -=  *=  /=  %=  &=  |=  ^=  <<=  >>=  +#=  -#=  *#=  +|=  -|=  *|=
 ||  &&  |  ^  ==  !=  <  >  <=  >=  <<  >>
-+  -  *  /  %  +%  -%  *%  +|  -|  *|
++  -  *  /  %  +#  -#  *#  +|  -|  *|
 +>  +<  +^  ->  -<  -^  ^-
 !  ~  ++  --
 ```
@@ -94,6 +94,7 @@ ESCAPE    = "\" ( "n" | "t" | "r" | "0" | "\" | "'" | '"' | "$" | "u{" HEXDIGIT 
 - Inside type arguments, the parser splits `>>` into separate `>` tokens (§6, rule 3).
 - There is no `>>>`: `>>` is an arithmetic shift on signed types and a logical one on unsigned types (DESIGN §9.2).
 - `&` is both bitwise AND and the reference marker in types (`Item&`). `#` and `@` are covered in §1.6 and §6.
+- `+#`, `-#` and `*#` are single tokens: the arithmetic that fails with a status on overflow, where `+`, `-` and `*` wrap (DESIGN §9.2). `+%`, `-%` and `*%`, the wrapping operators before `+` wrapped, still lex, so that the parser can say what replaced them.
 
 ### 1.6 Directive lines and `#`
 A `#` that is the first non-blank character on a line **and is followed directly by a letter** starts a directive, unless the token before it is `return`. The lexer turns each directive line into one token:
@@ -218,7 +219,8 @@ Checked after parsing:
 
 ```
 modifier       = "public" | "private" | "static" | "mut"
-               | "extern" [ "(" STRING ")" ] ;    (* a C function, with its C name: extern("glClearColor") *)
+               | "extern" [ "(" STRING ")" ]      (* a C function, with its C name: extern("glClearColor") *)
+               | "simd" ;                         (* contextual: §1.3, DESIGN §12.8 *)
 
 type_decl      = { modifier } ( class_decl | root_decl | interface_decl | enum_decl ) ;
 
@@ -256,7 +258,7 @@ constructor_decl = { modifier } "new" "(" [ param { "," param } ] ")" block ;
 ```
 
 Checked after parsing:
-- **`mut`** goes only on instance methods and interface methods (DESIGN §6.1). `static` goes only on fields and methods. `public` and `private` go on declarations, not on locals.
+- **`mut`** goes only on instance methods and interface methods (DESIGN §6.1). `static` goes only on fields and methods. `public` and `private` go on declarations, not on locals. `simd` goes only on functions and methods with a body, and not on `main` (DESIGN §12.8).
 - **Constructors** are written `new(...)` and have no return type (DESIGN §6.2). Each must assign every field on every path that doesn't fail (DESIGN §6.2), which the type checker verifies. `this.new(...)` appears only in a constructor, as a statement or after `@err =`.
 - **Roots** (DESIGN §6.6): a `class` may have only one growable field, and no cursor-array field; either is an error that suggests `root`. A root can't be copied, passed as a plain parameter, returned by value, stored by value in a class, root or array, or created as an unnamed temporary.
 - **Overloads** (DESIGN §6.5): methods, static functions and constructors with the same name in one class must differ in a parameter's type, not only in `&`, `?`, array slots, the return type or the parameter names. A slice and an array differ in kind, so `f(string)` beside `f(u8[..>]&)` is allowed.
@@ -363,8 +365,8 @@ Precedence, lowest first:
 | 10 | `<` `>` `<=` `>=` `instanceof` | left |
 | 11 | array inserts `+>` `+<` `+^` | left |
 | 12 | `<<` `>>` | left |
-| 13 | `+` `-` `+%` `-%` `+\|` `-\|` | left |
-| 14 | `*` `/` `%` `*%` `*\|` | left |
+| 13 | `+` `-` `+#` `-#` `+\|` `-\|` | left |
+| 14 | `*` `/` `%` `*#` `*\|` | left |
 | 15 | prefix `+` `-` `!` `~` `++` `--`, status read `@`, numeric casts `(i32) x`, `(u8%) x`, `(u8\|) x` | right |
 | 16 | postfix `++` `--`, array removes `->` `-<` `-^` `^-`, member `.`, call `( )`, index `[ ]` | left |
 
@@ -378,7 +380,7 @@ lambda_param   = type name ;                    (* the type is always written: D
 assignment     = conditional [ [ status_capture ] assign_op expression ]
                | status_capture "=" expression ;                  (* @failed = f(); *)
 assign_op      = "=" | ".=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^="
-               | "<<=" | ">>=" | "+%=" | "-%=" | "*%=" | "+|=" | "-|=" | "*|=" ;
+               | "<<=" | ">>=" | "+#=" | "-#=" | "*#=" | "+|=" | "-|=" | "*|=" ;
 
 conditional    = or_expr [ "?" expression ":" conditional ] ;
 or_expr        = and_expr { "||" and_expr } ;
@@ -391,8 +393,8 @@ relational     = insertion { ( "<" | ">" | "<=" | ">=" ) insertion
                            | "instanceof" class_type [ IDENT ] } ;
 insertion      = shift { ( "+>" | "+<" | "+^" ) shift } ;
 shift          = additive { ( "<<" | ">>" ) additive } ;
-additive       = multiplicative { ( "+" | "-" | "+%" | "-%" | "+|" | "-|" ) multiplicative } ;
-multiplicative = unary { ( "*" | "/" | "%" | "*%" | "*|" ) unary } ;
+additive       = multiplicative { ( "+" | "-" | "+#" | "-#" | "+|" | "-|" ) multiplicative } ;
+multiplicative = unary { ( "*" | "/" | "%" | "*#" | "*|" ) unary } ;
 
 unary          = ( "+" | "-" | "!" | "~" | "++" | "--" ) unary
                | ( "@" | "@@" ) postfix                         (* the call's status *)
@@ -545,7 +547,7 @@ void main(string[.] args) {
     u32 removed @empty = text ^-;                  // removes 'h'
     println("${text.utf8()}");                     // >i
 
-    func(i32, i32 => i32) add = (i32 a, i32 b) => a +% b;
+    func(i32, i32 => i32) add = (i32 a, i32 b) => a +# b;
     string size = switch (shapes.len) {
         case 0 => "none";
         case 1, 2 => "a few";

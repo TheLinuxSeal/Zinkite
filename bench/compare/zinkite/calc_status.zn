@@ -155,16 +155,16 @@ u64 eval(Expr[:] pool, i32 i) {
     if (e.kind == Kind.NEG) {
         u64 x @err = eval(pool, e.a);
         if (err) { return #err 0; }
-        return 0 -% x;
+        return 0 - x;
     }
     if (e.kind == Kind.PAREN) { return ## eval(pool, e.a); }
     u64 a @aerr = eval(pool, e.a);
     if (aerr) { return #aerr 0; }
     u64 b @berr = eval(pool, e.b);
     if (berr) { return #berr 0; }
-    if (e.op == '+') { return a +% b; }
-    if (e.op == '-') { return a -% b; }
-    if (e.op == '*') { return a *% b; }
+    if (e.op == '+') { return a + b; }
+    if (e.op == '-') { return a - b; }
+    if (e.op == '*') { return a * b; }
     if (b == 0) { return #status.DOMAIN 0; }
     return a / b;
 }
@@ -197,7 +197,7 @@ void main() {
         corrupt(s);
         chars += text.len;
         u64 v @err = runOne();
-        if (err == 0) { ok++; sum = sum *% 31 +% v; }
+        if (err == 0) { ok++; sum = sum * 31 + v; }
         else if (err == E_EOF) { eofs++; }
         else if (err == E_PAREN) { parens++; }
         else if (err == E_TOKEN) { tokens++; }

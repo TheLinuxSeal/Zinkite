@@ -274,7 +274,7 @@ fn binary_precedence() {
     assert_eq!(expr("a & b == c"), "(& a (== b c))");
     assert_eq!(expr("a << 2 + 1"), "(<< a (+ 2 1))");
     assert_eq!(expr("a - b - c"), "(- (- a b) c)");
-    assert_eq!(expr("x +% y *| z"), "(+% x (*| y z))");
+    assert_eq!(expr("x +# y *| z"), "(+# x (*| y z))");
     assert_eq!(expr("shapes +> c.push(x)"), "(+> shapes (call c.push x))");
     assert_eq!(expr("text +^ 'h' +^ 'i'"), "(+^ (+^ text 'h') 'i')");
     assert_eq!(expr("a +> b < c"), "(< (+> a b) c)");
@@ -622,6 +622,16 @@ fn reserved_words_explain_themselves() {
     assert!(has(&errs, "`long` is reserved: the type is spelled `i64`"), "{:?}", errs);
     let errs = stmt_errors("i64 short = 3;");
     assert!(has(&errs, "`short` is reserved: the type is spelled `i16`"), "{:?}", errs);
+}
+
+/// `+%`, `-%` and `*%` were the wrapping operators while `+` checked; now `+` wraps, and
+/// each is an error that names `+` and the checking `+#` (DESIGN §9.2).
+#[test]
+fn the_old_wrapping_operators_say_what_replaced_them() {
+    let errs = stmt_errors("x = a +% b;");
+    assert!(has(&errs, "`+%` is gone: `+` wraps now"), "{:?}", errs);
+    assert!(has(&stmt_errors("x *%= 3;"), "`*%=` is gone: `*=` wraps now"));
+    assert_eq!(expr("a +# b *# c -# d"), "(-# (+# a (*# b c)) d)");
 }
 
 #[test]

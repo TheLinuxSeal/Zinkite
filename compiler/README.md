@@ -362,12 +362,12 @@ stops the program, as a cast that doesn't fit does (DESIGN §9.1).
 | `src/flow.rs` | the state definite assignment tracks: what is assigned on every path, and on some |
 | `src/lifetimes.rs` | roots and lifetimes: rules S and R, function summaries, recursion |
 | `src/codegen.rs` | the C backend |
-| `src/codegen/` | its parts for lambdas, hash maps, sorting, generics and interfaces |
+| `src/codegen/` | its parts for lambdas, hash maps, sorting, generics and interfaces, and `versions.rs`, which runs counted loops without their index checks when a test before them shows every index in range (DESIGN §14.2) |
 | `src/cheader.rs` | reading C headers with clang, and caching what it finds |
 | `src/driver.rs` | compiling the C, the cache, and running the result |
 | `src/stdlib.rs` | the standard library's files, built into `zink`, and which a program needs |
 | `lib/zink/` | the standard library, in Zinkite: `io/`, `cli/` and `lang/` so far |
-| `runtime/zink_rt.h` | the runtime: data stacks, output, failures, checked arithmetic, text |
+| `runtime/zink_rt.h` | the runtime: data stacks, output, failures, checked arithmetic, text, and the choice of a `simd` function's version (DESIGN §12.8) |
 | `src/main.rs` | the `zink` command |
 | `tests/parse.rs` | parser tests |
 | `tests/check.rs` | type checker tests |

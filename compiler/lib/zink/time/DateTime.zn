@@ -173,8 +173,8 @@ public class DateTime {
             return #status.INVALID new Timestamp(0);
         }
         i64 days = time.daysFromCivil((i64) year, (i64) month, (i64) day);
-        i64 secs = days * 86400 + (i64) hour * 3600 + (i64) minute * 60 + (i64) second - (i64) offsetMinutes * 60;
-        return new Timestamp(secs * 1000000000 + (i64) nanos);
+        i64 secs = days *# 86400 + (i64) hour * 3600 + (i64) minute * 60 + (i64) second - (i64) offsetMinutes * 60;
+        return new Timestamp(secs *# 1000000000 +# (i64) nanos);
     }
 
     // 1 = Monday … 7 = Sunday, as in ISO 8601.

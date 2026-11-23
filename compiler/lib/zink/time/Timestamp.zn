@@ -1,10 +1,11 @@
 package zink.time;
 
-// A point in wall-clock time: nanoseconds since 1970-01-01T00:00:00Z (STDLIB §5.3).
+// A point in wall-clock time: nanoseconds since 1970-01-01T00:00:00Z (STDLIB §5.3). One
+// out of the range of an i64 stops the program.
 public class Timestamp {
     public i64 nanos;
 
-    public static Timestamp fromUnix(i64 seconds) { return new Timestamp(seconds * 1000000000); }
+    public static Timestamp fromUnix(i64 seconds) { return new Timestamp(seconds *# 1000000000); }
 
     // Whole seconds, rounded down.
     public i64 unixSeconds() { return time.floorDiv(nanos, 1000000000); }

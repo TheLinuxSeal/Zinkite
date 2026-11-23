@@ -12,25 +12,25 @@ public class Rng {
     static Rng ofSeed(u64 seed) {
         u64 x = seed;
         u64 a = mix(x);
-        x = x +% 0x9E3779B97F4A7C15;
+        x = x + 0x9E3779B97F4A7C15;
         u64 b = mix(x);
-        x = x +% 0x9E3779B97F4A7C15;
+        x = x + 0x9E3779B97F4A7C15;
         u64 c = mix(x);
-        x = x +% 0x9E3779B97F4A7C15;
+        x = x + 0x9E3779B97F4A7C15;
         u64 d = mix(x);
         return new Rng(a, b, c, d);
     }
 
     // SplitMix64's output for the state after `x` was stepped.
     private static u64 mix(u64 x) {
-        u64 z = x +% 0x9E3779B97F4A7C15;
-        z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
-        z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
+        u64 z = x + 0x9E3779B97F4A7C15;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EB;
         return z ^ (z >> 31);
     }
 
     public mut u64 nextU64() {
-        u64 result = (s1 *% 5).rotateLeft(7) *% 9;
+        u64 result = (s1 * 5).rotateLeft(7) * 9;
         u64 t = s1 << 17;
         s2 = s2 ^ s0;
         s3 = s3 ^ s1;
@@ -53,7 +53,7 @@ public class Rng {
             return #status.INVALID (T) 0;
         }
         // The span and the result in wrapping u128, which is right for every integer type.
-        u128 span = (u128%) hi -% (u128%) lo;
+        u128 span = (u128%) hi - (u128%) lo;
         u128 off = 0;
         if (span <= 18446744073709551615) {
             u128 m = (u128) nextU64() * span;
@@ -75,7 +75,7 @@ public class Rng {
                 off = (((u128) nextU64() << 64) | (u128) nextU64()) & mask;
             }
         }
-        return (T%) ((u128%) lo +% off);
+        return (T%) ((u128%) lo + off);
     }
 
     public mut bool chance(f64 p) {

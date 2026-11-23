@@ -973,9 +973,10 @@ static ZR_UNUSED zr_pair zr_split_first(zr_slice s, zr_slice sep, int last) {
 #define ZR_ADD(T, a, b, fail) ({ T _r; if (__builtin_add_overflow((T)(a), (T)(b), &_r)) { fail; } _r; })
 #define ZR_SUB(T, a, b, fail) ({ T _r; if (__builtin_sub_overflow((T)(a), (T)(b), &_r)) { fail; } _r; })
 #define ZR_MUL(T, a, b, fail) ({ T _r; if (__builtin_mul_overflow((T)(a), (T)(b), &_r)) { fail; } _r; })
-#define ZR_NEG(T, a, fail) ({ T _r; if (__builtin_sub_overflow((T)0, (T)(a), &_r)) { fail; } _r; })
-#define ZR_DIV(T, a, b, zero, over) ({ T _a = (a), _b = (b), _t; if (_b == 0) { zero; } \
-    if ((T)-1 < 0 && _b == (T)-1 && __builtin_mul_overflow(_a, _b, &_t)) { over; } (T)(_a / _b); })
+/* Division wraps where it overflows: `MIN / -1` is `MIN`, as negating it is. Dividing by -1
+ * is a negation, since the C division would trap. */
+#define ZR_DIV(T, U, a, b, zero) ({ T _a = (a), _b = (b); if (_b == 0) { zero; } \
+    ((T)-1 < 0 && _b == (T)-1) ? (T)((U)0 - (U)_a) : (T)(_a / _b); })
 #define ZR_REM(T, a, b, zero) ({ T _a = (a), _b = (b); if (_b == 0) { zero; } \
     ((T)-1 < 0 && _b == (T)-1) ? (T)0 : (T)(_a % _b); })
 
@@ -1527,6 +1528,36 @@ static ZR_UNUSED void zr_digest_squeeze(zr_slice st, int64_t n, zr_vec *out) {
 }
 #undef ZR_SHA_ABSORB
 
+/* ------------------------------------------------------------ simd functions (DESIGN §12.8) */
+
+/* A `simd` function is compiled three times: for baseline x86-64 under its own name, and
+ * for AVX2 and for AVX-512 as NAME_simd1 and NAME_simd2. The baseline calls the widest the
+ * CPU has. Only clang on x86-64 builds the wider ones; elsewhere the baseline is all there
+ * is. Floats are never contracted, so a multiply and an add stay two roundings in the
+ * versions with FMA and give the baseline's results. */
+#if defined(__clang__) && defined(__x86_64__)
+#define ZR_SIMD 1
+#pragma clang fp contract(off)
+#define ZR_SIMD1 __attribute__((target("avx2,fma,bmi,bmi2,popcnt")))
+#define ZR_SIMD2 \
+    __attribute__((target("avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,fma,bmi,bmi2,popcnt")))
+/* The widest vector unit this CPU and its operating system support: 2 for AVX-512 (F, BW,
+ * CD, DQ, VL), 1 for AVX2 (with FMA, BMI1, BMI2 and POPCNT), 0 for neither; asked once. */
+static ZR_UNUSED int zr_simd_level(void) {
+    static int level = -1;
+    if (level < 0) {
+        int v3 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") &&
+                 __builtin_cpu_supports("bmi") && __builtin_cpu_supports("bmi2") &&
+                 __builtin_cpu_supports("popcnt");
+        int v4 = v3 && __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") &&
+                 __builtin_cpu_supports("avx512cd") && __builtin_cpu_supports("avx512dq") &&
+                 __builtin_cpu_supports("avx512vl");
+        level = v4 ? 2 : v3 ? 1 : 0;
+    }
+    return level;
+}
+#endif
+
 /* ------------------------------------------------------------ base64 (STDLIB §8.4) */
 
 /* RFC 4648 base64, standard (`url` 0, with padding) and URL-safe (`url` 1, without). Each
@@ -1642,17 +1673,6 @@ ZR_B64_FNS(avx512, "avx512f,avx512bw,avx512vl,avx512dq,avx512cd,avx2,bmi,bmi2")
 #undef ZR_B64_SYM_URL
 #undef ZR_B64_VAL_STD
 #undef ZR_B64_VAL_URL
-/* The widest vector unit this CPU has that the loops use: 2 for AVX-512, 1 for AVX2, 0
- * for neither, asked once. */
-static int zr_b64_level(void) {
-    static int level = -1;
-    if (level < 0) {
-        level = __builtin_cpu_supports("avx512bw") && __builtin_cpu_supports("avx512vl") ? 2
-                : __builtin_cpu_supports("avx2")                                         ? 1
-                                                                                         : 0;
-    }
-    return level;
-}
 #endif
 #undef ZR_B64_ENC_LOOP
 #undef ZR_B64_DEC_LOOP
@@ -1663,7 +1683,7 @@ static ZR_UNUSED void zr_b64_encode(zr_slice bytes, int32_t url, zr_vec *out) {
     int64_t g = bytes.n / 3, rest = bytes.n % 3;
     uint8_t *d = (uint8_t *)out->p + out->n;
 #ifdef ZR_B64_SIMD
-    int level = zr_b64_level();
+    int level = zr_simd_level();
     if (level == 2) zr_b64_enc_avx512(d, s, g, url);
     else if (level == 1) zr_b64_enc_avx2(d, s, g, url);
     else
@@ -1702,7 +1722,7 @@ static ZR_UNUSED uint8_t zr_b64_decode(zr_slice text, int32_t url, zr_vec *out) 
     uint8_t *o = (uint8_t *)out->p + out->n;
     uint8_t seen;
 #ifdef ZR_B64_SIMD
-    int level = zr_b64_level();
+    int level = zr_simd_level();
     if (level == 2) seen = zr_b64_dec_avx512(o, t, g, url);
     else if (level == 1) seen = zr_b64_dec_avx2(o, t, g, url);
     else

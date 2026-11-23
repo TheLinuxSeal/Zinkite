@@ -5,16 +5,16 @@ public class Duration {
     public i64 nanos;
 
     public static Duration ns(i64 n) { return new Duration(n); }
-    public static Duration us(i64 n) { return new Duration(n * 1000); }
-    public static Duration ms(i64 n) { return new Duration(n * 1000000); }
-    public static Duration seconds(i64 n) { return new Duration(n * 1000000000); }
-    public static Duration minutes(i64 n) { return new Duration(n * 60000000000); }
-    public static Duration hours(i64 n) { return new Duration(n * 3600000000000); }
+    public static Duration us(i64 n) { return new Duration(n *# 1000); }
+    public static Duration ms(i64 n) { return new Duration(n *# 1000000); }
+    public static Duration seconds(i64 n) { return new Duration(n *# 1000000000); }
+    public static Duration minutes(i64 n) { return new Duration(n *# 60000000000); }
+    public static Duration hours(i64 n) { return new Duration(n *# 3600000000000); }
 
     public i64 toMs() { return nanos / 1000000; }
     public f64 toSeconds() { return (f64) nanos / 1000000000.0; }
-    public Duration plus(Duration other) { return new Duration(nanos + other.nanos); }
-    public Duration minus(Duration other) { return new Duration(nanos - other.nanos); }
+    public Duration plus(Duration other) { return new Duration(nanos +# other.nanos); }
+    public Duration minus(Duration other) { return new Duration(nanos -# other.nanos); }
 
     // For people: "850ns", "1.5us", "350ms", "1.25s", "5m07s", "2h03m".
     public u8[..~24] human() {

@@ -33,6 +33,7 @@ mod maps;
 mod pools;
 mod records;
 mod sorting;
+mod versions;
 
 use generics::{Inst, InstKind};
 use lambdas::PendingLambda;
@@ -122,6 +123,14 @@ struct Gen<'p, 'a> {
     /// The function's status variables, by name, and how many enclosing `if`s test one:
     /// a failure returned there passes on the one it read (DESIGN §7.6).
     status_vars: HashSet<String>,
+    /// Variables a reference could reach, which a loop can't count on staying fixed
+    /// (`versions.rs`).
+    aliased: HashSet<versions::Var>,
+    /// Locals declared as arrays of their own, which only their own code can resize.
+    owned_arrays: HashSet<(u32, u32)>,
+    /// Index expressions generated without their check, by span: inside the copy of a
+    /// versioned loop whose test showed them in range (DESIGN §14.2).
+    unchecked_ix: HashSet<(u32, u32)>,
     status_tests: usize,
     /// For the call about to be generated, when its array result goes straight into a
     /// variable: where to build it (DESIGN §3.3), as C, or `NULL` for the callee's own
@@ -339,6 +348,9 @@ impl<'p, 'a> Gen<'p, 'a> {
             site_names: HashMap::new(),
             uses_zg: false,
             status_vars: HashSet::new(),
+            aliased: HashSet::new(),
+            owned_arrays: HashSet::new(),
+            unchecked_ix: HashSet::new(),
             status_tests: 0,
             direct_result: None,
             fresh_dst: false,
@@ -868,6 +880,7 @@ impl<'p, 'a> Gen<'p, 'a> {
 
     fn program(&mut self) {
         let prog = self.prog;
+        (self.aliased, self.owned_arrays) = self.alias_scan();
         // Struct definitions for every class.
         for (id, c) in prog.classes.iter().enumerate() {
             if !matches!(c.kind, ClassKind::Class | ClassKind::Root) || !c.type_params.is_empty() {
@@ -1077,7 +1090,31 @@ impl<'p, 'a> Gen<'p, 'a> {
     }
 
     /// Method `idx` of class `id` as the C function `name`, in the current instantiation.
+    /// A `simd` one is three C functions: its AVX-512 and AVX2 versions, then the
+    /// baseline, which calls the widest the CPU has (DESIGN §12.8).
     fn method_as(&mut self, id: ClassId, _idx: usize, m: &MethodInfo, name: String) {
+        let is_main = self.prog.classes[id].kind == ClassKind::Script && m.name == "main";
+        if m.decl.modifiers.contains(&ast::Modifier::Simd) && !is_main {
+            for level in [2, 1] {
+                self.method_version(id, m, &format!("{}_simd{}", name, level), Some(level), false);
+            }
+            self.method_version(id, m, &name, None, true);
+        } else {
+            self.method_version(id, m, &name, None, false);
+        }
+    }
+
+    /// One C function for a method: built for the vector unit `level` (`ZR_SIMD1`,
+    /// `ZR_SIMD2`) or the baseline, and with `dispatch`, first calling the version for the
+    /// widest unit the CPU has.
+    fn method_version(
+        &mut self,
+        id: ClassId,
+        m: &MethodInfo,
+        name: &str,
+        level: Option<u8>,
+        dispatch: bool,
+    ) {
         let c = &self.prog.classes[id];
         let span = m.decl.name.span;
         let m_ret = self.sb(&m.ret);
@@ -1099,7 +1136,10 @@ impl<'p, 'a> Gen<'p, 'a> {
         }
         let ptys: Vec<Ty> = m.params.iter().map(|t| self.sb(t)).collect();
         params.extend(self.params_c(&m.decl.params, &ptys));
-        let small = !self.is_main && m.decl.body.as_ref().is_some_and(|b| small_fn(&b.stmts));
+        let small = !self.is_main
+            && level.is_none()
+            && !dispatch
+            && m.decl.body.as_ref().is_some_and(|b| small_fn(&b.stmts));
         let sig = format!(
             "static {}{} {}({})",
             if small { "inline " } else { "" },
@@ -1111,7 +1151,12 @@ impl<'p, 'a> Gen<'p, 'a> {
                 params.join(", ")
             }
         );
-        let _ = writeln!(self.protos, "{};", sig);
+        // A wider version exists only where the runtime builds them.
+        let (open, attr, close) = match level {
+            Some(l) => ("#ifdef ZR_SIMD\n", format!("ZR_SIMD{} ", l), "#endif\n"),
+            None => ("", String::new(), ""),
+        };
+        let _ = write!(self.protos, "{}{}{};\n{}", open, attr, sig, close);
         let body = m.decl.body.as_ref().expect("a body");
         self.label_fn(&m.name);
         self.block_stmts(&body.stmts);
@@ -1119,8 +1164,29 @@ impl<'p, 'a> Gen<'p, 'a> {
         if (self.fails && m_ret == Ty::Void) || (self.is_main && m_ret == Ty::u8()) {
             self.line("return 0;");
         }
-        let out = self.take_body();
-        let _ = writeln!(self.bodies, "{} {{\n{}}}\n", sig, out);
+        let mut out = self.take_body();
+        if dispatch {
+            // The C parameters' names, passed on as they came.
+            let args: Vec<&str> = params
+                .iter()
+                .map(|p| p.rsplit([' ', '*']).next().unwrap_or(""))
+                .collect();
+            let call = |l: u8| {
+                let c = format!("{}_simd{}({})", name, l, args.join(", "));
+                if ret == "void" {
+                    format!("{}; return;", c)
+                } else {
+                    format!("return {};", c)
+                }
+            };
+            out = format!(
+                "#ifdef ZR_SIMD\n    switch (zr_simd_level()) {{\n    case 2: {}\n    case 1: {}\n    default: break;\n    }}\n#endif\n{}",
+                call(2),
+                call(1),
+                out
+            );
+        }
+        let _ = write!(self.bodies, "{}{}{} {{\n{}}}\n\n{}", open, attr, sig, out, close);
         if self.is_main {
             let call = if m.params.is_empty() {
                 format!("{}()", name)
@@ -1472,14 +1538,27 @@ impl<'p, 'a> Gen<'p, 'a> {
                     }
                     None => {}
                 }
-                let c = cond.as_ref().map(|c| self.cond(c)).unwrap_or_default();
-                let ups: Vec<String> = update.iter().map(|u| self.expr_stmt_code(u)).collect();
-                self.loop_(
-                    label,
-                    &format!("for (; {}; {})", c, ups.join(", ")),
-                    body,
-                    None,
-                );
+                // A loop whose indexes move with its counter runs without their checks
+                // when a test before it shows them all in range (DESIGN §14.2).
+                match self.version_plan(init, cond, update, body) {
+                    Some(plan) => {
+                        self.line(&format!(
+                            "if ({}) {{ /* in range: the loop without its index checks */",
+                            plan.check
+                        ));
+                        self.indent += 1;
+                        let outer = std::mem::replace(&mut self.unchecked_ix, plan.spans);
+                        self.for_loop(label.clone(), cond.as_ref(), update, body);
+                        self.unchecked_ix = outer;
+                        self.indent -= 1;
+                        self.line("} else {");
+                        self.indent += 1;
+                        self.for_loop(label, cond.as_ref(), update, body);
+                        self.indent -= 1;
+                        self.line("}");
+                    }
+                    None => self.for_loop(label, cond.as_ref(), update, body),
+                }
                 self.indent -= 1;
                 self.line("}");
             }
@@ -1560,6 +1639,24 @@ impl<'p, 'a> Gen<'p, 'a> {
             self.line(&format!("zr_sr({});", m));
             self.used_scratch = false;
         }
+    }
+
+    /// A `for` loop's head and body, after its initializer.
+    fn for_loop(
+        &mut self,
+        label: Option<String>,
+        cond: Option<&Expr>,
+        update: &[Expr],
+        body: &Stmt,
+    ) {
+        let c = cond.map(|c| self.cond(c)).unwrap_or_default();
+        let ups: Vec<String> = update.iter().map(|u| self.expr_stmt_code(u)).collect();
+        self.loop_(
+            label,
+            &format!("for (; {}; {})", c, ups.join(", ")),
+            body,
+            None,
+        );
     }
 
     fn enter_loop(&mut self, label: Option<String>) -> LoopCtx {
@@ -3542,6 +3639,8 @@ impl<'p, 'a> Gen<'p, 'a> {
             "zr_stop(LOC, 34, \"index into an empty array\")".to_string(),
         );
         let fix = match mode {
+            // In a versioned loop's copy, shown in range before the loop (DESIGN §14.2).
+            ast::IndexMode::Checked if self.unchecked_ix.contains(&key(span)) => i,
             ast::IndexMode::Checked => format!("ZR_IX({}, LEN, {})", i, oob),
             ast::IndexMode::FromEnd => format!("ZR_IX(LEN - {}, LEN, {})", i, oob),
             ast::IndexMode::Wrap => format!("ZR_IX_WRAP({}, LEN, {})", i, empty),
@@ -3742,9 +3841,9 @@ impl<'p, 'a> Gen<'p, 'a> {
                     AssignOp::Xor => BinOp::BitXor,
                     AssignOp::Shl => BinOp::Shl,
                     AssignOp::Shr => BinOp::Shr,
-                    AssignOp::WrapAdd => BinOp::WrapAdd,
-                    AssignOp::WrapSub => BinOp::WrapSub,
-                    AssignOp::WrapMul => BinOp::WrapMul,
+                    AssignOp::CheckAdd => BinOp::CheckAdd,
+                    AssignOp::CheckSub => BinOp::CheckSub,
+                    AssignOp::CheckMul => BinOp::CheckMul,
                     AssignOp::SatAdd => BinOp::SatAdd,
                     AssignOp::SatSub => BinOp::SatSub,
                     _ => BinOp::SatMul,
@@ -3794,10 +3893,12 @@ impl<'p, 'a> Gen<'p, 'a> {
         };
         let c = prim_c(*p);
         if p.is_float() {
+            // The checked forms, used inside the library's own code, are the plain ones:
+            // floats don't overflow into a status.
             let sym = match op {
-                BinOp::Add => "+",
-                BinOp::Sub => "-",
-                BinOp::Mul => "*",
+                BinOp::Add | BinOp::CheckAdd => "+",
+                BinOp::Sub | BinOp::CheckSub => "-",
+                BinOp::Mul | BinOp::CheckMul => "*",
                 BinOp::Div => "/",
                 _ => return self.unsupported(span, "this operator on floats"),
             };
@@ -3805,27 +3906,27 @@ impl<'p, 'a> Gen<'p, 'a> {
         }
         let u = unsigned_of(*p);
         let (lo, hi) = min_max(*p);
-        let checked = matches!(
-            op,
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
-        );
-        let (over, zero) = if checked {
-            (
-                self.on_fail(34, format!("zr_stop({}, 34, \"integer overflow\")", loc)),
-                self.on_fail(33, format!("zr_stop({}, 33, \"division by zero\")", loc)),
-            )
+        // `+`, `-` and `*` wrap; `+#`, `-#` and `*#` fail with RANGE on overflow; `/` and
+        // `%` fail with DOMAIN on a zero divisor (DESIGN §9.2).
+        let over = if matches!(op, BinOp::CheckAdd | BinOp::CheckSub | BinOp::CheckMul) {
+            self.on_fail(34, format!("zr_stop({}, 34, \"integer overflow\")", loc))
         } else {
-            (String::new(), String::new())
+            String::new()
+        };
+        let zero = if matches!(op, BinOp::Div | BinOp::Rem) {
+            self.on_fail(33, format!("zr_stop({}, 33, \"division by zero\")", loc))
+        } else {
+            String::new()
         };
         match op {
-            BinOp::Add => format!("ZR_ADD({}, {}, {}, {})", c, a, b, over),
-            BinOp::Sub => format!("ZR_SUB({}, {}, {}, {})", c, a, b, over),
-            BinOp::Mul => format!("ZR_MUL({}, {}, {}, {})", c, a, b, over),
-            BinOp::Div => format!("ZR_DIV({}, {}, {}, {}, {})", c, a, b, zero, over),
+            BinOp::Add => format!("(({})(({}){} + ({}){}))", c, u, a, u, b),
+            BinOp::Sub => format!("(({})(({}){} - ({}){}))", c, u, a, u, b),
+            BinOp::Mul => format!("(({})(({}){} * ({}){}))", c, u, a, u, b),
+            BinOp::Div => format!("ZR_DIV({}, {}, {}, {}, {})", c, u, a, b, zero),
             BinOp::Rem => format!("ZR_REM({}, {}, {}, {})", c, a, b, zero),
-            BinOp::WrapAdd => format!("(({})(({}){} + ({}){}))", c, u, a, u, b),
-            BinOp::WrapSub => format!("(({})(({}){} - ({}){}))", c, u, a, u, b),
-            BinOp::WrapMul => format!("(({})(({}){} * ({}){}))", c, u, a, u, b),
+            BinOp::CheckAdd => format!("ZR_ADD({}, {}, {}, {})", c, a, b, over),
+            BinOp::CheckSub => format!("ZR_SUB({}, {}, {}, {})", c, a, b, over),
+            BinOp::CheckMul => format!("ZR_MUL({}, {}, {}, {})", c, a, b, over),
             BinOp::SatAdd => format!("ZR_SATADD({}, {}, {}, {}, {})", c, a, b, lo, hi),
             BinOp::SatSub => format!("ZR_SATSUB({}, {}, {}, {}, {})", c, a, b, lo, hi),
             BinOp::SatMul => format!("ZR_SATMUL({}, {}, {}, {}, {})", c, a, b, lo, hi),
@@ -4006,12 +4107,11 @@ impl<'p, 'a> Gen<'p, 'a> {
                 let v = self.expr(x, &t);
                 match &t {
                     Ty::Prim(p) if p.is_float() => (format!("(-{})", v), t),
-                    Ty::Prim(p) => {
-                        let loc = self.loc(span);
-                        let over =
-                            self.on_fail(34, format!("zr_stop({}, 34, \"integer overflow\")", loc));
-                        (format!("ZR_NEG({}, {}, {})", prim_c(*p), v, over), t)
-                    }
+                    // Negation wraps, as `0 - x` does: `-i64.MIN` is `i64.MIN`.
+                    Ty::Prim(p) => (
+                        format!("(({})(({})0 - ({}){}))", prim_c(*p), unsigned_of(*p), unsigned_of(*p), v),
+                        t,
+                    ),
                     _ => (self.unsupported(span, "this negation"), t),
                 }
             }
@@ -4880,7 +4980,8 @@ impl<'p, 'a> Gen<'p, 'a> {
                                 )
                             }
                             _ => {
-                                let neg = self.arith_code(BinOp::Sub, "0", "_a", &t, span);
+                                // abs(MIN) has no positive, so it stops (STDLIB §2.4).
+                                let neg = self.arith_code(BinOp::CheckSub, "0", "_a", &t, span);
                                 format!("({{ {} _a = {}; _a < 0 ? {} : _a; }})", ct, vs[0], neg)
                             }
                         };
@@ -5587,7 +5688,8 @@ impl<'p, 'a> Gen<'p, 'a> {
                 }
             }
             "sum" if matches!(el, Ty::Prim(_)) => {
-                let add = self.arith_code(BinOp::Add, "_t", &arr.at("_i"), &el, span);
+                // A sum that overflows stops the program (STDLIB §7.1).
+                let add = self.arith_code(BinOp::CheckAdd, "_t", &arr.at("_i"), &el, span);
                 ok(
                     format!(
                         "({{ {} {} _t = 0; for (int64_t _i = 0; _i < {}; _i++) _t = {}; _t; }})",

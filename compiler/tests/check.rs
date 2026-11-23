@@ -194,6 +194,9 @@ fn literals_take_their_type_from_where_they_are_used() {
         "this literal has 5 bytes, and the array holds 4",
     );
     ok(&body("u8[~5] g = \"hello\"; i64[..~2] p = [1, 2];"));
+    // `+#` checks integer overflow; floats have none to check (DESIGN §9.2).
+    rejects(&body("f64 x = 1.5; f64 y = x +# 2.0;"), "+#");
+    ok(&body("i64 a = 5; i64 b = a +# 3; b *#= 2; b -#= 1;"));
     // A fixed array always has exactly its length (DESIGN §4.2): `[]` is that many zeros.
     rejects(
         &body("i32[.4] u = [1, 2];"),
@@ -2074,4 +2077,16 @@ void main() {}
     for (got, w) in e.iter().zip(want) {
         assert!(got.contains(w), "{} / {}", got, w);
     }
+}
+
+/// `simd` goes on functions and methods with a body (DESIGN §12.8); anywhere else it is
+/// a name, of a variable or a class.
+#[test]
+fn simd_goes_on_functions() {
+    ok("simd i64 twice(i64 x) { return x * 2; }\nvoid main() { i64 simd = twice(3); println(\"${simd}\"); }\n");
+    ok("class C { i64 v; simd mut void bump(i64 by) { v += by; } }\nvoid main() { C c = new C(1); c.bump(2); }\n");
+    ok("class simd { i64 v; }\nsimd one = new simd(1);\nsimd make() { return new simd(2); }\nvoid main() { simd x = make(); println(\"${x.v} ${one.v}\"); }\n");
+    rejects("simd i64 count = 3;\nvoid main() {}\n", "`simd` goes on functions and methods");
+    rejects("simd void main() {}\n", "`simd` can't go on `main`");
+    rejects("class C { i64 v; simd new(i64 v) { this.v = v; } }\nvoid main() {}\n", "not constructors");
 }

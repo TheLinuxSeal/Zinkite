@@ -33,7 +33,7 @@ i32 build(i64 depth, u64 seed) {
         return (i32) (pool.len - 1);
     }
     i32 l = build(depth - 1, xsNext(seed));
-    i32 r = build(depth - 1, xsNext(seed +% 1));
+    i32 r = build(depth - 1, xsNext(seed + 1));
     pool +> new TNode((i32) xsMod(seed, 1000), l, r);
     return (i32) (pool.len - 1);
 }

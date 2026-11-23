@@ -4,9 +4,9 @@
 // here to measure what the safety checks cost.
 //
 // As in blur.goose, each access is `src[y * W + x]`, what everyone writes
-// first. Zinkite checks every index and every addition (DESIGN §4.10, §9.2)
-// and has no `checkfree` or bounds-check elimination of its own, so this is
-// the checked kernel; the C compiler removes what it can prove. The image is
+// first. Zinkite checks every index (DESIGN §4.10), and its additions wrap
+// (§9.2); it has no `checkfree` or bounds-check elimination of its own, so this
+// is the checked kernel; the C compiler removes what it can prove. The image is
 // a u8 array on a data stack, and the kernel takes a read-only slice and a
 // writable view of the two buffers. blur_rows.zn is the same kernel over row
 // slices.

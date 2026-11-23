@@ -36,7 +36,7 @@ TNode& build(i64 depth, u64 seed) {
         return pool.push(new TNode((i32) xsMod(seed, 1000), null, null));
     }
     TNode& l = build(depth - 1, xsNext(seed));
-    TNode& r = build(depth - 1, xsNext(seed +% 1));
+    TNode& r = build(depth - 1, xsNext(seed + 1));
     return pool.push(new TNode((i32) xsMod(seed, 1000), l, r));
 }
 

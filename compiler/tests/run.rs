@@ -100,10 +100,268 @@ fn numbers() {
     );
     prints(
         &body(
-            "u8 b = 250; println(\"${b +% 10} ${b +| 10} ${b -| 255} ${max(3, 9)} ${min(-1, 2)}\");",
+            "u8 b = 250; println(\"${b + 10} ${b +| 10} ${b -| 255} ${max(3, 9)} ${min(-1, 2)}\");",
         ),
         "4 255 0 9 -1\n",
     );
+}
+
+/// The C generated for a program, failing the test if it doesn't compile.
+fn c_of(text: &str) -> String {
+    let file = SourceFile::new("prog.zn", text);
+    zink::compile_c(std::slice::from_ref(&file))
+        .1
+        .expect("compiles")
+}
+
+/// How many loops a program's C runs without their index checks (DESIGN §14.2).
+fn versioned(text: &str) -> usize {
+    c_of(text)
+        .matches("/* in range: the loop without its index checks */")
+        .count()
+}
+
+/// A `for` loop whose indexes move with its counter is generated twice, and runs without
+/// its index checks when a test before it shows every index in range (DESIGN §14.2):
+/// counting up and down, by a step, with an `i32` counter over a fixed array, through
+/// a local computed from the counter, and over views rebound between runs of the loop.
+#[test]
+fn loops_whose_indexes_are_in_range_run_without_checks() {
+    let text = r##"i64 W = 5;
+
+u32 distance(string s1, string s2) {
+    string a = s1.len <= s2.len ? s1 : s2;
+    string b = s1.len <= s2.len ? s2 : s1;
+    i64 m = a.len;
+    u32[..>] prevRow = [];
+    u32[..>] currRow = [];
+    for (i64 i = 0; i <= m; i++) {
+        prevRow +> (u32) i;
+        currRow +> 0;
+    }
+    u32[:]& prev = prevRow;
+    u32[:]& curr = currRow;
+    for (i64 j = 0; j < b.len; j++) {
+        u8 c = b[j];
+        curr[0] = (u32) (j + 1);
+        for (i64 i = 0; i < m; i++) {
+            u32 cost = a[i] == c ? 0 : 1;
+            curr[i + 1] = min(min(prev[i + 1] + 1, curr[i] + 1), prev[i] + cost);
+        }
+        u32[:]& t = prev;
+        prev .= curr;
+        curr .= t;
+    }
+    return prev[m];
+}
+
+void main() {
+    println("${distance("kitten", "sitting")} ${distance("", "abc")} ${distance("flaw", "lawn")}");
+    i64[..>] a = [];
+    for (i64 i = 0; i < 10; i++) { a +> i * i; }
+    i64 down = 0;
+    for (i64 i = a.len - 1; i >= 0; i--) { down = down * 3 + a[i]; }
+    i64 stepped = 0;
+    for (i64 j = 2; j < a.len; j += 3) { stepped += a[j]; }
+    i32[.8] f = [];
+    for (i32 i = 0; i < 7; i++) { f[i + 1] = f[i] + i; }
+    u8[..>] img = [];
+    for (i64 i = 0; i < W * W; i++) { img +> (u8) (i * i * 13 % 256); }
+    i64 edges = 0;
+    for (i64 y = 1; y < W - 1; y++) {
+        for (i64 x = 1; x < W - 1; x++) {
+            i64 k = y * W + x;
+            edges += (i64) img[k - W] + img[k + W] - img[k - 1] - img[k + 1];
+        }
+    }
+    println("${down} ${stepped} ${f} ${edges}");
+}
+"##;
+    assert_eq!(versioned(text), 5);
+    prints(text, "3 3 2\n2155287 93 [0, 0, 1, 3, 6, 10, 15, 21] -16\n");
+}
+
+/// A versioned loop whose test fails runs with its checks, so it fails where it always
+/// did, after what came before (DESIGN §14.2). And a loop that could change its bound or
+/// its array through a reference, a removal or a call isn't versioned at all.
+#[test]
+fn a_loop_that_goes_out_of_range_still_fails_where_it_did() {
+    let text = r##"i64[..~] shrinking = [];
+
+void shrink() { i64 e @s = shrinking.pop(); }
+
+void main(string[.] args) {
+    i64[..>] a = [];
+    a +> 10 +> 20 +> 30;
+    string mode = args[0];
+    if (mode == "over") {
+        for (i64 i = 0; i < 5; i++) { println("${a[i]}"); }
+    }
+    if (mode == "down") {
+        for (i64 i = 2; i >= -1; i--) { println("${a[i]}"); }
+    }
+    if (mode == "caught") {
+        for (i64 i = 0; i < 4; i++) {
+            u8 st = @(a[i]);
+            print("${st} ");
+        }
+        println("");
+    }
+    if (mode == "ref") {
+        i64 n = 3;
+        i64& r = n;
+        i64 total = 0;
+        for (i64 i = 0; i < n; i++) {
+            if (i == 1) { r = 5; }
+            total += a[i];
+            println("${total}");
+        }
+    }
+    if (mode == "pop") {
+        i64[..~] b = [1, 2, 3, 4];
+        i64 total = 0;
+        for (i64 i = 0; i < 4; i++) {
+            total += b[i];
+            i64 e = b.pop();
+            println("${total}");
+        }
+    }
+    if (mode == "call") {
+        shrinking +> 1 +> 2 +> 3 +> 4;
+        i64 total = 0;
+        for (i64 i = 0; i < 4; i++) {
+            total += shrinking[i];
+            shrink();
+            println("${total}");
+        }
+    }
+}
+"##;
+    // `over`, `down` and `caught`; the other three loops can't count on their bounds.
+    assert_eq!(versioned(text), 3);
+    let exe = build(text);
+    for (mode, out, err) in [
+        ("over", "10\n20\n30\n", "prog.zn:10: index 3 is out of range for length 3"),
+        ("down", "30\n20\n10\n", "prog.zn:13: index -1 is out of range for length 3"),
+        ("caught", "0 0 0 34 \n", ""),
+        ("ref", "10\n30\n60\n", "prog.zn:28: index 3 is out of range for length 3"),
+        ("pop", "1\n3\n", "prog.zn:36: index 2 is out of range for length 2"),
+        ("call", "1\n3\n", "prog.zn:45: index 2 is out of range for length 2"),
+    ] {
+        let r = exec(&exe, &[mode]);
+        assert_eq!(r.stdout, out, "{}: {}", mode, r.stderr);
+        assert!(r.stderr.contains(err), "{}: {}", mode, r.stderr);
+        assert_eq!(r.code, if err.is_empty() { 0 } else { 1 }, "{}: {}", mode, r.stderr);
+    }
+}
+
+/// A `simd` function is compiled for AVX2 and AVX-512 too, and runs the version for the
+/// widest vector unit the CPU has (DESIGN §12.8). Every version gives the baseline's
+/// results: a multiply and an add round twice, where one FMA would round once, so
+/// `0.1 * 10.0 - 1.0` is 0, not 5.55e-17. A failure inside one is reported as anywhere.
+#[test]
+fn simd_functions_give_the_baselines_results() {
+    let text = r##"simd void axpy(f64 a, f64[:] x, f64[:]& y) {
+    for (i64 i = 0; i < y.len; i++) { y[i] = a * x[i] + y[i]; }
+}
+
+simd i64 sumAt(i64[:] v, i64 at) { return v[at] + v[at + 1]; }
+
+simd <T implements number> T total(T[:] v) {
+    T t = 0;
+    for (T x : v) { t += x; }
+    return t;
+}
+
+class Acc {
+    i64 n;
+    simd mut void add(i64[:] v) {
+        for (i64 i = 0; i < v.len; i++) { n += v[i] * v[i]; }
+    }
+}
+
+void main(string[.] args) {
+    f64[..>] x = [];
+    f64[..>] y = [];
+    for (i64 i = 0; i < 100; i++) {
+        x +> 0.1;
+        y +> -1.0;
+    }
+    axpy(10.0, x, y);
+    f64 worst = 0.0;
+    for (f64 v : y) { worst = max(worst, abs(v)); }
+    i64[..>] v = [];
+    for (i64 i = 1; i <= 10; i++) { v +> i; }
+    Acc acc = new Acc(0);
+    acc.add(v);
+    println("${worst} ${total(v)} ${total(x)} ${acc.n} ${sumAt(v, 3)}");
+    if (args.len > 0) { println("${sumAt(v, 9)}"); }
+}
+"##;
+    let c = c_of(text);
+    for name in ["axpy", "sumAt", "add"] {
+        assert!(c.contains(&format!("_{}_simd2(", name)), "{} has no AVX-512 version", name);
+    }
+    let exe = build(text);
+    let r = exec(&exe, &[]);
+    assert_eq!(r.stdout, "0.0 55 9.99999999999998 385 9\n", "stderr: {}", r.stderr);
+    let r = exec(&exe, &["out"]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("prog.zn:5: index 10 is out of range for length 10"), "{}", r.stderr);
+}
+
+/// `+`, `-`, `*`, unary `-`, `++` and `--` wrap at every width; `+#`, `-#` and `*#`, and
+/// their compound forms, fail with RANGE; division by zero fails with DOMAIN and
+/// `MIN / -1` wraps (DESIGN §9.2). `sum()` and `abs` still stop on overflow.
+#[test]
+fn arithmetic_wraps_and_the_hash_forms_check() {
+    let exe = build(
+        r##"void main(string[.] args) {
+    i64 big = i64.MAX;
+    u8 b = 250;
+    u32 z = 0;
+    i32 m = i32.MIN;
+    i64 minus = -1;
+    i64 lo = i64.MIN;
+    u128 top = u128.MAX;
+    i64 inc = i64.MAX;
+    inc++;
+    u8 dec = 0;
+    dec--;
+    i64 acc = i64.MAX;
+    acc += 2;
+    println("${big + 1 == i64.MIN} ${b + 10} ${z - 1} ${-m} ${m * 2} ${lo / minus == lo} ${lo % minus} ${top + 1} ${inc == i64.MIN} ${dec} ${acc}");
+    i64 a @e1 = big +# 1;
+    u8 c @e2 = b +# 10;
+    u32 d @e3 = z -# 1;
+    i32 f @e4 = m *# 2;
+    i64 g @e5 = 3 +# 4;
+    i64 h = 10;
+    u8 st = @(h +#= big);
+    i64 q @e6 = 10 / (minus + 1);
+    println("${a} ${e1} ${c} ${e2} ${d} ${e3} ${f} ${e4} ${g} ${e5} ${st} ${h} ${q} ${e6}");
+    if (args.len > 0 && args[0] == "sum") {
+        i64[..>] xs = [];
+        xs +> i64.MAX +> 1;
+        println("${xs.sum()}");
+    }
+    if (args.len > 0 && args[0] == "abs") { println("${abs(lo)}"); }
+    if (args.len > 0 && args[0] == "add") { println("${big +# 1}"); }
+}
+"##,
+    );
+    let r = exec(&exe, &[]);
+    assert_eq!(
+        r.stdout,
+        "true 4 4294967295 -2147483648 0 true 0 0 true 255 -9223372036854775807\n0 34 0 34 0 34 0 34 7 0 34 10 0 33\n",
+        "stderr: {}",
+        r.stderr
+    );
+    for (arg, line) in [("sum", "prog.zn:28: integer overflow"), ("abs", "prog.zn:30: integer overflow"), ("add", "prog.zn:31: integer overflow")] {
+        let r = exec(&exe, &[arg]);
+        assert_eq!(r.code, 1, "{}", arg);
+        assert!(r.stderr.contains(line), "{}: {}", arg, r.stderr);
+    }
 }
 
 #[test]
@@ -211,7 +469,7 @@ fn main_gets_arguments_and_gives_the_exit_status() {
 #[test]
 fn bugs_stop_the_program_with_their_location() {
     for (stmt, msg) in [
-        ("i64 x = i64.MAX; x = x + 1;", "prog.zn:3: integer overflow"),
+        ("i64 x = i64.MAX; x = x +# 1;", "prog.zn:3: integer overflow"),
         (
             "i64[..>] a = []; a +> 1; i64 y = a[5];",
             "prog.zn:3: index 5 is out of range for length 1",
@@ -226,11 +484,11 @@ fn bugs_stop_the_program_with_their_location() {
             "prog.zn:3: `pop` failed with EMPTY, and nothing read its status",
         ),
         (
-            "i128 m = i128.MAX; m = m + 1;",
+            "i128 m = i128.MAX; m = m +# 1;",
             "prog.zn:3: integer overflow",
         ),
         (
-            "u128 a = u128.MAX; u128 b = a * 2;",
+            "u128 a = u128.MAX; u128 b = a *# 2;",
             "prog.zn:3: integer overflow",
         ),
         (
@@ -595,7 +853,7 @@ fn chunked_index_against_a_model() {
         r#"u64 seed = 12345;
 
 i64 below(i64 n) {
-    seed = seed *% 6364136223846793005 +% 1442695040888963407;
+    seed = seed * 6364136223846793005 + 1442695040888963407;
     return (i64) ((seed >> 33) % (u64) n);
 }
 
@@ -798,7 +1056,7 @@ fn capped_buffers_against_a_model() {
         r#"u64 seed = 99;
 
 i64 below(i64 n) {
-    seed = seed *% 6364136223846793005 +% 1442695040888963407;
+    seed = seed * 6364136223846793005 + 1442695040888963407;
     return (i64) ((seed >> 33) % (u64) n);
 }
 
@@ -1098,7 +1356,7 @@ void main() {
 
     // Shifts, wrapping and saturating operators.
     u128 one = 1;
-    println("${one << 127} ${(one << 127) >> 120} ${i128.MAX +% 1 == i128.MIN} ${u128.MAX +| 1 == u128.MAX} ${neg >> 126}");
+    println("${one << 127} ${(one << 127) >> 120} ${i128.MAX + 1 == i128.MIN} ${u128.MAX +| 1 == u128.MAX} ${neg >> 126}");
 
     // Arrays, fields and switch.
     i128[..~] xs = [big, -big, 3, neg + 1];
@@ -1304,7 +1562,7 @@ fn maps_against_a_model() {
         r#"u64 seed = 5;
 
 i64 below(i64 n) {
-    seed = seed *% 6364136223846793005 +% 1442695040888963407;
+    seed = seed * 6364136223846793005 + 1442695040888963407;
     return (i64) ((seed >> 33) % (u64) n);
 }
 
@@ -1993,7 +2251,7 @@ fn select_parse_prefix_and_natural_order() {
         r##"u64 seed = 3;
 
 i64 below(i64 n) {
-    seed = seed *% 6364136223846793005 +% 1442695040888963407;
+    seed = seed * 6364136223846793005 + 1442695040888963407;
     return (i64) ((seed >> 33) % (u64) n);
 }
 
@@ -3995,7 +4253,7 @@ void main(string[.] args) {
     i64 x @e1 = a[5];
     i64 y @e2 = a[0] + 1;
     u8 s3 = @(a[0] / zero);
-    i64 o @e4 = big + 1;
+    i64 o @e4 = big +# 1;
     i64 n = 300;
     u8 b @e5 = (u8) n;
     i64 t @e6 = twice(half(3));
@@ -4007,7 +4265,7 @@ void main(string[.] args) {
     q = 5;
     string text = "hello";
     string sl @e11 = text[2:9];
-    i64 neg @e12 = -(i64.MIN + zero);
+    i64 neg @e12 = 0 -# (i64.MIN + zero);
     println("${x} ${e1} ${y} ${e2} ${s3} ${o} ${e4} ${b} ${e5} ${t} ${e6} ${u} ${e7} ${w} ${e8}");
     println("${a[1]} ${e9} ${q} ${e10} [${sl}] ${e11} ${neg} ${e12} ${@a[1]} ${@a[3]}");
     i64 v = a[2];
@@ -4915,7 +5173,7 @@ fn base64_round_trips_and_rejects() {
 
 u64 fnv(string s) {
     u64 h = 14695981039346656037;
-    for (u8 b : s) { h = (h ^ b) *% 1099511628211; }
+    for (u8 b : s) { h = (h ^ b) * 1099511628211; }
     return h;
 }
 

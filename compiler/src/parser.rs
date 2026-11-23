@@ -98,14 +98,18 @@ fn binop(t: &Tok) -> Option<(BinOp, u8)> {
         P::Shr => (BinOp::Shr, 12),
         P::Plus => (BinOp::Add, 13),
         P::Minus => (BinOp::Sub, 13),
-        P::WrapAdd => (BinOp::WrapAdd, 13),
-        P::WrapSub => (BinOp::WrapSub, 13),
+        // `+%` and `-%` are gone (`+` wraps); read as `+` and `-` after saying so.
+        P::WrapAdd => (BinOp::Add, 13),
+        P::WrapSub => (BinOp::Sub, 13),
+        P::CheckAdd => (BinOp::CheckAdd, 13),
+        P::CheckSub => (BinOp::CheckSub, 13),
         P::SatAdd => (BinOp::SatAdd, 13),
         P::SatSub => (BinOp::SatSub, 13),
         P::Star => (BinOp::Mul, 14),
         P::Slash => (BinOp::Div, 14),
         P::Percent => (BinOp::Rem, 14),
-        P::WrapMul => (BinOp::WrapMul, 14),
+        P::WrapMul => (BinOp::Mul, 14),
+        P::CheckMul => (BinOp::CheckMul, 14),
         P::SatMul => (BinOp::SatMul, 14),
         _ => return None,
     })
@@ -124,8 +128,8 @@ pub fn binop_level(op: BinOp) -> u8 {
         Lt | Gt | Le | Ge => 10,
         InsertEnd | InsertFront | InsertCursor => 11,
         Shl | Shr => 12,
-        Add | Sub | WrapAdd | WrapSub | SatAdd | SatSub => 13,
-        Mul | Div | Rem | WrapMul | SatMul => 14,
+        Add | Sub | CheckAdd | CheckSub | SatAdd | SatSub => 13,
+        Mul | Div | Rem | CheckMul | SatMul => 14,
     }
 }
 
@@ -144,9 +148,12 @@ fn assign_op(t: &Tok) -> Option<AssignOp> {
         P::CaretAssign => AssignOp::Xor,
         P::ShlAssign => AssignOp::Shl,
         P::ShrAssign => AssignOp::Shr,
-        P::WrapAddAssign => AssignOp::WrapAdd,
-        P::WrapSubAssign => AssignOp::WrapSub,
-        P::WrapMulAssign => AssignOp::WrapMul,
+        P::WrapAddAssign => AssignOp::Add,
+        P::WrapSubAssign => AssignOp::Sub,
+        P::WrapMulAssign => AssignOp::Mul,
+        P::CheckAddAssign => AssignOp::CheckAdd,
+        P::CheckSubAssign => AssignOp::CheckSub,
+        P::CheckMulAssign => AssignOp::CheckMul,
         P::SatAddAssign => AssignOp::SatAdd,
         P::SatSubAssign => AssignOp::SatSub,
         P::SatMulAssign => AssignOp::SatMul,
@@ -278,6 +285,27 @@ impl Parser {
     fn error_help(&mut self, span: Span, msg: impl Into<String>, help: impl Into<String>) {
         self.diags
             .push(Diagnostic::error(span, msg).with_help(help));
+    }
+
+    /// `+%`, `-%`, `*%` and their assignments, which are gone now that `+`, `-` and `*`
+    /// wrap: reported, then read as the plain operator (DESIGN §9.2).
+    fn old_wrap_op(&mut self) {
+        let Tok::P(p) = self.tok() else { return };
+        let (old, plain, checked) = match p {
+            P::WrapAdd => ("+%", "+", "+#"),
+            P::WrapSub => ("-%", "-", "-#"),
+            P::WrapMul => ("*%", "*", "*#"),
+            P::WrapAddAssign => ("+%=", "+=", "+#="),
+            P::WrapSubAssign => ("-%=", "-=", "-#="),
+            P::WrapMulAssign => ("*%=", "*=", "*#="),
+            _ => return,
+        };
+        let span = self.span();
+        self.error_help(
+            span,
+            format!("`{}` is gone: `{}` wraps now", old, plain),
+            format!("write `{}`, or `{}` to fail with a status on overflow (DESIGN §9.2)", plain, checked),
+        );
     }
 
     /// Reports "expected X, found Y".
@@ -609,6 +637,20 @@ impl Parser {
 
     // ------------------------------------------------------------ declarations
 
+    /// Whether `simd` here is the modifier (DESIGN §12.8), not a type named `simd`: it is
+    /// followed by a keyword, type parameters, a tuple type, or a type and then not the
+    /// end of a field (`simd x;`) or a method's parameters (`simd f()`).
+    fn simd_modifier(&self) -> bool {
+        match self.tok_at(1) {
+            Tok::Kw(_) | Tok::P(P::Lt) | Tok::P(P::LParen) => true,
+            Tok::Ident(_) => !matches!(
+                self.tok_at(2),
+                Tok::P(P::Semi | P::Assign | P::Comma | P::LParen)
+            ),
+            _ => false,
+        }
+    }
+
     fn modifiers(&mut self) -> Vec<Modifier> {
         let mut mods = Vec::new();
         loop {
@@ -617,6 +659,7 @@ impl Parser {
                 Tok::Kw(Kw::Private) => Modifier::Private,
                 Tok::Kw(Kw::Static) => Modifier::Static,
                 Tok::Kw(Kw::Mut) => Modifier::Mut,
+                Tok::Ident(n) if n == "simd" && self.simd_modifier() => Modifier::Simd,
                 Tok::Kw(Kw::Extern) => {
                     self.bump();
                     let mut cname = None;
@@ -1889,6 +1932,7 @@ impl Parser {
         let Some(op) = assign_op(self.tok()) else {
             return Ok(lhs);
         };
+        self.old_wrap_op();
         self.bump();
         let value = Box::new(self.assignment()?);
         Ok(Expr {
@@ -1958,6 +2002,7 @@ impl Parser {
             if level < min {
                 break;
             }
+            self.old_wrap_op();
             self.bump();
             let rhs = self.binary(level + 1)?;
             lhs = Expr {

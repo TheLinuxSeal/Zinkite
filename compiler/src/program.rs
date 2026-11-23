@@ -559,6 +559,14 @@ impl<'a> Program<'a> {
                                 .map(|p| self.resolve_param(&p.ty, file, &tps))
                                 .collect();
                             let can_fail = writes_status(&ctor.body);
+                            if ctor.modifiers.contains(&Modifier::Simd) {
+                                let file = self.classes[id].file;
+                                self.error(
+                                    file,
+                                    ctor.span,
+                                    "`simd` goes on functions and methods, not constructors (DESIGN §12.8)",
+                                );
+                            }
                             self.classes[id].ctors.push(CtorInfo {
                                 params,
                                 decl: Some(ctor),
@@ -632,6 +640,15 @@ impl<'a> Program<'a> {
             },
         );
         let is_static = script || f.modifiers.contains(&Modifier::Static);
+        if f.modifiers.contains(&Modifier::Simd)
+            && let Some(v) = f.vars.first()
+        {
+            self.error(
+                file,
+                v.name.span,
+                "`simd` goes on functions and methods: a field has no code to compile for wider vectors (DESIGN §12.8)",
+            );
+        }
         for v in &f.vars {
             if self.classes[id]
                 .fields
@@ -705,6 +722,24 @@ impl<'a> Program<'a> {
                 m.name.span,
                 "there are no destructors; clean up with `defer` (DESIGN §6.4)",
             );
+        }
+        if m.modifiers.contains(&Modifier::Simd) {
+            let why = if m.modifiers.iter().any(|md| matches!(md, Modifier::Extern(_))) {
+                Some("a C function's code is compiled elsewhere")
+            } else if m.body.is_none() {
+                Some("it needs a body to compile")
+            } else if script && m.name.name == "main" {
+                Some("put the loops in a function of their own and mark that one")
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                self.error(
+                    file,
+                    m.name.span,
+                    format!("`simd` can't go on `{}`: {} (DESIGN §12.8)", m.name.name, why),
+                );
+            }
         }
         let is_private = m.modifiers.contains(&Modifier::Private);
         // An interface's methods are as visible as the interface.

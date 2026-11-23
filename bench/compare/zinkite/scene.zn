@@ -76,7 +76,7 @@ SNode& build(i64 depth, u64 seed) {
     if (depth == 0) { return nd; }
     i64 n = 1 + xsMod(r >> 40, MAXKIDS);
     for (i64 i = 0; i < n; i++) {
-        SNode& c = build(depth - 1, xsNext(r +% (u64) i));
+        SNode& c = build(depth - 1, xsNext(r + (u64) i));
         nd.kids +> c;
     }
     return nd;

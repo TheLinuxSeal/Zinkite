@@ -42,7 +42,15 @@ pub fn c_compiler() -> Result<String, String> {
 
 /// The flags for an optimized build, or a quick one for `zink run`.
 fn flags(optimize: bool) -> Vec<&'static str> {
-    let mut f = vec!["-std=gnu11", "-w", "-fwrapv", "-fno-strict-aliasing"];
+    // No contraction: a multiply and an add round twice wherever the code runs, in a
+    // `simd` function's versions with FMA too (DESIGN §12.8).
+    let mut f = vec![
+        "-std=gnu11",
+        "-w",
+        "-fwrapv",
+        "-fno-strict-aliasing",
+        "-ffp-contract=off",
+    ];
     f.push(if optimize { "-O2" } else { "-O0" });
     f
 }

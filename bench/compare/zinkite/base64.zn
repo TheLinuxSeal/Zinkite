@@ -28,7 +28,7 @@ void main() {
     }
     u8[.] text = base64.encode(input);
     u64 h = 14695981039346656037;
-    for (u8 b : text) { h = (h ^ b) *% 1099511628211; }
+    for (u8 b : text) { h = (h ^ b) * 1099511628211; }
 
     // Each pass's buffer is new, and gone again at its closing brace. One byte of
     // each result goes into the sum, so no pass can be skipped.
