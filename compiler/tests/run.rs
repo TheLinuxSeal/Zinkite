@@ -4509,6 +4509,350 @@ void main(string[.] args) {
     );
 }
 
+/// Self-relative links (REFERENCES §7.2): a field holds the signed byte offset to what it
+/// refers to, in 1, 2 or 4 bytes, so a node is smaller; a value with links is built in its
+/// slot; following a link is an add; copying the whole array keeps every link inside the
+/// copy; and an offset that doesn't fit its width stops the program (L4).
+#[test]
+fn self_relative_links() {
+    let text = r##"class Cell {
+    i64 v;
+    Cell&<i16>? next = null;
+}
+
+class Tiny { u8 v; Tiny&<i8>? prev; }
+
+class Pair {
+    i32 a;
+    Pair&<i32>? partner;
+
+    new(Pair&? to, i32 a) {
+        this.a = a;
+        partner = to;
+    }
+}
+
+class Word {
+    u8[.*] text;
+    Word&<i32>? up;
+}
+
+i64 total(Cell& c) {
+    i64 s = 0;
+    Cell&? at = c;
+    while (at != null) {
+        Cell& here = at;
+        s += here.v;
+        at .= here.next;
+    }
+    return s;
+}
+
+void main(string[.] args) {
+    Cell[..>] cells = [];
+    Cell& first = cells.push(new Cell(1));
+    Cell& prev = first;
+    for (i64 i = 2; i <= 5; i++) {
+        Cell& c = cells.push(new Cell(i));
+        prev.next .= c;
+        prev .= c;
+    }
+    Cell[..>] copy = cells;
+    copy[0].v = 100;
+    copy[1].v = 200;
+    println("${total(first)} ${total(copy[0])}");
+
+    Tiny[..>] ts = [];
+    Tiny& t0 = ts.push(new Tiny(7, null));
+    Tiny& t1 = ts.push(new Tiny(8, t0));
+    Tiny&? back = t1.prev;
+    println("${back == null ? 0 : back.v} ${t0.prev == null}");
+
+    Pair[..>] ps = [];
+    Pair& p0 = ps.push(new Pair(null, 1));
+    Pair& p1 = ps.push(new Pair(p0, 2));
+    ps +> new Pair(p1, 3);
+    Pair&? pp = ps[2].partner;
+    println("${pp == null ? 0 : pp.a}");
+
+    Word[..>] ws = [];
+    Word& root = ws.push(new Word("root", null));
+    Word& leaf = ws.push(new Word("leaf", root));
+    Word&? u = leaf.up;
+    println("${leaf.text} ${u == null ? "-" : u.text}");
+
+    if (args.len > 0 && args[0] == "far") {
+        for (i64 i = 0; i < 200; i++) { ts +> new Tiny(1, null); }
+        Tiny& last = ts.push(new Tiny(2, null));
+        last.prev .= t0;
+    }
+}
+"##;
+    let exe = build(text);
+    let r = exec(&exe, &[]);
+    assert_eq!(r.stdout, "15 312\n7 true\n2\nleaf root\n", "stderr: {}", r.stderr);
+    let r = exec(&exe, &["far"]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("prog.zn:70: this link's target is too far away for its 1-byte offset"), "{}", r.stderr);
+    // Each link is its offset: Tiny is 2 bytes, Pair 8.
+    let file = SourceFile::new("prog.zn", text);
+    let (_, c) = zink::compile_c(std::slice::from_ref(&file));
+    let c = c.expect("compiles");
+    assert!(c.contains("struct zc1_Tiny { int8_t f_prev; uint8_t f_v; };"), "Tiny");
+    assert!(c.contains("struct zc2_Pair { int32_t f_a; int32_t f_partner; };"), "Pair");
+}
+
+/// Pool links (REFERENCES §7.3): the offset of the target from the start of a static
+/// grow-only array, plus one, so 0 is null. A value holding them can be copied anywhere
+/// and still reaches its targets, and an offset that doesn't fit stops the program (L4).
+#[test]
+fn pool_links() {
+    let text = r##"class TNode {
+    i32 v;
+    TNode&<u32 in pool>? l;
+    TNode&<u32 in pool>? r;
+}
+
+class Small { u8 v; Small&<u8 in smalls>? prev; }
+
+TNode[..>] pool = [];
+Small[..>] smalls = [];
+
+TNode& build(i64 depth, i32 v) {
+    if (depth == 0) { return pool.push(new TNode(v, null, null)); }
+    TNode& l = build(depth - 1, v * 2);
+    TNode& r = build(depth - 1, v * 2 + 1);
+    return pool.push(new TNode(v, l, r));
+}
+
+i64 sum(TNode& n) {
+    i64 t = n.v;
+    TNode&? l = n.l;
+    if (l != null) { t += sum(l); }
+    TNode&? r = n.r;
+    if (r != null) { t += sum(r); }
+    return t;
+}
+
+void main(string[.] args) {
+    TNode& root = build(3, 1);
+    TNode copy = root;
+    TNode&? cl = copy.l;
+    TNode[..>] moved = [];
+    moved +> root;
+    println("${pool.len} ${sum(root)} ${cl == null ? 0 : cl.v} ${sum(moved[0])}");
+    Small& s0 = smalls.push(new Small(1, null));
+    for (i64 i = 0; i < 300; i++) { smalls +> new Small(2, s0); }
+    if (args.len > 0) {
+        Small& far = smalls.push(new Small(3, null));
+        smalls +> new Small(4, far);
+    }
+}
+"##;
+    let exe = build(text);
+    let r = exec(&exe, &[]);
+    assert_eq!(r.stdout, "15 120 2 120\n", "stderr: {}", r.stderr);
+    let r = exec(&exe, &["far"]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("this pool link's target is too far into its array for its 1-byte offset"), "{}", r.stderr);
+    let file = SourceFile::new("prog.zn", text);
+    let (_, c) = zink::compile_c(std::slice::from_ref(&file));
+    let c = c.expect("compiles");
+    assert!(c.contains("struct zc0_TNode { uint32_t f_l; uint32_t f_r; int32_t f_v; };"), "TNode");
+    assert!(c.contains("struct zc1_Small { uint8_t f_prev; uint8_t f_v; };"), "Small");
+}
+
+/// A fixed array, `T[.k]`, always has exactly `k` elements (DESIGN §4.2): `[]` gives `k`
+/// zero values, and so does the zero value of a failed call, which is all zero bytes, since
+/// the length isn't stored. Taken from a slice, it must be given exactly `k`.
+#[test]
+fn fixed_arrays_always_have_their_length() {
+    prints(
+        r##"class P { i32 x; i32 y; }
+class Holder { i32[.4] cells; i64 tag; }
+class Rec { u8[.*] name; i16[.3] marks; }
+
+i32[..>] small = [];
+
+i64 sum(i32[.4] a) {
+    i64 s = 0;
+    for (i32 v : a) { s += v; }
+    return s;
+}
+
+i64 sumSlice(i32[:] a) {
+    i64 s = 0;
+    for (i64 i = 0; i < a.len; i++) { s += a[i]; }
+    return s;
+}
+
+i32[.4] make(i32 base) {
+    i32[.4] r = [];
+    for (i64 i = 0; i < r.len; i++) { r[i] = base + (i32) i; }
+    return r;
+}
+
+i32[.4] deep() {
+    i32[.4] r = [1, 2, 3, 4];
+    r[0] = small[5];
+    return r;
+}
+
+void bump(i32[.4]& a) {
+    for (i32& v : a) { v += 100; }
+}
+
+void main() {
+    i32[.4] b = [];
+    i32[.4] c = [1, 2, 3, 4];
+    P[.3] ps = [];
+    string[.2] names = [];
+    Holder h = new Holder([], 7);
+    u8[.3] tag = "abc";
+    println("${b.len} ${c.len} ${ps.len} ${names.len} ${h.cells.len} ${b} ${names[1].len} ${tag}");
+    b[3] = 9;
+    ps[2].x = 5;
+    c = [5, 6, 7, 8];
+    h.cells[0] = 3;
+    println("${b} ${c} ${ps[2].x} ${sum(c)} ${sum(b)} ${sumSlice(c)} ${sumSlice(c[1:3])} ${h.cells}");
+    i32[.4] m = make(10);
+    bump(m);
+    i32[.4] z @@e = deep();
+    i32[.4] whole = c[0:4];
+    println("${m} ${m == make(10)} ${z.len} ${z} ${e} ${whole}");
+    i32[.4] s = [4, 1, 3, 2];
+    s.sort();
+    println("${s} ${s[^1]} ${s.contains(3)}");
+    Rec[..>] recs = [];
+    recs +> new Rec("ann", [1, 2, 3]);
+    recs +> new Rec("bo", []);
+    for (Rec& r : recs) { println("${r.name} ${r.marks} ${r.marks.len}"); }
+    i32[.2][.3] grid = [];
+    grid[2][1] = 7;
+    hashmap<i64, i32[.2]> map = [];
+    i32[.2]& slot = map.getOrAdd(5, []);
+    slot[1] = 3;
+    i32[.2] got @eg = map.get(5);
+    i32[.2] none @en = map.get(6);
+    println("${grid.len} ${grid[0].len} ${grid[2]} ${got} ${none} ${none.len} ${en}");
+}
+"##,
+        "4 4 3 2 4 [0, 0, 0, 0] 0 abc
+[0, 0, 0, 9] [5, 6, 7, 8] 5 26 9 26 13 [3, 0, 0, 0]
+[110, 111, 112, 113] false 4 [0, 0, 0, 0] 34 [5, 6, 7, 8]
+[1, 2, 3, 4] 4 true
+ann [1, 2, 3] 3
+bo [0, 0, 0] 3
+3 2 [0, 7] [0, 3] [0, 0] 2 195
+",
+    );
+    let r = run(
+        "void main() { i32[..>] c = [1, 2, 3]; i32[.4] part = c[0:2]; println(\"${part}\"); }\n",
+        &[],
+    );
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("the value isn't the 4 elements the array holds"), "{}", r.stderr);
+}
+
+/// base64 (STDLIB §8.4) at every length a group loop can end on, through whichever of the
+/// runtime's loops this CPU runs, against Python's base64: and invalid text, which leaves
+/// `out` as it was.
+#[test]
+fn base64_round_trips_and_rejects() {
+    prints(
+        r##"import zink.encoding.*;
+
+u64 fnv(string s) {
+    u64 h = 14695981039346656037;
+    for (u8 b : s) { h = (h ^ b) *% 1099511628211; }
+    return h;
+}
+
+void main() {
+    u8[..>] data = [];
+    for (i64 i = 0; i < 1000; i++) { data +> (u8) ((i * 37 + i / 7) % 256); }
+    u8[.] e = base64.encode(data);
+    u8[.] u = base64.encodeUrl(data);
+    println("${e.len} ${fnv(e)} ${u.len} ${fnv(u)}");
+    i64 bad = 0;
+    for (i64 n = 0; n <= 300; n++) {
+        string part = data[0:n];
+        u8[..>] back = [];
+        @_ = base64.decode(base64.encode(part), back);
+        u8[..>] back2 = [];
+        @_ = base64.decodeUrl(base64.encodeUrl(part), back2);
+        if (back != part || back2 != part) { bad++; }
+    }
+    u8[..>] out = [];
+    out.append("keep");
+    println("${bad} ${@base64.decode("QUJDRA==QUJD", out)} ${@base64.decode("QR==", out)} ${@base64.decodeUrl("QQ=", out)} ${out.len} ${@base64.decodeUrl("QUJDRA", out)} ${out.len}");
+}
+"##,
+        "1336 1823936081133242498 1334 6181256220034438240\n0 22 22 22 4 0 8\n",
+    );
+}
+
+/// An enum value takes the narrowest unsigned integer that holds its constants (DESIGN
+/// §11): a byte for up to 256, two bytes beyond. It works as a field of a fixed-size and of
+/// a variable-size class, as a map key, sorted, compared and switched on.
+#[test]
+fn enums_take_the_narrowest_width() {
+    let mut big = String::from("enum Big { ");
+    for i in 0..300 {
+        big.push_str(&format!("B{}, ", i));
+    }
+    big.push_str("}\n");
+    let text = format!(
+        r##"enum Kind {{ TICK, TRADE, NOTE }}
+{big}
+class Ev {{ i64 at; Kind kind; i32 n; }}
+class Tagged {{ u8[.*] text; Kind kind; Big big; i16 x; }}
+
+string name(Kind k) {{
+    return switch (k) {{ case TICK => "tick"; case TRADE => "trade"; case NOTE => "note"; }};
+}}
+
+void main() {{
+    Ev[..>] evs = [];
+    for (i64 i = 0; i < 9; i++) {{
+        Kind k = i % 3 == 0 ? Kind.NOTE : i % 3 == 1 ? Kind.TRADE : Kind.TICK;
+        evs +> new Ev(i, k, (i32) i);
+    }}
+    i64 trades = 0;
+    hashmap<Kind, i64> counts = [];
+    for (Ev& e : evs) {{
+        if (e.kind == Kind.TRADE) {{ trades += e.n; }}
+        i64& c = counts.getOrAdd(e.kind, 0);
+        c += e.at;
+    }}
+    Kind[..>] ks = [];
+    for (Ev& e : evs) {{ ks +> e.kind; }}
+    ks.sort();
+    Tagged[..>] tags = [];
+    tags +> new Tagged("first", Kind.NOTE, Big.B299, 7);
+    tags +> new Tagged("second", Kind.TICK, Big.B43, -7);
+    for (Tagged& t : tags) {{
+        println("${{t.text}} ${{name(t.kind)}} ${{t.big == Big.B299}} ${{t.big == Big.B43}} ${{t.x}}");
+    }}
+    i64 tick @e1 = counts.get(Kind.TICK);
+    i64 note @e2 = counts.get(Kind.NOTE);
+    println("${{trades}} ${{tick}} ${{note}} ${{name(ks[0])}} ${{name(ks[8])}} ${{Kind.TICK < Kind.NOTE}} ${{Big.B43 < Big.B299}}");
+}}
+"##
+    );
+    prints(
+        &text,
+        "first note true false 7\nsecond tick false true -7\n12 15 9 tick note true true\n",
+    );
+    let file = SourceFile::new("prog.zn", &text);
+    let (_, c) = zink::compile_c(std::slice::from_ref(&file));
+    let c = c.expect("compiles");
+    assert!(c.contains("uint8_t f_kind;"), "Kind should be one byte");
+    assert!(c.contains("uint16_t f_big;"), "Big should be two bytes");
+    // Largest first, so the one-byte field doesn't pad the 16-byte struct out to 24.
+    assert!(c.contains("int64_t f_at; int32_t f_n; uint8_t f_kind;"));
+}
+
 /// `status.name` (STDLIB §1.4): the names of DESIGN §7.7, the C name of an operating-system
 /// code without one, and "" for a program's own codes.
 #[test]

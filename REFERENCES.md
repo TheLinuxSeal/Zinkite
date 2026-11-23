@@ -267,7 +267,8 @@ class Node { i32 key; Node&<i32>? left; Node&<i32>? right; }   // 12 bytes
 Node[..>] tree = [];
 Node& root = tree.push(new Node(5, null, null));
 root.left .= tree.push(new Node(3, null, null));
-if (root.left != null) { println("${root.left.key}"); }   // 3: following a link is an add and a load
+Node&? left = root.left;                  // following a link is an add
+if (left != null) { println("${left.key}"); }   // 3
 ```
 
 A structure built from self-relative links:
@@ -294,6 +295,14 @@ A structure built from self-relative links:
   - no check is needed when the array's reservation is no larger than the width can reach, for example 2 GB for 32-bit links (Goose §3.9).
 
 L1–L3 keep every link inside its array, and that memory never holds another type, so following a link needs no bounds check.
+
+### 7.5 What the compiler does (2026-11-22)
+- **Both kinds of link are implemented.** A link field is its offset: `int8_t`, `int16_t` or `int32_t` for a self-relative link, `uint8_t`, `uint16_t` or `uint32_t` for a pool link, sorted with the other fixed-size fields by that width. Its type is the reference it holds, so rules S and R, and the rule that a reference in a field points only into an array that keeps its elements in place (L3), apply to it as to any reference field.
+- **L1 is checked with the roots of rule S.** Storing a link compares the roots of what it refers to with the roots of the array its field is in, for a self-relative link, or with its static array, for a pool link; a store that may be in one of two arrays is an error too. A store through a parameter, or a constructor's, is checked at each call, where the arguments' roots are known: `attach(x, y)` with `void attach(Node& into, Node& what) { into.left .= what; }` is an error when `x` and `y` are in different arrays, and `p2.push(new Pair(q, 2))` when the constructor links to `q` and `q` is in `p1`.
+- **L2 is checked as "never copied"** for self-relative links: a value whose class has one, itself or in a field it holds by value, is made only by `new` as the argument of `push`, `+>` or another insertion, where it is built in its slot. It can't be a local, a parameter, a result, a loop variable or a copy of an element, and the methods that move or copy elements, such as `sort`, `reverse`, `retain` and `filter`, are compile errors on an array of them. A whole array of them can be copied, since its links stay inside it. A value with only pool links copies anywhere. A link can't refer to an interface, which would need its method table too.
+- **A pool link's array** must be a static `T[..>]` of what the link refers to: a static of the same class, a script's top-level one, or `C.name`.
+- **L4 checks every store**, as a second line behind L1; the check isn't yet left out when the reservation is small enough for the width.
+- **Not yet**: links in an array of records that have to be built aside (V4), and in arrays other than grow-only ones on a data stack, which are compile errors that say so; and constructors that can fail, for a value with self-relative links.
 
 ---
 

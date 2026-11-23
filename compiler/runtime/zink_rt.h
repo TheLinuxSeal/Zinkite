@@ -987,6 +987,28 @@ static ZR_UNUSED int zr_cmp_su(int64_t a, uint64_t b) { return a < 0 ? -1 : (uin
 static ZR_UNUSED int zr_cmp_su128(zr_i128 a, zr_u128 b) { return a < 0 ? -1 : (zr_u128)a < b ? -1 : (zr_u128)a > b ? 1 : 0; }
 
 /* Checked indexes (DESIGN §4.10): out of range runs `fail`, as the arithmetic does. */
+/* Self-relative links (REFERENCES §7.2): a field holding the signed byte offset from
+ * itself to what it refers to, in 1, 2 or 4 bytes; in a nullable one, 0 is null. Following
+ * one is an add. Storing one runs `fail` when the offset doesn't fit the field, or would
+ * be 0 in a nullable one, where it would read back as null (L4). */
+#define ZR_LINK(T, f) ({ __typeof__(f) *_lf = &(f); (T *)((char *)_lf + *_lf); })
+#define ZR_LINK_OR_NULL(T, f) ({ __typeof__(f) *_lf = &(f); *_lf ? (T *)((char *)_lf + *_lf) : (T *)0; })
+#define ZR_LINK_SET(f, t, nullable, fail) ({ __typeof__(f) *_lf = &(f); char *_lt = (char *)(t); \
+    int64_t _ld = _lt ? _lt - (char *)_lf : 0; \
+    if (_lt && (_ld != (int64_t)(__typeof__(f))_ld || ((nullable) && _ld == 0))) { fail; } \
+    *_lf = (__typeof__(f))_ld; (void)0; })
+
+/* Pool links (REFERENCES §7.3): the unsigned byte offset of the target from the start of a
+ * static grow-only array, plus one, so that 0 is null; the array's start never moves, so
+ * a value holding them can be copied anywhere. Storing one runs `fail` when the target is
+ * before the array or the offset doesn't fit the field (L4). */
+#define ZR_PLINK(T, f, base) ((T *)((char *)(base) + (f) - 1))
+#define ZR_PLINK_OR_NULL(T, f, base) ({ __typeof__(f) _pf = (f); _pf ? (T *)((char *)(base) + _pf - 1) : (T *)0; })
+#define ZR_PLINK_SET(f, t, base, fail) ({ __typeof__(f) *_lf = &(f); char *_lt = (char *)(t); \
+    uint64_t _ld = _lt ? (uint64_t)(_lt - (char *)(base)) + 1 : 0; \
+    if (_lt && (_lt < (char *)(base) || _ld != (uint64_t)(__typeof__(f))_ld)) { fail; } \
+    *_lf = (__typeof__(f))_ld; (void)0; })
+
 #define ZR_IX(i, n, fail) ({ int64_t _zxi = (i), _zxn = (n); if (_zxi < 0 || _zxi >= _zxn) { fail; } _zxi; })
 #define ZR_IX_WRAP(i, n, fail) ({ int64_t _zxi = (i), _zxn = (n); if (_zxn == 0) { fail; } \
     int64_t _zxr = _zxi % _zxn; _zxr < 0 ? _zxr + _zxn : _zxr; })
@@ -1498,6 +1520,202 @@ static ZR_UNUSED void zr_digest_squeeze(zr_slice st, int64_t n, zr_vec *out) {
     out->n += n;
 }
 #undef ZR_SHA_ABSORB
+
+/* ------------------------------------------------------------ base64 (STDLIB §8.4) */
+
+/* RFC 4648 base64, standard (`url` 0, with padding) and URL-safe (`url` 1, without). Each
+ * loop handles whole groups and has no exits, so the C compiler can vectorize it: invalid
+ * characters are ORed into a value checked once at the end, as Goose's std base64 does.
+ * With clang on an x86-64 CPU that has AVX2 or AVX-512, the loops compute the alphabet
+ * with compares and run as that vector code, chosen when the program first asks: two to
+ * three times as fast as table lookups, which is what they do elsewhere, being the
+ * fastest scalar form. */
+static const char zr_b64_abc[2][65] = {
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+};
+/* Each byte's 6-bit value, 255 for one outside the alphabet. */
+static const uint8_t zr_b64_val[2][256] = {
+    {
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,  62, 255, 255, 255,  63,
+       52,  53,  54,  55,  56,  57,  58,  59,  60,  61, 255, 255, 255, 255, 255, 255,
+      255,   0,   1,   2,   3,   4,   5,   6,   7,   8,   9,  10,  11,  12,  13,  14,
+       15,  16,  17,  18,  19,  20,  21,  22,  23,  24,  25, 255, 255, 255, 255, 255,
+      255,  26,  27,  28,  29,  30,  31,  32,  33,  34,  35,  36,  37,  38,  39,  40,
+       41,  42,  43,  44,  45,  46,  47,  48,  49,  50,  51, 255, 255, 255, 255, 255,
+     [128 ... 255] = 255,
+    },
+    {
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,  62, 255, 255,
+       52,  53,  54,  55,  56,  57,  58,  59,  60,  61, 255, 255, 255, 255, 255, 255,
+      255,   0,   1,   2,   3,   4,   5,   6,   7,   8,   9,  10,  11,  12,  13,  14,
+       15,  16,  17,  18,  19,  20,  21,  22,  23,  24,  25, 255, 255, 255, 255,  63,
+      255,  26,  27,  28,  29,  30,  31,  32,  33,  34,  35,  36,  37,  38,  39,  40,
+       41,  42,  43,  44,  45,  46,  47,  48,  49,  50,  51, 255, 255, 255, 255, 255,
+     [128 ... 255] = 255,
+    },
+};
+
+#define ZR_B64_ENC_LOOP(SYM)                                                              \
+    for (int64_t i = 0; i < g; i++) {                                                     \
+        uint8_t a = s[3 * i], b = s[3 * i + 1], c = s[3 * i + 2];                         \
+        d[4 * i] = SYM(a >> 2);                                                           \
+        d[4 * i + 1] = SYM((uint8_t)((a & 3) << 4 | b >> 4));                             \
+        d[4 * i + 2] = SYM((uint8_t)((b & 15) << 2 | c >> 6));                            \
+        d[4 * i + 3] = SYM((uint8_t)(c & 63));                                            \
+    }
+#define ZR_B64_DEC_LOOP(VAL)                                                              \
+    uint8_t seen = 0;                                                                     \
+    for (int64_t i = 0; i < g; i++) {                                                     \
+        uint8_t a = VAL(t[4 * i]), b = VAL(t[4 * i + 1]);                                 \
+        uint8_t c = VAL(t[4 * i + 2]), e = VAL(t[4 * i + 3]);                             \
+        seen |= a | b | c | e;                                                            \
+        o[3 * i] = (uint8_t)(a << 2 | b >> 4);                                            \
+        o[3 * i + 1] = (uint8_t)(b << 4 | c >> 2);                                        \
+        o[3 * i + 2] = (uint8_t)(c << 6 | e);                                             \
+    }                                                                                     \
+    return seen;
+
+static void zr_b64_enc_table(uint8_t *restrict d, const uint8_t *restrict s, int64_t g, int url) {
+    const char *abc = zr_b64_abc[url];
+#define ZR_B64_SYM(x) ((uint8_t)abc[x])
+    ZR_B64_ENC_LOOP(ZR_B64_SYM)
+#undef ZR_B64_SYM
+}
+
+static uint8_t zr_b64_dec_table(uint8_t *restrict o, const uint8_t *restrict t, int64_t g, int url) {
+    const uint8_t *val = zr_b64_val[url];
+#define ZR_B64_VAL(x) val[x]
+    ZR_B64_DEC_LOOP(ZR_B64_VAL)
+#undef ZR_B64_VAL
+}
+
+#if defined(__clang__) && defined(__x86_64__)
+#define ZR_B64_SIMD 1
+/* The character of a 6-bit value: an offset added to it, chosen by range. */
+static inline __attribute__((always_inline)) uint8_t zr_b64_sym(uint8_t b, int url) {
+    uint8_t d = 'A';
+    if (b >= 26) d = 'a' - 26;
+    if (b >= 52) d = (uint8_t)('0' - 52);
+    if (b == 62) d = (uint8_t)((url ? '-' : '+') - 62);
+    if (b == 63) d = (uint8_t)((url ? '_' : '/') - 63);
+    return (uint8_t)(b + d);
+}
+/* The 6-bit value of a character, or 255: each range test is a subtraction and a compare. */
+static inline __attribute__((always_inline)) uint8_t zr_b64_value(uint8_t c, int url) {
+    uint8_t v = 255;
+    if ((uint8_t)(c - 'A') < 26) v = (uint8_t)(c - 'A');
+    if ((uint8_t)(c - 'a') < 26) v = (uint8_t)(c - 'a' + 26);
+    if ((uint8_t)(c - '0') < 10) v = (uint8_t)(c - '0' + 52);
+    if (c == (url ? '-' : '+')) v = 62;
+    if (c == (url ? '_' : '/')) v = 63;
+    return v;
+}
+#define ZR_B64_SYM_STD(x) zr_b64_sym(x, 0)
+#define ZR_B64_SYM_URL(x) zr_b64_sym(x, 1)
+#define ZR_B64_VAL_STD(x) zr_b64_value(x, 0)
+#define ZR_B64_VAL_URL(x) zr_b64_value(x, 1)
+/* The loops compiled for one instruction set, each alphabet's constants folded in. */
+#define ZR_B64_FNS(NAME, TARGET)                                                          \
+    __attribute__((target(TARGET))) static void zr_b64_enc_##NAME(                       \
+        uint8_t *restrict d, const uint8_t *restrict s, int64_t g, int url) {             \
+        if (url) { ZR_B64_ENC_LOOP(ZR_B64_SYM_URL) } else { ZR_B64_ENC_LOOP(ZR_B64_SYM_STD) } \
+    }                                                                                     \
+    __attribute__((target(TARGET))) static uint8_t zr_b64_dec_##NAME(                    \
+        uint8_t *restrict o, const uint8_t *restrict t, int64_t g, int url) {             \
+        if (url) { ZR_B64_DEC_LOOP(ZR_B64_VAL_URL) } else { ZR_B64_DEC_LOOP(ZR_B64_VAL_STD) } \
+    }
+ZR_B64_FNS(avx2, "avx2,bmi,bmi2")
+ZR_B64_FNS(avx512, "avx512f,avx512bw,avx512vl,avx512dq,avx512cd,avx2,bmi,bmi2")
+#undef ZR_B64_FNS
+#undef ZR_B64_SYM_STD
+#undef ZR_B64_SYM_URL
+#undef ZR_B64_VAL_STD
+#undef ZR_B64_VAL_URL
+/* The widest vector unit this CPU has that the loops use: 2 for AVX-512, 1 for AVX2, 0
+ * for neither, asked once. */
+static int zr_b64_level(void) {
+    static int level = -1;
+    if (level < 0) {
+        level = __builtin_cpu_supports("avx512bw") && __builtin_cpu_supports("avx512vl") ? 2
+                : __builtin_cpu_supports("avx2")                                         ? 1
+                                                                                         : 0;
+    }
+    return level;
+}
+#endif
+#undef ZR_B64_ENC_LOOP
+#undef ZR_B64_DEC_LOOP
+
+/* Appends the text of `bytes` to `out`. */
+static ZR_UNUSED void zr_b64_encode(zr_slice bytes, int32_t url, zr_vec *out) {
+    const uint8_t *s = (const uint8_t *)bytes.p;
+    int64_t g = bytes.n / 3, rest = bytes.n % 3;
+    uint8_t *d = (uint8_t *)out->p + out->n;
+#ifdef ZR_B64_SIMD
+    int level = zr_b64_level();
+    if (level == 2) zr_b64_enc_avx512(d, s, g, url);
+    else if (level == 1) zr_b64_enc_avx2(d, s, g, url);
+    else
+#endif
+        zr_b64_enc_table(d, s, g, url);
+    s += 3 * g;
+    d += 4 * g;
+    int64_t n = 4 * g;
+    if (rest > 0) {
+        const char *abc = zr_b64_abc[url];
+        uint8_t a = s[0], b = rest == 2 ? s[1] : 0;
+        d[0] = (uint8_t)abc[a >> 2];
+        d[1] = (uint8_t)abc[(a & 3) << 4 | b >> 4];
+        n += 2;
+        if (rest == 2) d[2] = (uint8_t)abc[(b & 15) << 2], n++;
+        if (!url) {
+            if (rest == 1) d[2] = '=';
+            d[3] = '=';
+            n = 4 * g + 4;
+        }
+    }
+    out->n += n;
+}
+
+/* Appends the bytes `text` encodes to `out`, or gives INVALID (22) and leaves `out` as it was:
+ * for a character outside the alphabet, a length that can't be base64, padding where
+ * there should be none (or, without `url`, none where there should be), or leftover bits
+ * that aren't zero (RFC 4648 §3.5). */
+static ZR_UNUSED uint8_t zr_b64_decode(zr_slice text, int32_t url, zr_vec *out) {
+    const uint8_t *t = (const uint8_t *)text.p;
+    int64_t len = text.n, n = len, pads = 0;
+    while (n > 0 && t[n - 1] == '=' && pads < 2) n--, pads++;
+    if ((!url || pads > 0) && len % 4 != 0) return 22;
+    if (n % 4 == 1) return 22;
+    int64_t g = n / 4, rest = n % 4;
+    uint8_t *o = (uint8_t *)out->p + out->n;
+    uint8_t seen;
+#ifdef ZR_B64_SIMD
+    int level = zr_b64_level();
+    if (level == 2) seen = zr_b64_dec_avx512(o, t, g, url);
+    else if (level == 1) seen = zr_b64_dec_avx2(o, t, g, url);
+    else
+#endif
+        seen = zr_b64_dec_table(o, t, g, url);
+    int64_t m = 3 * g;
+    if (rest > 0) {
+        const uint8_t *val = zr_b64_val[url], *q = t + 4 * g;
+        uint8_t a = val[q[0]], b = val[q[1]], c = rest == 3 ? val[q[2]] : 0;
+        seen |= a | b | c;
+        if ((rest == 2 ? b & 15 : c & 3) != 0) return 22;
+        o[3 * g] = (uint8_t)(a << 2 | b >> 4);
+        if (rest == 3) o[3 * g + 1] = (uint8_t)(b << 4 | c >> 2);
+        m += rest - 1;
+    }
+    if (seen == 255) return 22;
+    out->n += m;
+    return 0;
+}
 
 /* ------------------------------------------------------------ random (STDLIB §8.2) */
 

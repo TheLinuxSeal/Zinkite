@@ -749,3 +749,32 @@ fn a_reference_to_an_object_survives_removals_from_its_fields() {
         "while `t` may still refer into it",
     );
 }
+
+/// Rule L1 (REFERENCES §7.4): a self-relative link points into the array it is stored in,
+/// and a pool link into its static array, followed through calls, constructors and
+/// `push(new ...)`; and a link whose array can't be told is an error.
+#[test]
+fn links_point_into_their_own_array() {
+    let defs = "class Node { i32 key; Node&<i32>? left; }\nclass Pair {\n    i32 a;\n    Pair&<i32>? partner;\n    new(Pair&? to, i32 a) { this.a = a; partner = to; }\n}\nclass P { i32 v; P&<u32 in ps>? next; }\nP[..>] ps = [];\nP[..>] others = [];\nvoid attach(Node& into, Node& what) { into.left .= what; }\n";
+    let main = |body: &str| {
+        format!(
+            "{}void main(string[.] args) {{ Node[..>] a = []; Node[..>] b = []; Node& x = a.push(new Node(1, null)); Node& y = b.push(new Node(2, null)); Pair[..>] p1 = []; Pair[..>] p2 = []; Pair& q = p1.push(new Pair(null, 1)); {} }}\n",
+            defs, body
+        )
+    };
+    ok(&main(
+        "x.left .= a.push(new Node(3, x)); a +> new Node(4, x); attach(x, x); p1.push(new Pair(q, 2)); P& g = ps.push(new P(1, null)); ps +> new P(2, g);",
+    ));
+    rejects(&main("x.left .= y;"), "this link is in an element of `a`, and what it would refer to is in `b`");
+    rejects(&main("a +> new Node(3, y);"), "this link is in an element of `a`, and what it would refer to is in `b`");
+    rejects(&main("attach(x, y);"), "this link is in an element of `a`, and what it would refer to is in `b`");
+    rejects(&main("p2.push(new Pair(q, 2));"), "this link is in an element of `p2`, and what it would refer to is in `p1`");
+    rejects(
+        &main("Node& either = args.len > 0 ? x : y; either.left .= x;"),
+        "can't tell which array this link is stored in: it may be `a` or `b`",
+    );
+    rejects(
+        &main("P& o = others.push(new P(1, null)); ps +> new P(2, o);"),
+        "this pool link is measured from `ps`, and what it would refer to is in `others`",
+    );
+}

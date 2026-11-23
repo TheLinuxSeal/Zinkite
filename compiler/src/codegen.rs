@@ -208,6 +208,27 @@ fn lit(s: &str) -> String {
     format!("zr_lit({}, {})", c_string(s.as_bytes()), s.len())
 }
 
+/// The bytes a value of an enum with `n` constants takes: the narrowest unsigned integer
+/// that holds every constant's index (DESIGN §11), so one of up to 256 constants is a byte.
+fn enum_bytes(n: usize) -> u32 {
+    if n <= 1 << 8 {
+        1
+    } else if n <= 1 << 16 {
+        2
+    } else {
+        4
+    }
+}
+
+/// The C type of an enum with `n` constants (`enum_bytes`).
+fn enum_c(n: usize) -> &'static str {
+    match enum_bytes(n) {
+        1 => "uint8_t",
+        2 => "uint16_t",
+        _ => "uint32_t",
+    }
+}
+
 fn prim_c(p: Prim) -> &'static str {
     match p {
         Prim::Bool => "bool",
@@ -693,7 +714,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             Ty::Class(id, args) => {
                 let c = &self.prog.classes[*id];
                 match c.kind {
-                    ClassKind::Enum => "int32_t".into(),
+                    ClassKind::Enum => enum_c(c.constants.len()).into(),
                     ClassKind::Interface => self.unsupported(span, "interfaces"),
                     _ if !args.is_empty() => self.class_inst(*id, args, span),
                     _ => self.class_name(*id),
@@ -728,6 +749,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                 let (prefix, fields) = match layout(t) {
                     Some(Layout::Ring) => ("zring", format!("{c} h; {c} n;", c = c)),
                     Some(Layout::Gap) => ("zgap", format!("{c} gs; {c} an; {c} cur;", c = c)),
+                    Some(Layout::Fixed) => ("zfix", String::new()),
                     _ => ("zcap", format!("{} n;", c)),
                 };
                 let name = format!("{}_{}_{}", prefix, ec.replace('*', "p"), k.size);
@@ -1068,8 +1090,10 @@ impl<'p, 'a> Gen<'p, 'a> {
         }
         let ptys: Vec<Ty> = m.params.iter().map(|t| self.sb(t)).collect();
         params.extend(self.params_c(&m.decl.params, &ptys));
+        let small = !self.is_main && m.decl.body.as_ref().is_some_and(|b| small_fn(&b.stmts));
         let sig = format!(
-            "static {} {}({})",
+            "static {}{} {}({})",
+            if small { "inline " } else { "" },
             ret,
             name,
             if params.is_empty() {
@@ -1143,13 +1167,27 @@ impl<'p, 'a> Gen<'p, 'a> {
                 }
             }
         }
-        let sig = format!("static {} {}({})", ret, name, params.join(", "));
+        let small = k.decl.is_none_or(|d| small_fn(&d.body.stmts));
+        let sig = format!(
+            "static {}{} {}({})",
+            if small { "inline " } else { "" },
+            ret,
+            name,
+            params.join(", ")
+        );
         let _ = writeln!(self.protos, "{};", sig);
         // Field initializers run first; growable fields start empty, set up by whoever
         // gave the object its storage.
         for (fname, ty, init) in &fields {
             if let Some(init) = init {
-                let code = self.store_into(&format!("self->f_{}", fname), ty, init);
+                let place = format!("self->f_{}", fname);
+                let code = match self.field_link(id, fname) {
+                    Some((kind, nullable)) => {
+                        let v = self.expr(init, ty);
+                        self.link_store(&place, &kind, nullable, &v, init.span)
+                    }
+                    None => self.store_into(&place, ty, init),
+                };
                 self.line(&format!("{};", code));
             }
         }
@@ -1165,7 +1203,15 @@ impl<'p, 'a> Gen<'p, 'a> {
                 let mut i = 0;
                 for (fname, ty, init) in &fields {
                     if init.is_none() && !starts_empty(ty) {
-                        self.line(&format!("self->f_{} = a{};", fname, i));
+                        let place = format!("self->f_{}", fname);
+                        let arg = format!("a{}", i);
+                        let code = match self.field_link(id, fname) {
+                            Some((kind, nullable)) => {
+                                self.link_store(&place, &kind, nullable, &arg, span)
+                            }
+                            None => format!("{} = {}", place, arg),
+                        };
+                        self.line(&format!("{};", code));
                         i += 1;
                     }
                 }
@@ -2569,6 +2615,8 @@ impl<'p, 'a> Gen<'p, 'a> {
                 )
             }
             Some(Layout::Ring) => ("_c.e".to_string(), format!("_c.h = 0; _c.n = {};", n)),
+            // A fixed array's length is its type's.
+            Some(Layout::Fixed) => ("_c.e".to_string(), String::new()),
             _ => ("_c.e".to_string(), format!("_c.n = {};", n)),
         };
         format!(
@@ -2643,20 +2691,20 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
             (Ty::Slice(_) | Ty::View(_), Ty::Slice(_) | Ty::View(_)) => code.to_string(),
             // Stops the program when it doesn't fit, as a cast does (DESIGN §9.1).
+            // A fixed array takes exactly its length.
             (Ty::Slice(_) | Ty::View(_), Ty::Array(..)) if cap_of(to) > 0 => {
                 let k = cap_of(to);
                 let loc = self.loc(span);
                 let fill = self.capped_fill(to, "_s.n", "_s.p", span);
-                let bad = self.on_fail(
-                    34,
-                    format!(
-                        "zr_stop({}, 34, \"the value doesn't fit in an array that holds {}\")",
-                        loc, k
-                    ),
-                );
+                let (test, msg) = if layout(to) == Some(Layout::Fixed) {
+                    ("!=", format!("the value isn't the {} elements the array holds", k))
+                } else {
+                    (">", format!("the value doesn't fit in an array that holds {}", k))
+                };
+                let bad = self.on_fail(34, format!("zr_stop({}, 34, \"{}\")", loc, msg));
                 format!(
-                    "({{ zr_slice _s = {}; if (_s.n > {}) {{ {}; }} {} _c; }})",
-                    code, k, bad, fill
+                    "({{ zr_slice _s = {}; if (_s.n {} {}) {{ {}; }} {} _c; }})",
+                    code, test, k, bad, fill
                 )
             }
             (Ty::Prim(_) | Ty::IntLit { .. } | Ty::FloatLit, Ty::Prim(p)) => {
@@ -3153,7 +3201,12 @@ impl<'p, 'a> Gen<'p, 'a> {
                     {
                         return r;
                     }
-                    (format!("self->f_{}", f.name), ty)
+                    let raw = format!("self->f_{}", f.name);
+                    let (c, i) = (*c, *i);
+                    match self.link_read(c, i, &raw, span) {
+                        Some(code) => (code, ty),
+                        None => (raw, ty),
+                    }
                 }
             }
             // A C macro or enum constant, as a literal of the type it's used as.
@@ -3207,7 +3260,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                         .iter()
                         .position(|k| *k == name.name)
                         .unwrap_or(0);
-                    return (format!("((int32_t){})", i), t);
+                    return (format!("(({}){})", enum_c(ci.constants.len()), i), t);
                 }
                 if let Some(i) = ci.fields.iter().position(|f| f.name == name.name) {
                     return (format!("zs{}_{}", c, i), ci.fields[i].ty.clone());
@@ -3254,19 +3307,23 @@ impl<'p, 'a> Gen<'p, 'a> {
         }
         match &deref {
             Ty::Class(c, cargs) => {
-                let f = self.prog.classes[*c]
+                let idx = self.prog.classes[*c]
                     .fields
                     .iter()
-                    .position(|f| f.name == name.name)
-                    .map(|i| self.field_ty(*c, i, cargs));
-                match f {
-                    Some(ft) => {
+                    .position(|f| f.name == name.name);
+                match idx {
+                    Some(i) => {
+                        let ft = self.field_ty(*c, i, cargs);
                         let ty = if matches!(ft, Ty::Nullable(_)) && is_ref(&t) {
                             t.clone()
                         } else {
                             ft
                         };
-                        (format!("{}f_{}", acc, name.name), ty)
+                        let raw = format!("{}f_{}", acc, name.name);
+                        match self.link_read(*c, i, &raw, span) {
+                            Some(code) => (code, ty),
+                            None => (raw, ty),
+                        }
                     }
                     None => (self.unsupported(span, "this field"), t),
                 }
@@ -3305,6 +3362,9 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
             Ty::Array(_, k) if k.has_cursor() && name.name == "cursor" => {
                 (format!("{}bn", acc), Ty::i64())
+            }
+            Ty::Array(_, k) if layout(&bty) == Some(Layout::Fixed) && name.name == "len" => {
+                (format!("((int64_t){})", k.size), Ty::i64())
             }
             Ty::Array(..) | Ty::Slice(_) | Ty::View(_) if name.name == "len" => {
                 (format!("((int64_t){}n)", acc), Ty::i64())
@@ -3550,6 +3610,13 @@ impl<'p, 'a> Gen<'p, 'a> {
             && let Some(code) = self.record_field_write(target, value)
         {
             return code;
+        }
+        // Binding a link stores the offset to what it will refer to (REFERENCES §7.2).
+        let binds = op == AssignOp::Rebind
+            || (op == AssignOp::Assign && self.facts.binds.contains(&key(span)));
+        if binds && let Some((raw, kind, nullable, ft)) = self.link_place(target) {
+            let v = self.expr(value, &ft);
+            return self.link_store(&raw, &kind, nullable, &v, span);
         }
         match op {
             AssignOp::Rebind => {
@@ -5173,17 +5240,21 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
         };
         match m {
-            "push" => {
+            "push" | "pushFront" | "insert" => {
+                let at = match m {
+                    "push" => Where::End,
+                    "pushFront" => Where::Front,
+                    _ => Where::Cursor,
+                };
+                if let Some(build) = self.build_linked(&arr, &el, &args[0].expr, at, span) {
+                    return CallOut {
+                        code: format!("({{ {} {} *_e; {} _e; }})", ptr, ec, build),
+                        ret: Ty::Ref(Box::new(el.clone())),
+                        fails: false,
+                    };
+                }
                 let x = arg(self, 0);
-                put(self, Where::End, x)
-            }
-            "pushFront" => {
-                let x = arg(self, 0);
-                put(self, Where::Front, x)
-            }
-            "insert" => {
-                let x = arg(self, 0);
-                put(self, Where::Cursor, x)
+                put(self, at, x)
             }
             "pop" => take(self, Where::End),
             "popFront" => take(self, Where::Front),
@@ -5650,13 +5721,17 @@ impl<'p, 'a> Gen<'p, 'a> {
         if lay.capped() {
             *fails = true;
         }
-        let x = self.expr(rhs, &el);
         let arr = Arr {
             a: "_arr".into(),
             lay,
             ec: ec.clone(),
             cap,
         };
+        if let Some(build) = self.build_linked(&arr, &el, rhs, at, e.span) {
+            stmts.push_str(&format!("{{ {} *_e; {} (void)_e; }} ", ec, build));
+            return;
+        }
+        let x = self.expr(rhs, &el);
         stmts.push_str(&format!(
             "{{ {} _x = {}; {} *_e; {} (void)_e; }} ",
             ec,
@@ -5664,6 +5739,174 @@ impl<'p, 'a> Gen<'p, 'a> {
             ec,
             arr.put(at)
         ));
+    }
+
+    /// What field `i` of class `c` is, when it is a link (REFERENCES §7.2, §7.3).
+    pub(super) fn link_kind(&self, c: ClassId, i: usize) -> Option<LinkKind> {
+        let f = &self.prog.classes[c].fields[i];
+        if let Some(w) = f.link {
+            return Some(LinkKind::Rel(w));
+        }
+        let (w, _, _) = f.pool_link.as_ref()?;
+        let (k, j) = self.facts.pool_arrays.get(&(c, i))?;
+        Some(LinkKind::Pool(*w, format!("zs{}_{}.p", k, j)))
+    }
+
+    /// Field `name` of class `c`, and whether it's nullable, when it is a link.
+    fn field_link(&self, c: ClassId, name: &str) -> Option<(LinkKind, bool)> {
+        let i = self.prog.classes[c].fields.iter().position(|f| f.name == name)?;
+        let kind = self.link_kind(c, i)?;
+        let nullable = matches!(self.prog.classes[c].fields[i].ty, Ty::Nullable(_));
+        Some((kind, nullable))
+    }
+
+    /// Following field `i` of class `c`, the C lvalue `raw`, when it is a link: the
+    /// reference it holds.
+    fn link_read(&mut self, c: ClassId, i: usize, raw: &str, span: Span) -> Option<String> {
+        let kind = self.link_kind(c, i)?;
+        let f = &self.prog.classes[c].fields[i];
+        let (target, nullable) = match &f.ty {
+            Ty::Nullable(x) => (x.unref().clone(), true),
+            t => (t.unref().clone(), false),
+        };
+        let tc = self.cty(&target, span);
+        Some(match (kind, nullable) {
+            (LinkKind::Rel(_), true) => format!("ZR_LINK_OR_NULL({}, {})", tc, raw),
+            (LinkKind::Rel(_), false) => format!("ZR_LINK({}, {})", tc, raw),
+            (LinkKind::Pool(_, base), true) => {
+                format!("ZR_PLINK_OR_NULL({}, {}, {})", tc, raw, base)
+            }
+            (LinkKind::Pool(_, base), false) => format!("ZR_PLINK({}, {}, {})", tc, raw, base),
+        })
+    }
+
+    /// When `e` is a field holding a link: the field as a C lvalue, what kind of link,
+    /// whether it's nullable, and its type.
+    fn link_place(&mut self, e: &Expr) -> Option<(String, LinkKind, bool, Ty)> {
+        let e = strip_paren(e);
+        match &e.kind {
+            E::Member { expr: base, name } => {
+                let bt = self.ty(base);
+                let Ty::Class(c, cargs) = settle(bt.unref()) else {
+                    return None;
+                };
+                let i = self.prog.classes[c]
+                    .fields
+                    .iter()
+                    .position(|f| f.name == name.name)?;
+                let w = self.link_kind(c, i)?;
+                let ft = self.field_ty(c, i, &cargs);
+                let nullable = matches!(ft, Ty::Nullable(_));
+                let (b, bty) = self.rv(base);
+                let acc = if is_ref(&bty) {
+                    format!("({})->", b)
+                } else {
+                    format!("({}).", b)
+                };
+                Some((format!("{}f_{}", acc, name.name), w, nullable, ft))
+            }
+            E::Ident(_) => match self.facts.names.get(&key(e.span)) {
+                Some(NameRes::Field(c, i)) => {
+                    let (c, i) = (*c, *i);
+                    let f = &self.prog.classes[c].fields[i];
+                    if f.is_static {
+                        return None;
+                    }
+                    let name = f.name.clone();
+                    let w = self.link_kind(c, i)?;
+                    let ft = self.field_ty(c, i, &self.cur_cargs.clone());
+                    let nullable = matches!(ft, Ty::Nullable(_));
+                    Some((format!("self->f_{}", name), w, nullable, ft))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Stores a link to `target`, a C pointer, in the field `raw`: its offset from the
+    /// field, or from the start of its pool, which stops the program when it doesn't fit
+    /// (REFERENCES §7.4, L4).
+    pub(super) fn link_store(
+        &mut self,
+        raw: &str,
+        kind: &LinkKind,
+        nullable: bool,
+        target: &str,
+        span: Span,
+    ) -> String {
+        let loc = self.loc(span);
+        match kind {
+            LinkKind::Rel(w) => {
+                let fail = self.on_fail(
+                    34,
+                    format!(
+                        "zr_stop({}, 34, \"this link's target is too far away for its {}-byte offset\")",
+                        loc,
+                        bits(*w) / 8
+                    ),
+                );
+                format!(
+                    "ZR_LINK_SET({}, {}, {}, {})",
+                    raw,
+                    target,
+                    if nullable { 1 } else { 0 },
+                    fail
+                )
+            }
+            LinkKind::Pool(w, base) => {
+                let fail = self.on_fail(
+                    34,
+                    format!(
+                        "zr_stop({}, 34, \"this pool link's target is too far into its array for its {}-byte offset\")",
+                        loc,
+                        bits(*w) / 8
+                    ),
+                );
+                format!("ZR_PLINK_SET({}, {}, {}, {})", raw, target, base, fail)
+            }
+        }
+    }
+
+    /// A value with self-relative links, inserted into an array: it is built in its slot,
+    /// since its links are measured from where it sits (REFERENCES §7.4, L2). Statements
+    /// that leave `_e` pointing at it; `None` when the element type has no links.
+    fn build_linked(
+        &mut self,
+        arr: &Arr,
+        el: &Ty,
+        value: &Expr,
+        at: Where,
+        span: Span,
+    ) -> Option<String> {
+        if !self.prog.link_bearing(el) {
+            return None;
+        }
+        let v = strip_paren(value);
+        let E::New { args, .. } = &v.kind else {
+            return Some(self.unsupported(span, "copying a value with links") + ";");
+        };
+        if arr.lay != Layout::Vec || at != Where::End {
+            return Some(
+                self.unsupported(span, "values with links in this kind of array") + ";",
+            );
+        }
+        if let Some(f) = self.facts.calls.get(&key(v.span))
+            && let Origin::Ctor(c, i) = f.origin
+            && self.prog.classes[c].ctors[i].can_fail
+        {
+            return Some(
+                self.unsupported(span, "a constructor that can fail, for a value with links")
+                    + ";",
+            );
+        }
+        let st = self.construct("(*_e)", args, v.span);
+        Some(format!(
+            "_e = &(({ec}*){a}->p)[{a}->n++]; (void){st};",
+            ec = arr.ec,
+            a = arr.a,
+            st = st
+        ))
     }
 
     fn remove_op(&mut self, op: PostfixOp, x: &Expr, span: Span) -> CallOut {
@@ -5726,6 +5969,8 @@ enum Layout {
     Chk,
     /// Inline in its parent: `{n, e[k]}`.
     Capped,
+    /// Inline and fixed, `T[.k]`: always exactly `k` elements, so just `{e[k]}`.
+    Fixed,
     /// Capped, with a start slot: an inline ring buffer `{h, n, e[k]}`.
     Ring,
     /// Capped, with a cursor: an inline gap buffer `{gs, an, e[k]}`, the elements before
@@ -5747,6 +5992,7 @@ fn layout(t: &Ty) -> Option<Layout> {
         Ty::Array(_, k) if k.cap == CapKind::Capped && (k.push_front() || k.pop_front()) => {
             Some(Layout::Ring)
         }
+        Ty::Array(_, k) if k.cap == CapKind::Capped && k.is_frozen() => Some(Layout::Fixed),
         Ty::Array(_, k) if k.cap == CapKind::Capped => Some(Layout::Capped),
         Ty::Array(_, k) if k.cap == CapKind::Chunked => Some(Layout::Chk),
         Ty::Array(_, k) if k.has_cursor() => Some(Layout::Cur),
@@ -5760,7 +6006,7 @@ fn layout(t: &Ty) -> Option<Layout> {
 impl Layout {
     /// Stored inline, with a capacity: full arrays fail with FULL (DESIGN §4.7).
     fn capped(self) -> bool {
-        matches!(self, Layout::Capped | Layout::Ring | Layout::Gap)
+        matches!(self, Layout::Capped | Layout::Fixed | Layout::Ring | Layout::Gap)
     }
 }
 
@@ -5785,7 +6031,17 @@ fn counter(k: u64) -> &'static str {
     }
 }
 
-#[derive(Clone, Copy)]
+/// A link field (REFERENCES §7.2, §7.3).
+#[derive(Clone, Debug)]
+pub(super) enum LinkKind {
+    /// Self-relative: the signed offset from the field, of this width.
+    Rel(Prim),
+    /// A pool link: the unsigned offset plus one from the start of a static array, of this
+    /// width, and the C expression for that start.
+    Pool(Prim, String),
+}
+
+#[derive(Clone, Copy, PartialEq)]
 enum Where {
     End,
     Front,
@@ -5807,6 +6063,7 @@ impl Arr {
         match self.lay {
             Layout::Cur => format!("zr_cur_len({})", self.a),
             Layout::Gap => format!("((int64_t){a}->gs + {a}->an)", a = self.a),
+            Layout::Fixed => format!("((int64_t){})", self.cap),
             _ => format!("{}->n", self.a),
         }
     }
@@ -5927,7 +6184,7 @@ impl Arr {
     /// The element at logical position `i`, as an lvalue.
     fn at(&self, i: &str) -> String {
         match self.lay {
-            Layout::Capped => format!("{}->e[{}]", self.a, i),
+            Layout::Capped | Layout::Fixed => format!("{}->e[{}]", self.a, i),
             Layout::Ring => format!(
                 "{a}->e[({a}->h + (int64_t)({i})) % {k}]",
                 a = self.a,
@@ -6043,6 +6300,8 @@ impl Arr {
     fn take(&self, at: Where) -> String {
         let (a, ec) = (&self.a, &self.ec);
         match (self.lay, at) {
+            // Nothing removes from a fixed array (the checker sees to it).
+            (Layout::Fixed, _) => String::new(),
             (Layout::Capped, _) => format!(
                 "if ({a}->n > 0) {{ _v = {a}->e[--{a}->n]; _s = 0; }}",
                 a = a
@@ -6252,6 +6511,45 @@ fn stmt_idents(s: &Stmt, out: &mut Vec<Span>) {
 }
 
 /// Whether C code is a plain variable name, whose address can be taken.
+/// Whether a function is small enough to ask the C compiler to inline it: a few
+/// straight-line statements and few operations, measured before its checks are added.
+/// Each checked operation adds a branch and a call to the C, so without the hint a
+/// one-line function such as spectralnorm's `a(i, j)` looks too big to inline, and stays
+/// a call in the loop that uses it.
+fn small_fn(stmts: &[Stmt]) -> bool {
+    fn count(e: &Expr) -> usize {
+        1 + crate::check::expr_children(e).into_iter().map(count).sum::<usize>()
+    }
+    fn stmt(s: &Stmt, n: &mut usize) -> bool {
+        match &s.kind {
+            S::Expr(e) | S::Yield(e) => {
+                *n += count(e);
+                true
+            }
+            S::Return { value, .. } => {
+                *n += 1 + value.as_ref().map_or(0, count);
+                true
+            }
+            S::Local(d) => {
+                for v in &d.decls {
+                    *n += 1 + v.init.as_ref().map_or(0, count);
+                }
+                true
+            }
+            S::If { cond, then, els } => {
+                *n += count(cond);
+                stmt(then, n) && els.as_ref().is_none_or(|e| stmt(e, n))
+            }
+            S::Block(b) => b.stmts.iter().all(|x| stmt(x, n)),
+            S::Empty => true,
+            // Loops, switches, defers and the rest.
+            _ => false,
+        }
+    }
+    let mut n = 0;
+    stmts.len() <= 6 && stmts.iter().all(|s| stmt(s, &mut n)) && n <= 48
+}
+
 fn is_c_name(c: &str) -> bool {
     !c.is_empty() && c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }

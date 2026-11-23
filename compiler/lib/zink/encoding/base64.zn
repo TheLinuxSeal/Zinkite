@@ -1,99 +1,35 @@
 package zink.encoding;
 
 // Base64 (RFC 4648, STDLIB §8.4): the standard alphabet with padding, and the URL-safe
-// one without.
+// one without. The loops are the runtime's (`zr_b64_encode`, `zr_b64_decode`): they
+// handle whole groups with no exits, so the C compiler vectorizes them.
 public class base64 {
-    private static string STD = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    private static string URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    private static extern("zr_b64_encode") void cEncode(string bytes, i32 url, u8[..>]& out);
+    private static extern("zr_b64_decode") u8 cDecode(string text, i32 url, u8[..>]& out);
 
-    public static u8[.] encode(string bytes) { return encodeWith(bytes, STD, true); }
-    public static u8[.] encodeUrl(string bytes) { return encodeWith(bytes, URL, false); }
+    public static u8[.] encode(string bytes) {
+        u8[..>] out = [];
+        cEncode(bytes, 0, out);
+        return out;
+    }
+
+    public static u8[.] encodeUrl(string bytes) {
+        u8[..>] out = [];
+        cEncode(bytes, 1, out);
+        return out;
+    }
 
     // Appends the decoded bytes to out. INVALID for a character outside the alphabet,
-    // bad padding or a length that can't be base64.
+    // bad padding, a length that can't be base64, or leftover bits that aren't zero; then
+    // out is as it was.
     public static void decode(string text, u8[..>]& out) {
-        u8 st = decodeWith(text, false, out);
+        u8 st = cDecode(text, 0, out);
         return #st;
     }
 
     // Padding is optional.
     public static void decodeUrl(string text, u8[..>]& out) {
-        u8 st = decodeWith(text, true, out);
+        u8 st = cDecode(text, 1, out);
         return #st;
-    }
-
-    private static u8[.] encodeWith(string b, string abc, bool pad) {
-        u8[..>] out = [];
-        i64 i = 0;
-        while (i + 3 <= b.len) {
-            u32 n = ((u32) b[i] << 16) | ((u32) b[i + 1] << 8) | (u32) b[i + 2];
-            out +> abc[(i64) (n >> 18) & 63];
-            out +> abc[(i64) (n >> 12) & 63];
-            out +> abc[(i64) (n >> 6) & 63];
-            out +> abc[(i64) n & 63];
-            i += 3;
-        }
-        i64 rest = b.len - i;
-        if (rest == 1) {
-            u32 n = (u32) b[i] << 16;
-            out +> abc[(i64) (n >> 18) & 63];
-            out +> abc[(i64) (n >> 12) & 63];
-            if (pad) { out.append("=="); }
-        } else if (rest == 2) {
-            u32 n = ((u32) b[i] << 16) | ((u32) b[i + 1] << 8);
-            out +> abc[(i64) (n >> 18) & 63];
-            out +> abc[(i64) (n >> 12) & 63];
-            out +> abc[(i64) (n >> 6) & 63];
-            if (pad) { out +> '='; }
-        }
-        return out;
-    }
-
-    // 0..63, or -1.
-    private static i64 value(u8 c, bool url) {
-        if (c >= 'A' && c <= 'Z') { return (i64) (c - 'A'); }
-        if (c >= 'a' && c <= 'z') { return (i64) (c - 'a') + 26; }
-        if (c >= '0' && c <= '9') { return (i64) (c - '0') + 52; }
-        if (c == (url ? '-' : '+')) { return 62; }
-        if (c == (url ? '_' : '/')) { return 63; }
-        return -1;
-    }
-
-    private static u8 decodeWith(string t, bool url, u8[..>]& out) {
-        i64 n = t.len;
-        // Padding: required without `url` to make whole groups, allowed with it.
-        i64 pads = 0;
-        while (n > 0 && t[n - 1] == '=' && pads < 2) {
-            n--;
-            pads++;
-        }
-        if (!url && (t.len % 4 != 0)) {
-            return status.INVALID;
-        }
-        if (url && pads > 0 && t.len % 4 != 0) {
-            return status.INVALID;
-        }
-        if (n % 4 == 1) {
-            return status.INVALID;
-        }
-        u32 acc = 0;
-        i64 bits = 0;
-        for (i64 i = 0; i < n; i++) {
-            i64 v = value(t[i], url);
-            if (v < 0) {
-                return status.INVALID;
-            }
-            acc = (acc << 6) | (u32) v;
-            bits += 6;
-            if (bits >= 8) {
-                bits -= 8;
-                out +> (u8) ((acc >> (u32) bits) & 255);
-            }
-        }
-        // The bits left over must be zero (RFC 4648 §3.5).
-        if ((acc & (((u32) 1 << (u32) bits) - 1)) != 0) {
-            return status.INVALID;
-        }
-        return 0;
     }
 }

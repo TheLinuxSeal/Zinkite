@@ -89,9 +89,14 @@ Done:
   each by a statement of its own (V5). A variable-size local, like a growable one,
   can't be in scope during a recursive call (§8.4).
 
+- rule L (links, `REFERENCES.md` §7): a self-relative or pool link points into its own
+  array, checked with the inferred roots through calls and constructors (L1); a value
+  with self-relative links is built in its array by `push(new ...)` and never copied
+  (L2); and an offset that doesn't fit its width stops the program (L4). A link field
+  is its 1-, 2- or 4-byte offset.
+
 Not yet:
-- rule L (links) of `REFERENCES.md`, and rule G's check that nothing grows an array
-  while text is built in it;
+- rule G's check that nothing grows an array while text is built in it;
 - the lint for unused array capabilities (DESIGN §4.3).
 
 The checker models `zink.lang` (output, `status`, `min`, `max` and the rest),

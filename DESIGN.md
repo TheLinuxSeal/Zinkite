@@ -205,6 +205,8 @@ The cap says **where the data lives** (inline or on a stack). The slots say **wh
 
 There is no `T[k]`: `T[.k]` is the only fixed-size spelling.
 
+- **A fixed array always has exactly its `k` elements.** A literal gives all of them, or is `[]` for `k` zero values; one of any other length is a compile error, and a string literal for a `u8[.k]` must have exactly `k` bytes. A slice converted to one must be `k` long, or the program stops. Its length isn't stored, so its zero value is all zero bytes, and `len` is the constant `k`.
+
 ### 4.3 Layouts the compiler picks (Decided)
 
 | Pattern | Layout | Notes |
@@ -527,8 +529,8 @@ string w = outer;
 ### 5.4 Links inside data (Decided)
 The notes said "no pointers inside records", but also that `push` returns a reference "so elements can be linked while building". Three kinds of link are allowed, for different jobs (`REFERENCES.md` §7):
 1. **References in fields**: `T&`, `T&?`, interface references and slices, rooted like any other reference. An array can hold references rooted at itself, so they also link elements of one array. Each takes 8 bytes, and a copy still points at the original.
-2. **Self-relative links**: `T&<i32>` (or `<i16>`, `<i8>`) stores a signed byte offset from the field to its target in the same array, as Goose's relative references do. They are compact, and mean the same thing wherever the whole array is copied. Saving them as bytes needs a check that is Open (`REFERENCES.md` §12). A value with these links can't be copied out of its array, only referenced in place.
-3. **Pool links**: `T&<u32 in arr>` stores an offset from the start of `arr`, a static grow-only array, so values holding them can be copied anywhere (Goose's pool-relative references). The built-in `pool<T>` (§3.5) isn't such an array.
+2. **Self-relative links**: `T&<i32>` (or `<i16>`, `<i8>`) stores a signed byte offset from the field to its target in the same array, as Goose's relative references do. They are compact, and mean the same thing wherever the whole array is copied. Saving them as bytes needs a check that is Open (`REFERENCES.md` §12). A value with these links can't be copied out of its array, only referenced in place: it is built in its slot by `push(new ...)` (`REFERENCES.md` §7.5). The benchmark tree's 12-byte nodes with them ran in 2.1 s and 386 MB, against 3.4 s and 770 MB with 8-byte references (measured on 2026-11-22).
+3. **Pool links**: `T&<u32 in arr>` stores an offset from the start of `arr`, a static grow-only array, so values holding them can be copied anywhere (Goose's pool-relative references). The built-in `pool<T>` (§3.5) isn't such an array. A link of either kind points only into its own array, which the compiler checks with the roots it infers (`REFERENCES.md` §7.5).
 
 Links and references in fields can point only into arrays whose elements stay in their slots: grow-only and frozen arrays, capped ones included, except a capped ring that grows at both ends (`T[>.>k]`), which can wrap. References in fields may also point into pools (`REFERENCES.md` §7.4). A field may also refer to a whole array, as the library's writers do (`REFERENCES.md` §7.1).
 
@@ -1426,6 +1428,7 @@ A generic body can use only what its bounds allow (§10). Seven bounds for the b
 - **Alignment**: a fixed-size value is aligned to its largest field. Variable-size records are packed; reads use unaligned loads, which x86-64 and AArch64 support.
 - **Data stacks**: each is an address-space reservation (`#data_stack_gb`, 64 GB by default) ending in an unmapped guard page. The compiler assigns stacks statically, and a scope saves and restores the tops of the stacks it uses.
 - **Static data** holds literals, statics, enum constants and interface method tables.
+- **An enum value is its constant's index**, in the narrowest unsigned integer that holds every index: one byte for up to 256 constants, two for up to 65,536, four beyond. A field of an enum type is sorted among the fixed-size fields by that width, so it goes after the wider fields and doesn't make them pad. In a variable-size record, which is packed, a one-byte enum takes one byte.
 - **References** are plain 8-byte pointers. Interface references add a method-table pointer, and slices add a length.
 
 ---
@@ -1463,6 +1466,7 @@ There is no allocator, no counting and no collector. With dead-code elimination 
 - **The costs**: running or building needs a C compiler installed, which most Linux systems have, and the first run after an edit pays for compiling, about a quarter of a second for a small program (measured on 2026-11-20). `zink run` code at `-O0` is slower than `-O2` in hot loops, so `zink run -O` builds at `-O2`.
 - **A built-in TinyCC for `zink run` is a maybe-later** (§17), moved there from Decided on 2026-11-20. It would make the first run faster and need no installed compiler, but it lacks what the generated C relies on.
 - **Calling convention**: the platform's C ABI. The status rides in a small returned struct, `{value, status}`, which C compilers return in two registers on Linux x86-64 and AArch64. Large results are built in place through a destination pointer (§3.3).
+- **Small functions are emitted `static inline`**: a few straight-line statements and few operations, counted before checks are added. Each checked operation adds a branch and a call to the C, so without the hint the C compiler judges a one-line function too big to inline, and it stays a call in the loop that uses it: spectralnorm's `a(i, j)` ran three times as fast with it (7.4 s against 2.5 s, measured on 2026-11-22).
 - **Debug info** comes from the C compiler's `-g`, with `#line` directives pointing debuggers and messages at the `.zn` source.
 - **A direct machine-code backend** stays possible later, over the same typed IR, if depending on a C compiler ever becomes a problem.
 

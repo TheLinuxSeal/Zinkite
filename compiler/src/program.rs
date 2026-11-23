@@ -26,6 +26,13 @@ pub enum ClassKind {
 pub struct FieldInfo<'a> {
     pub name: String,
     pub ty: Ty,
+    /// A self-relative link, `T&<i32>` or `T&<i32>?` (REFERENCES §7.2): the width of the
+    /// offset it stores. Its type is the reference it holds.
+    pub link: Option<crate::token::Prim>,
+    /// A pool link, `T&<u32 in arr>` or `T&<u32 in arr>?` (REFERENCES §7.3): the width of
+    /// its offset, and the static array it is measured from, by name, which the checker
+    /// resolves. Its type is the reference it holds, as for a self-relative link.
+    pub pool_link: Option<(crate::token::Prim, Vec<String>, Span)>,
     pub is_static: bool,
     pub is_private: bool,
     /// Neither: package-private (DESIGN §6.1).
@@ -644,6 +651,8 @@ impl<'a> Program<'a> {
             self.classes[id].fields.push(FieldInfo {
                 name: v.name.name.clone(),
                 ty: ty.clone(),
+                link: self_link(&f.ty),
+                pool_link: pool_link(&f.ty),
                 is_static,
                 is_private,
                 is_public,
@@ -1039,6 +1048,36 @@ impl<'a> Program<'a> {
         self.variable_size_in(t, 0)
     }
 
+    /// Whether a value of `t` holds a self-relative link (REFERENCES §7.2), itself or in
+    /// a field it holds by value. Its links are measured from where it sits, so it is
+    /// built where it is stored and never copied (L2). An array of them can be copied
+    /// whole, as its links stay inside it (L1), so an array type isn't one.
+    pub fn link_bearing(&self, t: &Ty) -> bool {
+        self.link_bearing_in(t, 0)
+    }
+
+    fn link_bearing_in(&self, t: &Ty, depth: u32) -> bool {
+        if depth > 32 {
+            return false;
+        }
+        let Ty::Class(id, args) = t else {
+            return false;
+        };
+        let c = &self.classes[*id];
+        if !matches!(c.kind, ClassKind::Class | ClassKind::Root) {
+            return false;
+        }
+        let map: Vec<(String, Ty)> = c
+            .type_params
+            .iter()
+            .zip(args)
+            .map(|(p, a)| (p.name.clone(), a.clone()))
+            .collect();
+        c.fields.iter().filter(|f| !f.is_static).any(|f| {
+            f.link.is_some() || self.link_bearing_in(&f.ty.subst(&map), depth + 1)
+        })
+    }
+
     fn variable_size_in(&self, t: &Ty, depth: u32) -> bool {
         // A class can't hold itself by value; the limit only stops a runaway.
         if depth > 32 {
@@ -1093,10 +1132,12 @@ impl<'a> Program<'a> {
             Ty::Param(n) => n.clone(),
             Ty::Array(e, k) => {
                 let cap = match k.cap {
-                    CapKind::None => "",
-                    CapKind::Capped => "k",
-                    CapKind::Varint => "*",
-                    CapKind::Chunked => "$",
+                    CapKind::None => String::new(),
+                    // The capacity when it's a number; `k` for one given by a constant.
+                    CapKind::Capped if k.size > 0 => k.size.to_string(),
+                    CapKind::Capped => "k".into(),
+                    CapKind::Varint => "*".into(),
+                    CapKind::Chunked => "$".into(),
                 };
                 format!("{}[{}{}]", self.show(e), k.slots(), cap)
             }
@@ -1143,5 +1184,36 @@ pub fn starts_empty(t: &Ty) -> bool {
         Ty::Array(_, k) => k.is_editable(),
         Ty::Map(..) | Ty::Set(_) | Ty::Pool(_) => true,
         _ => false,
+    }
+}
+
+/// The width of a self-relative link field's offset, from its declared type: `T&<i32>` or
+/// `T&<i32>?`. A pool link, `T&<u32 in arr>`, isn't one: it is kept as a plain reference.
+fn self_link(t: &ast::Type) -> Option<crate::token::Prim> {
+    match &t.kind {
+        ast::TypeKind::Ref {
+            link: Some(l), ..
+        } if l.pool.is_none() => Some(l.width),
+        ast::TypeKind::Nullable(inner) => self_link(inner),
+        _ => None,
+    }
+}
+
+/// A pool link field's width and array, from its declared type: `T&<u32 in arr>`.
+fn pool_link(t: &ast::Type) -> Option<(crate::token::Prim, Vec<String>, Span)> {
+    match &t.kind {
+        ast::TypeKind::Ref {
+            link: Some(ast::Link {
+                width,
+                pool: Some(q),
+            }),
+            ..
+        } => Some((
+            *width,
+            q.parts.iter().map(|p| p.name.clone()).collect(),
+            q.span,
+        )),
+        ast::TypeKind::Nullable(inner) => pool_link(inner),
+        _ => None,
     }
 }

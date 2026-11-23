@@ -94,6 +94,9 @@ pub struct Facts {
     /// Calls, insertions and removals that can fail whose status nothing reads, by span,
     /// with the name to report: a nonzero status there stops the program (DESIGN §7.6).
     pub unchecked: HashMap<(u32, u32), String>,
+    /// Each pool link field, `classes[c].fields[i]`, to the static array it is measured
+    /// from (REFERENCES §7.3).
+    pub pool_arrays: HashMap<(ClassId, usize), (ClassId, usize)>,
 }
 
 pub enum NameRes {
@@ -245,6 +248,9 @@ struct Checker<'p, 'a> {
     /// Unsuffixed literals above `i128.MAX`, typed `u128`, by span: for saying they
     /// don't fit rather than that a `u128` doesn't convert.
     huge_lits: HashMap<(u32, u32), u128>,
+    /// `new` expressions inserted into an array, by span: the only place a value with
+    /// self-relative links is made, since it's built in its slot (REFERENCES §7.4, L2).
+    in_place: HashSet<(u32, u32)>,
 }
 
 fn is_status_const(name: &str) -> bool {
@@ -288,6 +294,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             root_new_ok: false,
             last_call_mut: false,
             huge_lits: HashMap::new(),
+            in_place: HashSet::new(),
         }
     }
 
@@ -526,6 +533,9 @@ impl<'p, 'a> Checker<'p, 'a> {
                     if self.is_root_value(ty) {
                         self.root_by_value(p.ty.span, ty, "passed");
                     }
+                    if self.prog.link_bearing(ty) {
+                        self.links_by_value(p.ty.span, ty, "passed");
+                    }
                     self.declare_param(&p.name, ty.clone());
                 }
                 self.block(&d.body);
@@ -558,11 +568,19 @@ impl<'p, 'a> Checker<'p, 'a> {
                     if self.is_root_value(ty) {
                         self.root_by_value(p.ty.span, ty, "passed");
                     }
+                    if self.prog.link_bearing(ty) {
+                        self.links_by_value(p.ty.span, ty, "passed");
+                    }
                 }
                 if self.is_root_value(&m.ret)
                     && let ast::ReturnType::Type(t) = &m.decl.ret
                 {
                     self.root_by_value(t.span, &m.ret, "returned");
+                }
+                if self.prog.link_bearing(&m.ret)
+                    && let ast::ReturnType::Type(t) = &m.decl.ret
+                {
+                    self.links_by_value(t.span, &m.ret, "returned");
                 }
                 if m.is_mut && m.is_static {
                     self.err_help(
@@ -702,6 +720,90 @@ impl<'p, 'a> Checker<'p, 'a> {
                     d.span,
                     "this constructor has the same parameter types as an earlier one (DESIGN §6.5)",
                 );
+            }
+        }
+        // A link holds only an offset, so it refers to a value, not an interface, whose
+        // references carry a method table too (REFERENCES §7.2).
+        for f in c.fields.iter().filter(|f| f.link.is_some() || f.pool_link.is_some()) {
+            let target = match &f.ty {
+                Ty::Nullable(x) => x.unref(),
+                t => t.unref(),
+            };
+            if let Ty::Class(t, _) = target
+                && prog.classes[*t].kind == ClassKind::Interface
+            {
+                self.err_help(
+                    f.span,
+                    "a link can't refer to an interface: it holds only an offset, and an interface reference needs its method table too",
+                    "make it a plain reference, `Shape&?`, or link to the class itself",
+                );
+            }
+        }
+        // A pool link is measured from a static grow-only array of what it refers to
+        // (REFERENCES §7.3): `arr`, a static of this class or of the script, or `C.arr`.
+        for (fi, f) in c.fields.iter().enumerate() {
+            let Some((_, name, span)) = &f.pool_link else { continue };
+            let owner = match name.as_slice() {
+                [_] => {
+                    let mine = c.fields.iter().any(|x| x.is_static && x.name == name[0]);
+                    if mine {
+                        Some(id)
+                    } else {
+                        prog.files[c.file].script
+                    }
+                }
+                [cls, _] => match prog.find_class(c.file, cls) {
+                    crate::program::Lookup::Found(k) => Some(k),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let field = name.last().cloned().unwrap_or_default();
+            let found = owner.and_then(|k| {
+                prog.classes[k]
+                    .fields
+                    .iter()
+                    .position(|x| x.is_static && x.name == field)
+                    .map(|i| (k, i))
+            });
+            let Some((k, i)) = found else {
+                self.err_help(
+                    *span,
+                    format!("a pool link is measured from a static array, and there is no static `{}`", name.join(".")),
+                    "declare the array as a static, `static T[..>] arr = [];`, or at the top of a script (REFERENCES §7.3)",
+                );
+                continue;
+            };
+            let target = match &f.ty {
+                Ty::Nullable(x) => x.unref().clone(),
+                t => t.unref().clone(),
+            };
+            let at = &prog.classes[k].fields[i].ty;
+            let grow_only = matches!(at, Ty::Array(_, ak)
+                if ak.cap == CapKind::None && ak.end == '>' && ak.start == '.' && ak.cursor == '.');
+            match at {
+                Ty::Array(el, _) if grow_only && **el == target => {
+                    self.facts.pool_arrays.insert((id, fi), (k, i));
+                }
+                Ty::Array(el, _) if grow_only => self.err(
+                    *span,
+                    format!(
+                        "a pool link to {} must be measured from an array of {}, and `{}` holds {}",
+                        self.show(&target),
+                        self.show(&target),
+                        field,
+                        self.show(el)
+                    ),
+                ),
+                t => self.err_help(
+                    *span,
+                    format!(
+                        "a pool link is measured from a grow-only array, whose elements never move, and `{}` is {}",
+                        field,
+                        self.show(t)
+                    ),
+                    "declare it `T[..>]` (REFERENCES §7.3)",
+                ),
             }
         }
         // Fields: one growable field per class; roots and cursor arrays (DESIGN §3.4, §6.6).
@@ -1070,8 +1172,51 @@ impl<'p, 'a> Checker<'p, 'a> {
 
     /// Checks that a value of type `from`, computed by `e`, can go where `to` is expected.
     fn expect(&mut self, from: &Ty, to: &Ty, e: &Expr) -> bool {
+        // A value with self-relative links is never copied: only built in its array.
+        if self.prog.link_bearing(to) && !from.is_unknown() && !self.built_in_place(e) {
+            self.links_copied(e.span, to);
+            return false;
+        }
         let place = self.is_place(e);
         self.expect_at(from, to, e.span, place)
+    }
+
+    /// `new C(...)` inserted into an array, where it is built in its slot.
+    fn built_in_place(&self, e: &Expr) -> bool {
+        let mut e = e;
+        while let E::Paren(x) = &e.kind {
+            e = x;
+        }
+        matches!(e.kind, E::New { .. }) && self.in_place.contains(&key(e.span))
+    }
+
+    /// Marks an insertion's argument, when it is a `new`, as built in place.
+    fn insert_in_place(&mut self, e: &Expr) {
+        let mut e = e;
+        while let E::Paren(x) = &e.kind {
+            e = x;
+        }
+        if matches!(e.kind, E::New { .. }) {
+            self.in_place.insert(key(e.span));
+        }
+    }
+
+    fn links_copied(&mut self, span: Span, t: &Ty) {
+        let name = self.show(t);
+        self.err_help(
+            span,
+            format!("`{}` holds self-relative links, so it can't be copied: they are measured from where it sits", name),
+            format!("build it in its array with `arr.push(new {}(...))`, and refer to it with `{}&` (REFERENCES §7.4, L2)", name, name),
+        );
+    }
+
+    fn links_by_value(&mut self, span: Span, t: &Ty, how: &str) {
+        let name = self.show(t);
+        self.err_help(
+            span,
+            format!("`{}` holds self-relative links, so it can't be {} by value", name, how),
+            format!("use a reference, `{}&` (REFERENCES §7.4, L2)", name),
+        );
     }
 
     fn expect_at(&mut self, from: &Ty, to: &Ty, span: Span, place: bool) -> bool {
@@ -1765,6 +1910,14 @@ impl<'p, 'a> Checker<'p, 'a> {
                 .as_ref()
                 .is_some_and(|i| matches!(i.kind, E::New { .. }));
             let ty = match (&declared, &d.ty, &v.init) {
+                // A value with self-relative links lives only in its array (L2).
+                (Some(want), _, init) if self.prog.link_bearing(want) => {
+                    if let Some(init) = init {
+                        self.expr_c(init, Some(want), consumed);
+                    }
+                    self.links_by_value(v.name.span, want, "kept in a local");
+                    Ty::Unknown
+                }
                 (Some(want), _, Some(init)) => {
                     let t = self.expr_c(init, Some(want), consumed);
                     self.expect(&t, want, init);
@@ -1784,7 +1937,13 @@ impl<'p, 'a> Checker<'p, 'a> {
                 }
                 (None, _, Some(init)) => {
                     let t = self.expr_c(init, None, consumed);
-                    self.var_type(&t, init.span)
+                    let t = self.var_type(&t, init.span);
+                    if self.prog.link_bearing(&t) {
+                        self.links_by_value(v.name.span, &t, "kept in a local");
+                        Ty::Unknown
+                    } else {
+                        t
+                    }
                 }
                 (None, _, None) => {
                     self.err(
@@ -1923,6 +2082,9 @@ impl<'p, 'a> Checker<'p, 'a> {
                 Ty::Ref(Box::new(elem.unref().clone()))
             }
         };
+        if self.prog.link_bearing(&ty) {
+            self.links_copied(span, &ty);
+        }
         self.declare_name(name, ty);
     }
 
@@ -2512,7 +2674,12 @@ impl<'p, 'a> Checker<'p, 'a> {
                             StrPart::Interp(_) => 0,
                         })
                         .sum();
-                    self.over_cap(n, k.size, "bytes", e.span);
+                    if k.is_frozen() {
+                        let t = want.map(|w| w.unref().clone()).unwrap_or(Ty::Unknown);
+                        self.fixed_len(n, k.size, &t, "bytes", e.span);
+                    } else {
+                        self.over_cap(n, k.size, "bytes", e.span);
+                    }
                 }
                 Ty::string()
             }
@@ -3770,6 +3937,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                             );
                         }
                         let e = (**e).clone();
+                        self.insert_in_place(r);
                         let rt = self.expr(r, Some(&e));
                         self.expect(&rt, &e, r);
                         self.note_status(Some(k.cap == CapKind::Capped), consumed, span, sym);
@@ -4259,6 +4427,28 @@ impl<'p, 'a> Checker<'p, 'a> {
         }
     }
 
+    /// A fixed array, `T[.k]`, always has exactly `k` elements (DESIGN §4.2): a literal
+    /// gives all of them, or is `[]` for `k` zero values. A string gives exactly `k` bytes.
+    fn fixed_len(&mut self, n: usize, k: u64, t: &Ty, what: &str, span: Span) {
+        let empty_ok = what == "elements";
+        if k > 0 && n as u64 != k && !(empty_ok && n == 0) {
+            let shown = self.prog.show(t);
+            let help = if empty_ok {
+                format!("write all {}, or `[]` for {} zero values", k, k)
+            } else {
+                format!("write exactly {} {}", k, what)
+            };
+            self.err_help(
+                span,
+                format!(
+                    "an array of type `{}` holds exactly {} {}, and this literal has {}",
+                    shown, k, what, n
+                ),
+                help,
+            );
+        }
+    }
+
     fn array_lit(&mut self, items: &[Expr], want: Option<&Ty>, span: Span) -> Ty {
         match want.map(|w| w.unref().clone()) {
             Some(t @ (Ty::Array(..) | Ty::Slice(_))) => {
@@ -4270,7 +4460,11 @@ impl<'p, 'a> Checker<'p, 'a> {
                 if let Ty::Array(_, k) = &t
                     && k.cap == CapKind::Capped
                 {
-                    self.over_cap(items.len(), k.size, "elements", span);
+                    if k.is_frozen() {
+                        self.fixed_len(items.len(), k.size, &t, "elements", span);
+                    } else {
+                        self.over_cap(items.len(), k.size, "elements", span);
+                    }
                 }
                 t
             }
@@ -4739,6 +4933,21 @@ impl<'p, 'a> Checker<'p, 'a> {
         }
         if self.prog.variable_size(e) && !matches!(name.name.as_str(), "push" | "clear") {
             self.vs_array_only(name.span, t, &format!("given `{}`", name.name));
+        }
+        if matches!(name.name.as_str(), "push" | "pushFront" | "insert")
+            && let Some(a) = args.last()
+        {
+            self.insert_in_place(&a.expr);
+        }
+        // Links are measured from where each element sits, so nothing may move or copy
+        // the elements of an array that holds them (REFERENCES §7.4, L2).
+        if self.prog.link_bearing(e) && moves_elements(&name.name) {
+            let shown = self.show(e);
+            self.err_help(
+                name.span,
+                format!("`{}` moves or copies elements, and `{}` holds self-relative links, which are measured from where each one sits", name.name, shown),
+                "keep the elements where they are, and reorder references to them instead (REFERENCES §7.4, L2)",
+            );
         }
         match builtins::seq_method(e, kind, &name.name) {
             Err(need) => {
@@ -6372,6 +6581,35 @@ fn stmt_children(s: &Stmt) -> (Vec<&Stmt>, Vec<&Expr>) {
 }
 
 /// The expressions directly inside an expression (not inside block-bodied lambdas).
+/// The array methods that move elements within the array, or copy them out of it.
+fn moves_elements(name: &str) -> bool {
+    matches!(
+        name,
+        "sort"
+            | "stableSort"
+            | "sortDescending"
+            | "sortBy"
+            | "stableSortBy"
+            | "sortByDescending"
+            | "radixSort"
+            | "radixSortBy"
+            | "partialSort"
+            | "partialSortBy"
+            | "selectNth"
+            | "selectNthBy"
+            | "reverse"
+            | "shuffle"
+            | "swap"
+            | "retain"
+            | "dedup"
+            | "removeAt"
+            | "heapPush"
+            | "heapPop"
+            | "filter"
+            | "pushAll"
+    )
+}
+
 pub(crate) fn expr_children(e: &Expr) -> Vec<&Expr> {
     fn args(a: &[ast::Arg]) -> Vec<&Expr> {
         a.iter().map(|a| &a.expr).collect()

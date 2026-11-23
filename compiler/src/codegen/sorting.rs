@@ -88,6 +88,12 @@ impl<'p, 'a> Gen<'p, 'a> {
                     finish,
                 )
             }
+            Layout::Fixed => (
+                format!("int64_t _n = {k}; {ec} *_d = {a}->e;", k = arr.cap, a = a, ec = ec),
+                ec.clone(),
+                String::new(),
+                String::new(),
+            ),
             Layout::Capped => (
                 format!("int64_t _n = {a}->n; {ec} *_d = {a}->e;", a = a, ec = ec),
                 ec,

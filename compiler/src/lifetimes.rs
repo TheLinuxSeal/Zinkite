@@ -12,7 +12,10 @@
 //! walks each function backward to find which references are still used.
 //!
 //! Rule V's removal, V2: assigning a variable-size variable rebuilds it. The rest of rule
-//! V is in the checker and the code generator. Not yet: rule L (links).
+//! V is in the checker and the code generator. A link's type is the reference it holds,
+//! so these rules apply to it as to any reference field; rule L's L1, that a link points
+//! into its own array, is here too, by comparing roots; L2 is in the checker and L4 in the
+//! code generator (REFERENCES §7.5).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -118,6 +121,9 @@ impl Root {
 
 type Roots = BTreeSet<Root>;
 
+/// What a link refers into, and where it must point (rule L1).
+type RootPair = (Root, Root);
+
 /// A root set, as an expression evaluated once the root sets of the variables and
 /// the summaries of the functions are known.
 #[derive(Clone, Debug)]
@@ -175,6 +181,9 @@ struct CallR {
     /// storage dies with the statement.
     recv_held: Option<R>,
     args: Vec<R>,
+    /// For a `new` built in place in an array, as a value with self-relative links is:
+    /// that array's storage, which `This` names for rule L1 (REFERENCES §7.4).
+    into: Option<R>,
 }
 
 // ---------------------------------------------------------------- the flow form
@@ -243,6 +252,15 @@ enum Ev {
         values: Vec<R>,
         span: Span,
     },
+    /// A link to what `src` names stored in a field, which must point into the storage
+    /// `dst` names (REFERENCES §7.4, L1): the array the field is in, for a self-relative
+    /// link, or its static array, for a pool link (`pool`).
+    Link {
+        dst: R,
+        src: R,
+        pool: bool,
+        span: Span,
+    },
 }
 
 struct CallEv {
@@ -308,6 +326,9 @@ struct Summary {
     /// Formal storage whose elements it may move by inserting, or rearrange.
     moves: Roots,
     rearranges: Roots,
+    /// Rule L1 for the callers: (a, b, pool) when a link to what formal a names is stored
+    /// where it must point into what b names.
+    links: BTreeSet<(Root, Root, bool)>,
 }
 
 // ---------------------------------------------------------------- entry
@@ -687,6 +708,95 @@ impl<'p, 'a> Analysis<'p, 'a> {
         }
     }
 
+    /// Field `i` of class `c`, when it is a link: `None` for a self-relative one, or the
+    /// index of the static array a pool link is measured from.
+    fn link_of_field(&self, c: ClassId, i: usize) -> Option<Option<u32>> {
+        let f = &self.prog.classes[c].fields[i];
+        if f.link.is_some() {
+            return Some(None);
+        }
+        f.pool_link.as_ref()?;
+        let at = self.facts.pool_arrays.get(&(c, i))?;
+        Some(Some(*self.static_of.get(at)?))
+    }
+
+    /// A callee's formal root, for rule L1: as `map_formal`, except that the object a
+    /// constructor builds in place in an array is that array (CallR::into).
+    fn map_link(&self, rs: &HashMap<Var, Roots>, c: &CallR, fr: &Root) -> Roots {
+        if fr.var == Var::This && c.recv.is_none() {
+            return match &c.into {
+                Some(r) => self.eval(rs, r),
+                None => Roots::new(),
+            };
+        }
+        self.map_formal(rs, c, fr)
+    }
+
+    /// The pairs of roots rule L1 compares for one link: each root `s` of what it refers
+    /// to with each root `d` of where it must point. The ones that name the caller's data
+    /// are the callers' to check, through the summary; the rest are checked here.
+    fn link_pairs(s: &Roots, d: &Roots) -> (Vec<RootPair>, Vec<RootPair>) {
+        let (mut here, mut callers) = (Vec::new(), Vec::new());
+        let plain = |r: &Root| Root { whole: false, ..*r };
+        for a in s {
+            for b in d {
+                let (a, b) = (plain(a), plain(b));
+                if a.var == b.var && a.part == b.part {
+                    continue;
+                }
+                if a.var.is_formal() || b.var.is_formal() {
+                    callers.push((a, b));
+                } else {
+                    here.push((a, b));
+                }
+            }
+        }
+        (here, callers)
+    }
+
+    /// Rule L1 (REFERENCES §7.4): a self-relative link points into the array it is stored
+    /// in, a pool link into its static array.
+    #[allow(clippy::too_many_arguments)]
+    fn link_rule(
+        &self,
+        f: &Func,
+        s: &Roots,
+        d: &Roots,
+        pool: bool,
+        span: Span,
+        errs: &mut Vec<(Span, String, String)>,
+    ) {
+        let places: BTreeSet<(Var, Option<Part>)> = d
+            .iter()
+            .filter(|r| !r.var.is_formal())
+            .map(|r| (r.var, r.part))
+            .collect();
+        if places.len() > 1 && !pool && !s.is_empty() {
+            let names: Vec<String> = d.iter().map(|r| self.root_name(f, r)).collect();
+            errs.push((
+                span,
+                format!("can't tell which array this link is stored in: it may be {}", names.join(" or ")),
+                "a self-relative link must point into the array it is in, so the field must be reached through one array (REFERENCES §7.4, L1)".into(),
+            ));
+            return;
+        }
+        let (here, _) = Self::link_pairs(s, d);
+        if let Some((a, b)) = here.first() {
+            let (what, help) = if pool {
+                (
+                    format!("this pool link is measured from {}, and what it would refer to is in {}", self.root_name(f, b), self.root_name(f, a)),
+                    format!("a pool link refers only to elements of {} (REFERENCES §7.4, L1)", self.root_name(f, b)),
+                )
+            } else {
+                (
+                    format!("this link is in an element of {}, and what it would refer to is in {}", self.root_name(f, b), self.root_name(f, a)),
+                    "a self-relative link refers only into its own array; use a plain reference, `T&?`, to refer elsewhere (REFERENCES §7.4, L1)".into(),
+                )
+            };
+            errs.push((span, what, help));
+        }
+    }
+
     /// The root set of every variable of `f`: the union of everything stored into it (§3.5).
     fn root_sets(&self, f: &Func, statics: &mut HashMap<u32, Roots>) -> HashMap<Var, Roots> {
         let mut rs: HashMap<Var, Roots> = HashMap::new();
@@ -763,6 +873,28 @@ impl<'p, 'a> Analysis<'p, 'a> {
             s.stores = (0..f.params.len())
                 .map(|i| (Root::of(Var::Formal(i as u32)), Root::of(Var::This)))
                 .collect();
+            // Its parameters are the fields set by argument, in order (DESIGN §6.2).
+            let c = &self.prog.classes[f.class];
+            let set = c
+                .fields
+                .iter()
+                .enumerate()
+                .filter(|(_, x)| !x.is_static && x.init.is_none() && !starts_empty(&x.ty));
+            for (k, (fi, _)) in set.enumerate() {
+                match self.link_of_field(f.class, fi) {
+                    Some(None) => {
+                        s.links.insert((Root::of(Var::Formal(k as u32)), Root::of(Var::This), false));
+                    }
+                    Some(Some(id)) => {
+                        s.links.insert((
+                            Root::of(Var::Formal(k as u32)),
+                            Root::of(Var::Static(id)),
+                            true,
+                        ));
+                    }
+                    None => {}
+                }
+            }
             return s;
         }
         let evs = events(&f.body);
@@ -790,6 +922,12 @@ impl<'p, 'a> Analysis<'p, 'a> {
                                 }
                             }
                         }
+                    }
+                }
+                Ev::Link { dst, src, pool, .. } => {
+                    let (_, callers) = Self::link_pairs(&self.eval(rs, src), &self.eval(rs, dst));
+                    for (a, b) in callers {
+                        s.links.insert((a, b, *pool));
                     }
                 }
                 Ev::Remove { target, .. } => {
@@ -835,6 +973,14 @@ impl<'p, 'a> Analysis<'p, 'a> {
                                         }
                                     }
                                 }
+                            }
+                        }
+                        for (a, b, pool) in &self.summaries[g].links {
+                            let src = self.map_link(rs, &c.call, a);
+                            let dst = self.map_link(rs, &c.call, b);
+                            let (_, callers) = Self::link_pairs(&src, &dst);
+                            for (x, y) in callers {
+                                s.links.insert((x, y, *pool));
                             }
                         }
                     }
@@ -975,8 +1121,23 @@ impl<'p, 'a> Analysis<'p, 'a> {
                             }
                         }
                     }
+                    Ev::Link {
+                        dst,
+                        src,
+                        pool,
+                        span,
+                    } => {
+                        let s = self.eval(&rs, src);
+                        let d = self.eval(&rs, dst);
+                        self.link_rule(f, &s, &d, *pool, *span, &mut errs);
+                    }
                     Ev::Call(c) => {
                         for &g in &c.call.callees {
+                            for (a, b, pool) in &self.summaries[g].links {
+                                let s = self.map_link(&rs, &c.call, a);
+                                let d = self.map_link(&rs, &c.call, b);
+                                self.link_rule(f, &s, &d, *pool, c.span, &mut errs);
+                            }
                             for (a, b) in &self.summaries[g].stores {
                                 let s = self.map_formal(&rs, &c.call, a);
                                 if c.is_new && b.var == Var::This {
@@ -1302,7 +1463,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
                         }
                         live = with_args;
                     }
-                    Ev::Store { .. } | Ev::Ret { .. } => {}
+                    Ev::Store { .. } | Ev::Ret { .. } | Ev::Link { .. } => {}
                 },
                 Node::Block { body, defers } => {
                     // A deferred statement runs when the block ends (REFERENCES §9).
@@ -1571,6 +1732,15 @@ impl LiveCtx {
     }
 }
 
+/// Whether `e` is `new C(...)`, through any parentheses.
+fn is_new(e: &Expr) -> bool {
+    match &e.kind {
+        E::Paren(x) => is_new(x),
+        E::New { .. } => true,
+        _ => false,
+    }
+}
+
 fn outlives(a: &LocalVar, b: &LocalVar) -> bool {
     b.scope.starts_with(&a.scope) && (a.scope.len() < b.scope.len() || a.order <= b.order)
 }
@@ -1673,6 +1843,8 @@ struct Builder<'x, 'p, 'a> {
     /// Rearrangements from converting a ring or gap buffer to a slice, which `convert`
     /// finds; emitted before the next event.
     pending: std::cell::RefCell<Vec<(R, Span)>>,
+    /// The array a `new` about to be evaluated is built in place in (CallR::into).
+    new_into: Option<R>,
 }
 
 impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
@@ -1693,6 +1865,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             yields: Vec::new(),
             lambda_depth: 0,
             pending: Default::default(),
+            new_into: None,
         }
     }
 
@@ -2279,7 +2452,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             E::Ident(n) => self.ident(n, e.span, false),
             E::This => Val::refs(R::root(Var::This)),
             E::ThisNew(args) => {
-                let call = self.user_call(e.span, Some(R::root(Var::This)), args, false);
+                let call = self.user_call(e.span, Some(R::root(Var::This)), args, false, None);
                 if let Some(c) = call {
                     self.ev(Ev::Store {
                         dst: R::root(Var::This),
@@ -2290,10 +2463,14 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 }
                 Val::none()
             }
-            E::New { args, .. } => match self.user_call(e.span, None, args, true) {
-                Some(c) => Val::refs(R::Call(c, 0)),
-                None => Val::refs(self.unknown_args(R::Empty, args)),
-            },
+            E::New { args, .. } => {
+                let into = self.new_into.take();
+                let call = self.user_call(e.span, None, args, true, into);
+                match call {
+                    Some(c) => Val::refs(R::Call(c, 0)),
+                    None => Val::refs(self.unknown_args(R::Empty, args)),
+                }
+            }
             E::ArrayLit(items) => {
                 let mut r = R::Empty;
                 for x in items {
@@ -2380,9 +2557,13 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 ast::BinOp::InsertEnd | ast::BinOp::InsertFront | ast::BinOp::InsertCursor => {
                     let lv = self.expr(lhs);
                     let lt = self.ty(lhs);
-                    let rv = self.expr(rhs);
-                    let rt = self.ty(rhs);
                     let dst = self.storage(&lt, &lv, lhs.span);
+                    if lt.elem().is_some_and(|el| self.an.prog.link_bearing(el)) && is_new(rhs) {
+                        self.new_into = Some(R::Elems(Box::new(dst.clone())));
+                    }
+                    let rv = self.expr(rhs);
+                    self.new_into = None;
+                    let rt = self.ty(rhs);
                     if moves(&lt) {
                         let sym = match op {
                             ast::BinOp::InsertEnd => "+>",
@@ -2663,6 +2844,21 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             } else {
                 self.convert(&vv, &vt, &to, value.span)
             };
+            // Binding a link: what it refers to must be in its array (L1).
+            if !through
+                && let Some(pool) = self.link_of(target)
+            {
+                let link_dst = match pool {
+                    Some(id) => R::root(Var::Static(id)),
+                    None => dst.clone(),
+                };
+                self.ev(Ev::Link {
+                    dst: link_dst,
+                    src: src.clone(),
+                    pool: pool.is_some(),
+                    span,
+                });
+            }
             self.ev(Ev::Store {
                 dst,
                 src,
@@ -2680,6 +2876,30 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             });
         }
         Val::none()
+    }
+
+    /// When `t` is a field holding a link: `None` for a self-relative one, or the index of
+    /// the static array a pool link is measured from (REFERENCES §7.2, §7.3).
+    fn link_of(&self, t: &Expr) -> Option<Option<u32>> {
+        let (c, i) = match &t.kind {
+            E::Paren(x) => return self.link_of(x),
+            E::Member { expr, name } => {
+                let Ty::Class(c, _) = self.ty(expr).unref().clone() else {
+                    return None;
+                };
+                let i = self.an.prog.classes[c]
+                    .fields
+                    .iter()
+                    .position(|f| f.name == name.name)?;
+                (c, i)
+            }
+            E::Ident(_) => match self.an.facts.names.get(&key(t.span)) {
+                Some(NameRes::Field(c, i)) => (*c, *i),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        self.an.link_of_field(c, i)
     }
 
     /// Evaluates an assignment target, which is written rather than read.
@@ -2773,7 +2993,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             }
             Origin::Method(..) | Origin::Ctor(..) => {
                 let ret = self.ty(e);
-                match self.user_call_with(e.span, recv, recv_held, args, fact, false) {
+                match self.user_call_with(e.span, recv, recv_held, args, fact, false, None) {
                     Some(c) => match &ret {
                         Ty::Tuple(ts) => {
                             let elems: Vec<Val> = (0..ts.len())
@@ -2813,9 +3033,10 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
         recv: Option<R>,
         args: &[ast::Arg],
         is_new: bool,
+        into: Option<R>,
     ) -> Option<Rc<CallR>> {
         let fact = self.an.facts.calls.get(&key(span))?;
-        self.user_call_with(span, recv, None, args, fact, is_new)
+        self.user_call_with(span, recv, None, args, fact, is_new, into)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2827,6 +3048,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
         args: &[ast::Arg],
         fact: &CallFact,
         is_new: bool,
+        into: Option<R>,
     ) -> Option<Rc<CallR>> {
         let prog = self.an.prog;
         let callees: Vec<FnId> = match &fact.origin {
@@ -2901,6 +3123,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             recv,
             recv_held,
             args: arg_rs,
+            into,
         });
         let in_scope = self.resizable_in_scope();
         self.ev(Ev::Call(CallEv {
@@ -2926,8 +3149,17 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
         params: &[Ty],
     ) -> Val {
         let mut vals = Vec::new();
+        let in_place = matches!(name, "push" | "pushFront" | "insert")
+            && recv_ty
+                .unref()
+                .elem()
+                .is_some_and(|el| self.an.prog.link_bearing(el));
         for a in args {
+            if in_place && is_new(&a.expr) {
+                self.new_into = recv.clone().map(|r| R::Elems(Box::new(r)));
+            }
             let v = self.expr(&a.expr);
+            self.new_into = None;
             vals.push((v, self.ty(&a.expr), a.expr.span));
         }
         let arg = |k: usize, me: &Self| -> R {

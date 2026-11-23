@@ -288,6 +288,14 @@ impl<'p, 'a> Gen<'p, 'a> {
             };
             if self.vs(&ft) {
                 out.push_str(&self.build(cur, src, &ft));
+            } else if let Some(kind) = self.link_kind(id, i) {
+                // A self-relative link is measured from its field, here in the record's
+                // final place.
+                let v = self.expr(src, &ft);
+                let place = format!("(({} *){})->f_{}", s, b, f.name);
+                let nullable = matches!(ft, Ty::Nullable(_));
+                let code = self.link_store(&place, &kind, nullable, &v, src.span);
+                let _ = write!(out, "{}; ", code);
             } else {
                 let v = self.expr(src, &ft);
                 let _ = write!(out, "(({} *){})->f_{} = {}; ", s, b, f.name, v);
@@ -511,6 +519,14 @@ impl<'p, 'a> Gen<'p, 'a> {
     /// A record built where `arr`'s next element goes, or aside first when building it
     /// could grow the array. Gives a pointer to the new element.
     pub(super) fn rvec_push(&mut self, arr: &str, x: &Expr, el: &Ty, span: Span) -> String {
+        // A record with links is built where it stays: built aside, its links would be
+        // measured from the wrong place, and too far to fit (REFERENCES §7.4, L2).
+        if self.prog.link_bearing(el) && self.calls_out(x) {
+            return self.unsupported(
+                span,
+                "a record with links whose building calls a function; compute the arguments into locals first",
+            );
+        }
         let cur = self.tmp("cur");
         let b = self.build(&cur, x, el);
         let s = self.elem_cty(el, span);

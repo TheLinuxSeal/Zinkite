@@ -110,17 +110,36 @@ impl<'p, 'a> Gen<'p, 'a> {
         if self.vs(&Ty::Class(id, args.to_vec())) {
             fields.retain(|f| !self.vs(&f.2));
         }
-        let size = |t: &Ty| -> u32 {
+        let prog = self.prog;
+        // A link, self-relative or pool, is its offset (REFERENCES §7.2, §7.3).
+        let link = |i: usize| {
+            c.fields[i]
+                .link
+                .or(c.fields[i].pool_link.as_ref().map(|p| p.0))
+        };
+        let size = |i: usize, t: &Ty| -> u32 {
+            if let Some(w) = link(i) {
+                return bits(w) / 8;
+            }
             match t {
                 Ty::Prim(p) => bits(*p) / 8,
                 Ty::Ref(_) | Ty::Nullable(_) => 8,
+                Ty::Class(c, _) if prog.classes[*c].kind == ClassKind::Enum => {
+                    enum_bytes(prog.classes[*c].constants.len())
+                }
                 _ => 16,
             }
         };
-        fields.sort_by(|a, b| size(&b.2).cmp(&size(&a.2)).then(a.1.cmp(&b.1)));
+        fields.sort_by(|a, b| size(b.0, &b.2).cmp(&size(a.0, &a.2)).then(a.1.cmp(&b.1)));
         let mut body = String::new();
         let mut deps = Vec::new();
-        for (_, name, ty, span) in &fields {
+        for (i, name, ty, span) in &fields {
+            // A self-relative link is its offset (REFERENCES §7.2); what it refers to
+            // needn't be defined first.
+            if let Some(w) = link(*i) {
+                let _ = write!(body, "{} f_{}; ", prim_c(w), name);
+                continue;
+            }
             let ct = self.cty(ty, *span);
             deps.extend(self.deps(ty));
             let _ = write!(body, "{} f_{}; ", ct, name);

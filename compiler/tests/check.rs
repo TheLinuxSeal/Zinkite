@@ -84,6 +84,34 @@ fn warns(text: &str, needle: &str) {
 
 // ---------------------------------------------------------------- whole programs
 
+/// A value with self-relative links is measured from where it sits, so it is built in its
+/// array and never copied (REFERENCES §7.4, L2), and a link can't refer to an interface.
+#[test]
+fn self_relative_links() {
+    let node = "class Node { i32 key; Node&<i32>? left; }\n";
+    let with = |main: &str| format!("{}void main() {{ Node[..>] tree = []; Node& root = tree.push(new Node(5, null)); {} }}\n", node, main);
+    ok(&with("root.left .= tree.push(new Node(3, root)); tree +> new Node(1, null); Node[..>] whole = tree; Node&? l = root.left;"));
+    rejects(&with("Node copy = tree[0];"), "`Node` holds self-relative links, so it can't be kept in a local by value");
+    rejects(&with("var v = tree[0];"), "can't be kept in a local by value");
+    rejects(&with("Node fresh = new Node(2, null);"), "can't be kept in a local by value");
+    rejects(&with("for (Node n : tree) { }"), "`Node` holds self-relative links, so it can't be copied");
+    rejects(&with("tree +> tree[0];"), "`Node` holds self-relative links, so it can't be copied");
+    rejects(&with("tree[0] = new Node(2, null);"), "can't be copied");
+    rejects(&with("tree.reverse();"), "`reverse` moves or copies elements");
+    rejects(&with("tree.sortBy((Node& n) => n.key);"), "`sortBy` moves or copies elements");
+    rejects(&format!("{}Node make() {{ return new Node(1, null); }}\nvoid main() {{}}\n", node), "so it can't be returned by value");
+    rejects(&format!("{}void take(Node n) {{}}\nvoid main() {{}}\n", node), "so it can't be passed by value");
+    rejects(
+        "interface Shape { f64 area(); }\nclass Bad { Shape&<i32>? s; }\nvoid main() {}\n",
+        "a link can't refer to an interface",
+    );
+    // A pool link is measured from a static grow-only array of what it refers to (§7.3).
+    ok("class N { i32 v; N&<u32 in nodes>? next; }\nN[..>] nodes = [];\nvoid main() { N a = nodes.push(new N(1, null)); }\n");
+    rejects("class N { i32 v; N&<u32 in missing>? next; }\nvoid main() {}\n", "there is no static `missing`");
+    rejects("class N { i32 v; N&<u32 in nodes>? next; }\nN[..~] nodes = [];\nvoid main() {}\n", "a pool link is measured from a grow-only array, whose elements never move, and `nodes` is N[..~]");
+    rejects("class N { i32 v; N&<u32 in ints>? next; }\ni32[..>] ints = [];\nvoid main() {}\n", "a pool link to N must be measured from an array of N, and `ints` holds i32");
+}
+
 #[test]
 fn example_programs_check() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples");
@@ -166,6 +194,18 @@ fn literals_take_their_type_from_where_they_are_used() {
         "this literal has 5 bytes, and the array holds 4",
     );
     ok(&body("u8[~5] g = \"hello\"; i64[..~2] p = [1, 2];"));
+    // A fixed array always has exactly its length (DESIGN §4.2): `[]` is that many zeros.
+    rejects(
+        &body("i32[.4] u = [1, 2];"),
+        "an array of type `i32[.4]` holds exactly 4 elements, and this literal has 2",
+    );
+    rejects(&body("i32[.2] u = [1, 2, 3];"), "holds exactly 2 elements, and this literal has 3");
+    rejects(
+        &body("u8[.4] g = \"ab\";"),
+        "an array of type `u8[.4]` holds exactly 4 bytes, and this literal has 2",
+    );
+    rejects(&body("u8[.4] g = \"\";"), "holds exactly 4 bytes, and this literal has 0");
+    ok(&body("i32[.4] a = []; i32[.4] b = [1, 2, 3, 4]; u8[.2] g = \"ok\"; i32[.2][.3] grid = [];"));
     ok(&body(
         "i64[~.~4] q = [1, 2]; i64[:] a = q; i64[:] b = q[1:]; u8[~8] g = \"ab\"; string t = g; bool s = g.startsWith(\"a\");",
     ));
