@@ -1,0 +1,52 @@
+// A list of strings. `u8[.*][..>]` is an array of variable-size elements, each
+// word stored inline behind a varint length, so the whole list is one
+// contiguous block on a data stack -- `(len | bytes)*` -- built with no
+// allocations at all, as in the Goose version. C++ makes one allocation for
+// the vector plus one per string that doesn't fit the small-string buffer.
+// Word lengths run 3..20, straddling the SSO boundary on purpose. The words
+// are owned copies, like vector<string>, not views into the text; the split
+// itself is `splitBy`, a lazy iterator of views. The scan reads each word as
+// a `string` view of its inline bytes (`for (u8[.*]& w : words)` doesn't
+// compile yet, a compiler bug).
+
+i64 N = 400000;                          // BENCH_N
+i64 PASSES = 4;
+
+// xorshift64, the same generator as the Goose, C++ and Rust versions.
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+void main() {
+    // One text buffer of space-separated random words.
+    u8[..>] text = [];
+    u64 r = 12345;
+    for (i64 i = 0; i < N; i++) {
+        r = xsNext(r);
+        i64 wl = 3 + xsMod(r, 18);
+        for (i64 j = 0; j < wl; j++) {
+            r = xsNext(r);
+            text +> (u8) ('a' + xsMod(r, 26));
+        }
+        text +> ' ';
+    }
+    // Split it into a flat list of strings; the trailing separator yields
+    // an empty part, which is not a word.
+    u8[.*][..>] words = [];
+    for (string w : text.splitBy(" ")) {
+        if (w.len > 0) { words +> w; }
+    }
+    // Scan the list repeatedly: length and first/last character of each word.
+    i64 total = 0;
+    for (i64 p = 0; p < PASSES; p++) {
+        for (string w : words) { total += w.len + w[0] + w[w.len - 1]; }
+    }
+    println("${words.len}");
+    println("${total}");
+}

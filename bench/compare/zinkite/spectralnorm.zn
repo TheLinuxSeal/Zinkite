@@ -1,0 +1,56 @@
+// spectralnorm: the Benchmarks Game spectral norm of the infinite matrix
+// A(i, j) = 1 / ((i + j)(i + j + 1) / 2 + i + 1), by ten rounds of the power
+// method on N x N. It measures a doubly nested loop of divisions and
+// multiply-adds over arrays of doubles, with A made on the fly.
+
+i64 N = 100;                             // BENCH_N
+
+f64 a(i64 i, i64 j) {
+    return 1.0 / (f64) ((i + j) * (i + j + 1) / 2 + i + 1);
+}
+
+// out = A v
+void timesA(f64[:] v, f64[:]& out) {
+    for (i64 i = 0; i < v.len; i++) {
+        f64 sum = 0.0;
+        for (i64 j = 0; j < v.len; j++) { sum += a(i, j) * v[j]; }
+        out[i] = sum;
+    }
+}
+
+// out = A' v
+void timesAt(f64[:] v, f64[:]& out) {
+    for (i64 i = 0; i < v.len; i++) {
+        f64 sum = 0.0;
+        for (i64 j = 0; j < v.len; j++) { sum += a(j, i) * v[j]; }
+        out[i] = sum;
+    }
+}
+
+// out = A' A v
+void timesAtA(f64[:] v, f64[:]& out, f64[:]& tmp) {
+    timesA(v, tmp);
+    timesAt(tmp, out);
+}
+
+void main() {
+    f64[..>] u = [];
+    f64[..>] v = [];
+    f64[..>] tmp = [];
+    for (i64 i = 0; i < N; i++) {
+        u +> 1.0;
+        v +> 0.0;
+        tmp +> 0.0;
+    }
+    for (i64 i = 0; i < 10; i++) {
+        timesAtA(u, v, tmp);
+        timesAtA(v, u, tmp);
+    }
+    f64 vbv = 0.0;
+    f64 vv = 0.0;
+    for (i64 i = 0; i < N; i++) {
+        vbv += u[i] * v[i];
+        vv += v[i] * v[i];
+    }
+    println(math.sqrt(vbv / vv).fixed(9));
+}

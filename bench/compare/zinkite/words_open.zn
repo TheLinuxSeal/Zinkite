@@ -1,0 +1,91 @@
+// words.zn counted in a hand-written open-addressed table instead of the
+// built-in hashmap, as words.goose does: a power-of-two `Slot[..>]` of a
+// `string` key and a count, linear probing, FNV-1a as in the C++ and Rust
+// open-addressed rows. Keys are views into the text, so none is copied. The
+// row measures the purpose-built table against the general-purpose one.
+
+i64 N = 2000000;                         // BENCH_N
+
+class Slot { string key; i32 count; }
+
+// FNV-1a, as the C++ and Rust open-addressed rows hash.
+u64 fnv(string s) {
+    u64 h = 14695981039346656037;
+    for (u8 b : s) { h = (h ^ b) *% 1099511628211; }
+    return h;
+}
+
+// xorshift64, the same generator as the Goose, C++ and Rust versions.
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+void main() {
+    i64 vocab = N / 10 + 16;
+    u64 r = 12345;
+    // A vocabulary of capped words, inline in their array, so it stays
+    // randomly indexable.
+    u8[..~20][..>] dict = [];
+    for (i64 i = 0; i < vocab; i++) {
+        u8[..~20]& w = dict.push([]);
+        r = xsNext(r);
+        i64 n = 3 + xsMod(r, 12);
+        for (i64 j = 0; j < n; j++) {
+            r = xsNext(r);
+            w +> (u8) ('a' + xsMod(r, 26));
+        }
+    }
+    // A text of N words drawn with a skew towards the front of the vocabulary.
+    u8[..>] text = [];
+    for (i64 i = 0; i < N; i++) {
+        r = xsNext(r);
+        i64 a = xsMod(r, vocab);
+        i64 k = (a * a) / vocab;
+        text.append(dict[k]);
+        text +> ' ';
+    }
+    // Split: one contiguous block of variable-size strings; the trailing
+    // separator yields an empty part, which is not a word.
+    u8[.*][..>] words = [];
+    for (string w : text.splitBy(" ")) {
+        if (w.len > 0) { words +> w; }
+    }
+    // Count, with keys that are views into the text. The count walks the
+    // text's words again rather than the list: a `string` taken from an
+    // element of `words` comes out with the wrong C type today, a compiler
+    // bug. Splitting reads the same bytes the walk would.
+    i64 nslots = 16;
+    while (nslots < vocab * 4) { nslots *= 2; }
+    u64 mask = (u64) (nslots - 1);
+    Slot[..>] slots = [];
+    for (i64 i = 0; i < nslots; i++) { slots +> new Slot("", 0); }
+    i64 distinct = 0;
+    for (string key : text.splitBy(" ")) {
+        if (key.len == 0) { continue; }
+        u64 idx = fnv(key) & mask;
+        while (true) {
+            Slot& s = slots[idx];
+            if (s.count == 0) {
+                s.key = key;
+                s.count = 1;
+                distinct++;
+                break;
+            }
+            if (s.key == key) { s.count++; break; }
+            idx = (idx + 1) & mask;
+        }
+    }
+    i64 total = 0;
+    for (Slot& s : slots) {
+        if (s.count > 0) { total += s.count * (s.key.len + s.key[0]); }
+    }
+    println("${words.len}");
+    println("${distinct}");
+    println("${total}");
+}

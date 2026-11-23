@@ -1,0 +1,168 @@
+// The LRU cache of lru.zn with the map hand-rolled: an open-addressed table of
+// (key, node index) slots with a Fibonacci hash, linear probing and
+// backward-shift deletion, slot for slot the map lru.goose uses. The nodes are
+// an arena, a plain `Node[..>]` on a data stack with i32 links and a free
+// list of indices, which is the expert shape of the C++ and Rust rows. Goose
+// keeps 4-byte pool-relative references in the same places; an i32 index is
+// the same size, and costs an index computation per hop.
+
+i64 N = 8000000;                         // BENCH_N
+i64 CAP = N / 8;
+i64 KEYS = CAP * 2;
+
+// xorshift64, the same generator as the Goose, C++ and Rust versions.
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+class Node {
+    i32 key;
+    i32 val;
+    i32 prev;
+    i32 next;
+}
+
+class Slot {
+    i32 key;
+    i32 idx;                             // the node, or -1 when the slot is empty
+}
+
+// Both sentinels live in the arena, so no link is ever missing.
+i32 HEAD = 0;
+i32 TAIL = 1;
+
+Node[..>] pool = [];
+i32[..~] free = [];
+Slot[..>] slots = [];
+u64 mask = 0;
+
+i64 home(i32 key) { return (i64) ((((u64) key *% 0x9E3779B97F4A7C15) >> 24) & mask); }
+
+// The slot holding `key`, or the empty slot where it would go.
+i64 find(i32 key) {
+    i64 i = home(key);
+    while (slots[i].idx >= 0 && slots[i].key != key) {
+        i = (i + 1) & (i64) mask;
+    }
+    return i;
+}
+
+// Backward-shift deletion: slide later entries of the probe run down over the
+// hole, so no tombstones accumulate.
+void mapRemove(i64 at) {
+    i64 i = at;
+    i64 j = i;
+    while (true) {
+        j = (j + 1) & (i64) mask;
+        Slot s = slots[j];
+        if (s.idx < 0) { break; }
+        i64 h = home(s.key);
+        if ((i < j && (h <= i || h > j)) || (i > j && h <= i && h > j)) {
+            slots[i] = s;
+            i = j;
+        }
+    }
+    slots[i].idx = -1;
+}
+
+void unlink(i32 n) {
+    i32 p = pool[n].prev;
+    i32 q = pool[n].next;
+    pool[p].next = q;
+    pool[q].prev = p;
+}
+
+void linkFront(i32 n) {
+    i32 q = pool[HEAD].next;
+    pool[n].prev = HEAD;
+    pool[n].next = q;
+    pool[q].prev = n;
+    pool[HEAD].next = n;
+}
+
+i32 alloc(i32 key, i32 val) {
+    i32 i @empty = free ->;
+    if (empty) {
+        pool +> new Node(key, val, 0, 0);
+        return (i32) (pool.len - 1);
+    }
+    pool[i] = new Node(key, val, 0, 0);
+    return i;
+}
+
+void main() {
+    i64 nslots = 16;
+    while (nslots < CAP * 2) { nslots *= 2; }
+    mask = (u64) (nslots - 1);
+    for (i64 k = 0; k < nslots; k++) { slots +> new Slot(0, -1); }
+    pool +> new Node(-1, 0, 0, TAIL);
+    pool +> new Node(-1, 0, HEAD, 0);
+    i64 count = 0;
+    i64 hits = 0;
+    i64 misses = 0;
+    i64 removes = 0;
+    u64 r = 12345;
+    for (i64 op = 0; op < N; op++) {
+        r = xsNext(r);
+        i64 a = xsMod(r, KEYS);
+        i32 key = (i32) ((a * a) / KEYS);    // skewed towards small keys
+        i64 at = find(key);
+        i32 fi = slots[at].idx;
+        if (xsMod(r >> 40, 16) == 0) {
+            // An invalidation: drop the entry if it is cached.
+            if (fi >= 0) {
+                unlink(fi);
+                mapRemove(at);
+                free +> fi;
+                count--;
+                removes++;
+            }
+            continue;
+        }
+        if (fi >= 0) {
+            pool[fi].val += 1;
+            unlink(fi);
+            linkFront(fi);
+            hits++;
+            continue;
+        }
+        misses++;
+        i64 ins = at;
+        if (count == CAP) {
+            i32 lru = pool[TAIL].prev;
+            unlink(lru);
+            i64 lat = find(pool[lru].key);
+            mapRemove(lat);
+            free +> lru;
+            count--;
+            // The deletion may have shifted entries in this key's probe run,
+            // so the empty slot found above can be stale.
+            ins = find(key);
+        }
+        i32 ni = alloc(key, key % 1000);
+        slots[ins] = new Slot(key, ni);
+        linkFront(ni);
+        count++;
+    }
+    // Walk the list from most to least recent, so the order is checked too.
+    u64 walk = 0;
+    i64 vals = 0;
+    i32 cur = pool[HEAD].next;
+    while (cur != TAIL) {
+        walk = walk *% 31 +% (u64) pool[cur].key;
+        vals += pool[cur].val;
+        cur = pool[cur].next;
+    }
+    println("${hits}");
+    println("${misses}");
+    println("${removes}");
+    println("${count}");
+    println("${walk}");
+    println("${vals}");
+}

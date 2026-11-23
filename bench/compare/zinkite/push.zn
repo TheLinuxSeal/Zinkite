@@ -1,0 +1,39 @@
+// Growth while holding element references. A `[..>]` array on a data stack
+// grows by bumping the stack's top, so elements never move and the reference
+// `push` returns stays valid for the array's whole life. `marks` keeps one to
+// every 64th item, as the Goose version does with `Item&[>..]`; C++ and Rust
+// keep indices instead (or reserve, or use a deque).
+
+i64 N = 4000000;                         // BENCH_N
+
+class Item { i32 key; i32 val; }
+
+// xorshift64, the same generator as the Goose, C++ and Rust versions.
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+void main() {
+    Item[..>] items = [];
+    Item&[..>] marks = [];
+    u64 r = 12345;
+    for (i64 i = 0; i < N; i++) {
+        r = xsNext(r);
+        Item& e = items.push(new Item((i32) xsMod(r, 1000000), (i32) (i % 97)));
+        if (i % 64 == 0) { marks +> e; }    // a reference, kept across all later growth
+    }
+    i64 total = 0;
+    for (Item& it : items) { total += it.key; }
+    i64 mt = 0;
+    for (Item& m : marks) { mt += m.val; }
+    println("${items.len}");
+    println("${marks.len}");
+    println("${total}");
+    println("${mt}");
+}

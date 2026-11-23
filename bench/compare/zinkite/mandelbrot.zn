@@ -1,0 +1,51 @@
+// mandelbrot: the Benchmarks Game Mandelbrot set, an N x N bitmap with up to
+// 50 iterations per pixel, packed eight pixels to a byte. It measures a tight
+// floating-point loop with an early exit. The program prints a checksum of the
+// bitmap instead of the bitmap itself.
+
+i64 N = 1000;                            // BENCH_N
+i64 MAX_ITER = 50;
+
+void main() {
+    u8[..>] image = [];
+    f64 inv = 2.0 / (f64) N;
+    i64 inside = 0;
+    for (i64 y = 0; y < N; y++) {
+        f64 ci = (f64) y * inv - 1.0;
+        i64 bits = 0;
+        i64 count = 0;
+        for (i64 x = 0; x < N; x++) {
+            f64 cr = (f64) x * inv - 1.5;
+            f64 zr = 0.0;
+            f64 zi = 0.0;
+            f64 tr = 0.0;
+            f64 ti = 0.0;
+            for (i64 i = 0; i < MAX_ITER && tr + ti <= 4.0; i++) {
+                zi = 2.0 * zr * zi + ci;
+                zr = tr - ti + cr;
+                tr = zr * zr;
+                ti = zi * zi;
+            }
+            bits <<= 1;
+            if (tr + ti <= 4.0) {
+                bits |= 1;
+                inside++;
+            }
+            count++;
+            if (count == 8) {
+                image +> (u8) bits;
+                bits = 0;
+                count = 0;
+            }
+        }
+        if (count > 0) {
+            image +> (u8) (bits << (8 - count));
+        }
+    }
+    // FNV-1a over the bitmap.
+    u64 h = 14695981039346656037;
+    for (u8 b : image) { h = (h ^ b) *% 1099511628211; }
+    println("${image.len}");
+    println("${inside}");
+    println("${h}");
+}

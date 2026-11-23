@@ -1,0 +1,42 @@
+// plb2 nqueen: counts the solutions of the n-queens problem with an iterative
+// backtracking search over bit masks, after the second C implementation on
+// Rosetta Code. Small fixed-size state, branchy integer code, no memory traffic.
+
+i64 N = 12;                              // BENCH_N
+
+i32 nqSolve(i32 n) {
+    i32[.32] a = [];                     // the column chosen at each row
+    u32[.32] l = [];                     // per row, the columns the queens above
+    u32[.32] c = [];                     // attack along left diagonals, columns
+    u32[.32] r = [];                     // and right diagonals
+    for (i64 i = 0; i < a.len; i++) { a[i] = -1; }
+    u32 y0 = ((u32) 1 << n) - 1;
+    i32 m = 0;
+    i32 k = 0;
+    while (k >= 0) {
+        u32 y = (l[k] | c[k] | r[k]) & y0;          // the columns row k can't take
+        if ((y ^ y0) >> (a[k] + 1) != 0) {          // a column past the last one tried is free
+            i32 i = a[k] + 1;
+            while (i < n && (y & ((u32) 1 << i)) != 0) { i++; }
+            if (k < n - 1) {
+                u32 z = (u32) 1 << i;
+                a[k] = i;
+                k++;
+                l[k] = (l[k - 1] | z) << 1;
+                c[k] = c[k - 1] | z;
+                r[k] = (r[k - 1] | z) >> 1;
+            } else {
+                m++;                                // a solution
+                k--;
+            }
+        } else {
+            a[k] = -1;                              // no choice left: backtrack
+            k--;
+        }
+    }
+    return m;
+}
+
+void main() {
+    println("${nqSolve((i32) N)}");
+}

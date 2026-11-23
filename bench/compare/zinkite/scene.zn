@@ -1,0 +1,121 @@
+// A scene graph: a tree of nodes with a local transform each, whose world
+// transforms are recomputed top-down every frame after some nodes move. It
+// is the shape of every game engine's scene, every UI toolkit's widget tree
+// and every robot's kinematic chain: a tree with a variable number of
+// children per node whose payload is mutated in place every frame.
+//
+// As in scene.goose, a node carries its children inline as a capped array of
+// up to four references (`SNode&[..~4]`), so the whole scene is one array of
+// fixed-size records on a data stack, and the update composes straight into
+// each node's world transform through references, with no copy. Goose's child
+// links are 4-byte relative references; Zinkite's code generator doesn't have
+// links yet (DESIGN §5.4), so these are 8-byte references, which an
+// append-only array keeps valid as it grows.
+//
+// Every transform is an axis-aligned 90-degree rotation with an integer
+// translation, so all the float math is exact and every implementation
+// produces a bit-identical checksum.
+
+i64 DEPTH = 13;                          // BENCH_N
+i64 FRAMES = 16;
+i64 MAXKIDS = 4;
+
+// xorshift64, the same generator as the Goose, C++ and Rust versions.
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+class V3 {
+    f32 x;
+    f32 y;
+    f32 z;
+}
+
+class Xf {
+    f32[.9] m;
+    V3 t;
+}
+
+class SNode {
+    i32 id;
+    Xf local;
+    Xf world;
+    SNode&[..~4] kids;
+}
+
+SNode[..>] pool = [];
+
+Xf IDENT = new Xf([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], new V3(0.0, 0.0, 0.0));
+
+// One of twelve axis-aligned rotations, from the seed.
+f32[.9] rotation(u64 seed) {
+    i64 axis = xsMod(seed, 3);
+    i64 quarter = xsMod(seed >> 8, 4);
+    f32 c = 1.0;
+    f32 s = 0.0;
+    if (quarter == 1) { c = 0.0; s = 1.0; }
+    else if (quarter == 2) { c = -1.0; s = 0.0; }
+    else if (quarter == 3) { c = 0.0; s = -1.0; }
+    if (axis == 0) { return [1.0, 0.0, 0.0, 0.0, c, 0.0 - s, 0.0, s, c]; }
+    if (axis == 1) { return [c, 0.0, s, 0.0, 1.0, 0.0, 0.0 - s, 0.0, c]; }
+    return [c, 0.0 - s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0];
+}
+
+// The node is pushed before its children, so the parent's child references
+// are filled in as the children are built.
+SNode& build(i64 depth, u64 seed) {
+    u64 r = xsNext(seed);
+    V3 t = new V3((f32) xsMod(r >> 16, 9), (f32) xsMod(r >> 24, 9), (f32) xsMod(r >> 32, 9));
+    SNode& nd = pool.push(new SNode((i32) pool.len, new Xf(rotation(r), t), IDENT, []));
+    if (depth == 0) { return nd; }
+    i64 n = 1 + xsMod(r >> 40, MAXKIDS);
+    for (i64 i = 0; i < n; i++) {
+        SNode& c = build(depth - 1, xsNext(r +% (u64) i));
+        nd.kids +> c;
+    }
+    return nd;
+}
+
+// world = parent ∘ local: a 3x3 product and a transformed translation.
+void compose(Xf& p, Xf& l, Xf& w) {
+    for (i64 i = 0; i < 3; i++) {
+        for (i64 j = 0; j < 3; j++) {
+            f32 s = 0.0;
+            for (i64 k = 0; k < 3; k++) { s = s + p.m[i * 3 + k] * l.m[k * 3 + j]; }
+            w.m[i * 3 + j] = s;
+        }
+    }
+    w.t.x = p.m[0] * l.t.x + p.m[1] * l.t.y + p.m[2] * l.t.z + p.t.x;
+    w.t.y = p.m[3] * l.t.x + p.m[4] * l.t.y + p.m[5] * l.t.z + p.t.y;
+    w.t.z = p.m[6] * l.t.x + p.m[7] * l.t.y + p.m[8] * l.t.z + p.t.z;
+}
+
+void update(SNode& n, Xf& parent) {
+    compose(parent, n.local, n.world);
+    for (SNode& k : n.kids) { update(k, n.world); }
+}
+
+void main() {
+    SNode& root = build(DEPTH, 12345);
+    i64 total = 0;
+    for (i64 f = 0; f < FRAMES; f++) {
+        // A seventh of the nodes move each frame: the animation.
+        f32 step = (f32) (f % 5);
+        for (SNode& n : pool) {
+            if (n.id % 7 == f % 7) { n.local.t.x = step; n.local.t.z = 8.0 - step; }
+        }
+        update(root, IDENT);
+        // Where everything ended up, as an integer: exact in f32, summed in i64.
+        for (SNode& n : pool) {
+            total += (i64) (n.world.t.x + n.world.t.y + n.world.t.z);
+        }
+    }
+    println("${pool.len}");
+    println("${total}");
+}

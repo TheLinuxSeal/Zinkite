@@ -1,0 +1,27 @@
+// nsieve (Benchmarks Game): the sieve of Eratosthenes over 10000 << N,
+// 10000 << (N - 1) and 10000 << (N - 2) flags, one byte each. Prints each
+// limit and its prime count. A flat array written with a stride: memory bound
+// once the flags outgrow the cache.
+
+i64 N = 10;                              // BENCH_N
+
+i64 nsieve(i64 n) {
+    bool[..>] flags = [];
+    for (i64 i = 0; i < n; i++) { flags +> true; }
+    i64 count = 0;
+    for (i64 i = 2; i < n; i++) {
+        if (flags[i]) {
+            count++;
+            for (i64 j = i << 1; j < n; j += i) { flags[j] = false; }
+        }
+    }
+    return count;
+}
+
+void main() {
+    for (i64 i = 0; i < 3; i++) {
+        i64 n = 10000 << (N - i);
+        println("${n}");
+        println("${nsieve(n)}");
+    }
+}

@@ -1,0 +1,66 @@
+// The expression trees of interp.zn with tag dispatch: one class with an enum tag
+// and two i32 fields, 12 bytes, in one grow-only array, linked by index, and `eval`
+// is a `switch` on the tag. This is the shape of the C++ tagged-union row. Goose's
+// variable-size variants (5-byte leaves, 9-byte binary nodes) aren't in Zinkite yet.
+
+i64 DEPTH = 20;                          // BENCH_N
+i64 PASSES = 8;
+i64 M = 1000003;                         // Keeps every value in range: no overflow.
+
+enum Kind { NUM, ADD, MUL, NEG }
+
+// 12 bytes: a leaf's value or a node's children, by index into `pool`.
+class Node {
+    Kind kind;
+    i32 a;      // NUM: the value; NEG: the operand; ADD, MUL: the left operand
+    i32 b;      // ADD, MUL: the right operand
+}
+
+Node[..>] pool = [];
+
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+i32 add(Kind kind, i32 a, i32 b) {
+    pool +> new Node(kind, a, b);
+    return (i32) (pool.len - 1);
+}
+
+i32 build(i64 depth, u64 seed) {
+    u64 s = xsNext(seed);
+    if (depth == 0) { return add(Kind.NUM, (i32) xsMod(s, 1000), 0); }
+    i64 k = xsMod(s, 8);
+    if (k < 1) {
+        i32 a = build(depth - 1, s);
+        return add(Kind.NEG, a, 0);
+    }
+    i32 a = build(depth - 1, s);
+    i32 b = build(depth - 1, xsNext(s));
+    if (k < 5) { return add(Kind.ADD, a, b); }
+    return add(Kind.MUL, a, b);
+}
+
+i64 eval(i32 i, i64 p) {
+    Node& n = pool[i];
+    return switch (n.kind) {
+        case NUM => (n.a + p) % M;
+        case ADD => (eval(n.a, p) + eval(n.b, p)) % M;
+        case MUL => (eval(n.a, p) * eval(n.b, p)) % M;
+        case NEG => (M - eval(n.a, p)) % M;
+    };
+}
+
+void main() {
+    i32 root = build(DEPTH, 12345);
+    i64 total = 0;
+    for (i64 p = 0; p < PASSES; p++) { total = (total + eval(root, p)) % M; }
+    println("${pool.len}");
+    println("${total}");
+}

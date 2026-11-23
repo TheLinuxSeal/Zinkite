@@ -1,0 +1,58 @@
+// A pointer-linked binary tree: the shape of every AST, scene graph and index
+// structure. Nodes live in one grow-only static array on a data stack of their own,
+// and link to each other with nullable self-relative links (`TNode&<i32>?`): a 4-byte
+// offset from the field to the child, which a field may hold because elements of a
+// grow-only array never move (REFERENCES §7.2). A node is 12 bytes, as in Goose, with
+// no allocation per node, no header and no destructor walk. tree_index.zn does the
+// same with i32 indices, by hand.
+//
+// Children are pushed before their parent. The pass index is folded into every
+// node's contribution, so the eight passes are eight different computations and a
+// backend can't hoist the walk out of the loop.
+
+i64 DEPTH = 20;                          // BENCH_N
+i64 PASSES = 8;
+
+class TNode {
+    i32 v;
+    TNode&<i32>? l;
+    TNode&<i32>? r;
+}
+
+TNode[..>] pool = [];
+
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+TNode& build(i64 depth, u64 seed) {
+    if (depth == 0) {
+        return pool.push(new TNode((i32) xsMod(seed, 1000), null, null));
+    }
+    TNode& l = build(depth - 1, xsNext(seed));
+    TNode& r = build(depth - 1, xsNext(seed +% 1));
+    return pool.push(new TNode((i32) xsMod(seed, 1000), l, r));
+}
+
+i64 sumTree(TNode& n, i64 p) {
+    i64 t = n.v ^ p;
+    TNode&? l = n.l;
+    if (l != null) { t += sumTree(l, p); }
+    TNode&? r = n.r;
+    if (r != null) { t += sumTree(r, p); }
+    return t;
+}
+
+void main() {
+    TNode& root = build(DEPTH, 12345);
+    i64 total = 0;
+    for (i64 p = 0; p < PASSES; p++) { total += sumTree(root, p); }
+    println("${pool.len}");
+    println("${total}");
+}

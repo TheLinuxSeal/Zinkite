@@ -1,0 +1,83 @@
+// The same graph and the same BFS as graph.zn, built as CSR with the
+// two-pass count-then-fill instead of one-pass linking. Traversal is then a
+// contiguous run of edges per vertex rather than a chase down a chain, at the
+// cost of two passes over the edges and two more arrays to get there. It is
+// graph_csr.goose, and the CSR rows of C++ and Rust, in Zinkite: every array
+// is a plain i32 array on a data stack, and `out[start[u]:start[u + 1]]` is a
+// slice the BFS loops over.
+
+i64 V = 1000000;                         // BENCH_N
+i64 DEG = 8;
+i64 SOURCES = 4;
+
+// xorshift64, the same generator as the Goose, C++ and Rust versions.
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+i64 bfs(i64 src, i32[:] start, i32[:] out, i32[:]& dist, i32[..~]& q) {
+    q.clear();
+    dist[src] = 0;
+    q +> (i32) src;
+    i64 total = 0;
+    i64 qh = 0;
+    while (qh < q.len) {
+        i32 u = q[qh];
+        qh++;
+        i32 d = dist[u];
+        total += d;
+        for (i32 w : out[start[u]:start[u + 1]]) {
+            if (dist[w] < 0) {
+                dist[w] = d + 1;
+                q +> w;
+            }
+        }
+    }
+    return total;
+}
+
+void main() {
+    i64 ne = V * DEG;
+    i32[..>] esrc = [];
+    i32[..>] edst = [];
+    i32[..>] start = [];
+    for (i64 v = 0; v <= V; v++) { start +> 0; }
+    u64 r = 12345;
+    for (i64 e = 0; e < ne; e++) {
+        r = xsNext(r);
+        i64 u = xsMod(r, V);
+        esrc +> (i32) u;
+        edst +> (i32) xsMod(r >> 24, V);
+        start[u + 1]++;
+    }
+    for (i64 v = 0; v < V; v++) { start[v + 1] += start[v]; }
+    i32[..>] cursor = [];
+    for (i32 x : start) { cursor +> x; }
+    i32[..>] out = [];
+    for (i64 e = 0; e < ne; e++) { out +> 0; }
+    for (i64 e = 0; e < ne; e++) {
+        i32 s = esrc[e];
+        out[cursor[s]] = edst[e];
+        cursor[s]++;
+    }
+    // BFS, identical to graph.zn apart from how the edges are reached.
+    i32[..>] dist = [];
+    for (i64 v = 0; v < V; v++) { dist +> -1; }
+    i32[..~] q = [];
+    i64 total = 0;
+    u64 seed = 999;
+    for (i64 s = 0; s < SOURCES; s++) {
+        seed = xsNext(seed);
+        i64 src = xsMod(seed, V);
+        dist.fill(-1);
+        total += bfs(src, start, out, dist, q);
+    }
+    println("${V + ne}");
+    println("${total}");
+}

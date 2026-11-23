@@ -1,0 +1,75 @@
+// Expression-tree evaluation: the dispatch benchmark. Zinkite has no variants with
+// payloads yet (DESIGN §17), so each kind of node is a class of its own implementing
+// `Expr`, kept in an array of its own, and nodes link through interface references:
+// 16 bytes, the value's address and its method table (DESIGN §6.3). `eval` is an
+// interface call, an indirect call through the table as in C++, but no node carries
+// a vtable pointer or needs an allocation: a Num is 4 bytes, a Neg 16, an Add or Mul
+// 32. Goose keeps every node in one array at its own variant's size (5 or 9 bytes)
+// and dispatches on a tag; interp_tagged.zn is that shape.
+
+i64 DEPTH = 20;                          // BENCH_N
+i64 PASSES = 8;
+i64 M = 1000003;                         // Keeps every value in range: no overflow.
+
+interface Expr {
+    i64 eval(i64 p);
+}
+
+class Num implements Expr {
+    i32 v;
+    i64 eval(i64 p) { return (v + p) % M; }
+}
+
+class Add implements Expr {
+    Expr& l;
+    Expr& r;
+    i64 eval(i64 p) { return (l.eval(p) + r.eval(p)) % M; }
+}
+
+class Mul implements Expr {
+    Expr& l;
+    Expr& r;
+    i64 eval(i64 p) { return (l.eval(p) * r.eval(p)) % M; }
+}
+
+class Neg implements Expr {
+    Expr& of;
+    i64 eval(i64 p) { return (M - of.eval(p)) % M; }
+}
+
+Num[..>] nums = [];
+Add[..>] adds = [];
+Mul[..>] muls = [];
+Neg[..>] negs = [];
+
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+Expr& build(i64 depth, u64 seed) {
+    u64 s = xsNext(seed);
+    if (depth == 0) { return nums.push(new Num((i32) xsMod(s, 1000))); }
+    i64 k = xsMod(s, 8);
+    if (k < 1) {
+        Expr& a = build(depth - 1, s);
+        return negs.push(new Neg(a));
+    }
+    Expr& a = build(depth - 1, s);
+    Expr& b = build(depth - 1, xsNext(s));
+    if (k < 5) { return adds.push(new Add(a, b)); }
+    return muls.push(new Mul(a, b));
+}
+
+void main() {
+    Expr& root = build(DEPTH, 12345);
+    i64 total = 0;
+    for (i64 p = 0; p < PASSES; p++) { total = (total + root.eval(p)) % M; }
+    println("${nums.len + adds.len + muls.len + negs.len}");
+    println("${total}");
+}

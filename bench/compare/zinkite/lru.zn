@@ -1,0 +1,127 @@
+// An LRU cache of capacity N/8 under N skewed lookups: a hash map from key to
+// node, a doubly-linked recency list, and an eviction of the least recently
+// used entry on a miss when full. An invalidation every sixteenth operation
+// frees nodes out of order, so the free list actually cycles. It is the
+// mutation-heavy shape the stack discipline is worst placed for: nodes are
+// freed and reused in an order that has nothing to do with scope.
+//
+// This is the idiomatic Zinkite cache, the shape of examples/cachesim.zn: the
+// nodes live in a built-in `pool<Node>`, whose freed slots come back on the
+// next `add` without an allocator, and they link to each other with plain
+// references into the pool (REFERENCES §7.4), 8 bytes each where Goose's
+// pool-relative links take 4. The map is the built-in `hashmap<i32,
+// Handle<Node>>`, Python's compact dict on a data stack, where Goose hand-rolls
+// an open-addressed table; lru_open.zn is the hand-rolled version. Two
+// sentinel nodes keep the list from ever being empty, as in lru.goose.
+
+i64 N = 8000000;                         // BENCH_N
+i64 CAP = N / 8;
+i64 KEYS = CAP * 2;
+
+// xorshift64, the same generator as the Goose, C++ and Rust versions.
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+class Node {
+    i32 key;
+    i32 val;
+    Node&? prev;                         // toward the most recently used end
+    Node&? next;                         // toward the least recently used end
+}
+
+void unlink(Node& n) {
+    Node&? p = n.prev;
+    Node&? q = n.next;
+    if (p == null || q == null) { return; }    // never: the sentinels are always there
+    p.next .= q;
+    q.prev .= p;
+}
+
+void linkFront(Node& head, Node& n) {
+    Node&? q = head.next;
+    if (q == null) { return; }
+    n.prev .= head;
+    n.next .= q;
+    q.prev .= n;
+    head.next .= n;
+}
+
+void main() {
+    pool<Node> nodes = [];
+    hashmap<i32, Handle<Node>> index = [];
+    // Two sentinels: the list is never empty, so no link is null in practice.
+    Handle<Node> hh = nodes.add(new Node(-1, 0, null, null));
+    Handle<Node> th = nodes.add(new Node(-1, 0, null, null));
+    Node& head @_ = nodes.get(hh);
+    Node& tail @_ = nodes.get(th);
+    head.next .= tail;
+    tail.prev .= head;
+    i64 count = 0;
+    i64 hits = 0;
+    i64 misses = 0;
+    i64 removes = 0;
+    u64 r = 12345;
+    for (i64 op = 0; op < N; op++) {
+        r = xsNext(r);
+        i64 a = xsMod(r, KEYS);
+        i32 key = (i32) ((a * a) / KEYS);    // skewed towards small keys
+        Handle<Node> h @missing = index.get(key);
+        if (xsMod(r >> 40, 16) == 0) {
+            // An invalidation: drop the entry if it is cached.
+            if (!missing) {
+                Node& f @_ = nodes.get(h);
+                unlink(f);
+                @_ = index.remove(key);
+                @_ = nodes.free(h);
+                count--;
+                removes++;
+            }
+            continue;
+        }
+        if (!missing) {
+            Node& f @_ = nodes.get(h);
+            f.val += 1;
+            unlink(f);
+            linkFront(head, f);
+            hits++;
+            continue;
+        }
+        misses++;
+        if (count == CAP) {
+            Node&? lru = tail.prev;
+            if (lru == null) { continue; }
+            unlink(lru);
+            Handle<Node> lh @_ = index.get(lru.key);
+            @_ = index.remove(lru.key);
+            @_ = nodes.free(lh);
+            count--;
+        }
+        Handle<Node> fresh = nodes.add(new Node(key, key % 1000, null, null));
+        index.put(key, fresh);
+        Node& n @_ = nodes.get(fresh);
+        linkFront(head, n);
+        count++;
+    }
+    // Walk the list from most to least recent, so the order is checked too.
+    u64 walk = 0;
+    i64 vals = 0;
+    Node&? cur = head.next;
+    while (cur != null && cur.key >= 0) {
+        walk = walk *% 31 +% (u64) cur.key;
+        vals += cur.val;
+        cur .= cur.next;
+    }
+    println("${hits}");
+    println("${misses}");
+    println("${removes}");
+    println("${count}");
+    println("${walk}");
+    println("${vals}");
+}

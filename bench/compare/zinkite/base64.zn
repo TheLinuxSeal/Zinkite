@@ -1,0 +1,54 @@
+// base64: encode N random bytes (RFC 4648, with padding) and decode the text
+// back, each 16 times into a new buffer, with the standard library's codec.
+// Prints the text's length and FNV-1a hash, a sum over every pass, and whether
+// the round trip gave the input back. Byte-at-a-time work into growing arrays.
+
+import zink.encoding.*;
+
+i64 N = 1000000;                         // BENCH_N
+i64 TRIES = 16;
+
+// xorshift64, the same generator as the Goose, C++ and Rust versions.
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+void main() {
+    u8[..>] input = [];
+    u64 r = 12345;
+    for (i64 i = 0; i < N; i++) {
+        r = xsNext(r);
+        input +> (u8) xsMod(r, 256);
+    }
+    u8[.] text = base64.encode(input);
+    u64 h = 14695981039346656037;
+    for (u8 b : text) { h = (h ^ b) *% 1099511628211; }
+
+    // Each pass's buffer is new, and gone again at its closing brace. One byte of
+    // each result goes into the sum, so no pass can be skipped.
+    i64 encoded = 0;
+    for (i64 t = 0; t < TRIES; t++) {
+        u8[.] e = base64.encode(input);
+        encoded += e.len + e[t * 1000003 % e.len];
+    }
+    i64 decoded = 0;
+    for (i64 t = 0; t < TRIES; t++) {
+        u8[..>] d = [];
+        base64.decode(text, d);
+        decoded += d.len + d[t * 1000003 % d.len];
+    }
+    u8[..>] back = [];
+    base64.decode(text, back);
+
+    println("${text.len}");
+    println("${h}");
+    println("${encoded}");
+    println("${decoded}");
+    println("${back == input ? 1 : 0}");
+}

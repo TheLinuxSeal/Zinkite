@@ -1,0 +1,55 @@
+// The binary tree of tree.zn, with its 12-byte node built by hand: the value and two
+// i32 indices into the static node array, -1 for none, in place of tree.zn's
+// self-relative links. Each step here is an index, checked against the array's
+// length, where following a link is an add with no check.
+//
+// Children are pushed before their parent. The pass index is folded into every
+// node's contribution, so the eight passes are eight different computations.
+
+i64 DEPTH = 20;                          // BENCH_N
+i64 PASSES = 8;
+
+class TNode {
+    i32 v;
+    i32 l;      // -1: none
+    i32 r;
+}
+
+TNode[..>] pool = [];
+
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+i32 build(i64 depth, u64 seed) {
+    if (depth == 0) {
+        pool +> new TNode((i32) xsMod(seed, 1000), -1, -1);
+        return (i32) (pool.len - 1);
+    }
+    i32 l = build(depth - 1, xsNext(seed));
+    i32 r = build(depth - 1, xsNext(seed +% 1));
+    pool +> new TNode((i32) xsMod(seed, 1000), l, r);
+    return (i32) (pool.len - 1);
+}
+
+i64 sumTree(i32 i, i64 p) {
+    TNode& n = pool[i];
+    i64 t = n.v ^ p;
+    if (n.l >= 0) { t += sumTree(n.l, p); }
+    if (n.r >= 0) { t += sumTree(n.r, p); }
+    return t;
+}
+
+void main() {
+    i32 root = build(DEPTH, 12345);
+    i64 total = 0;
+    for (i64 p = 0; p < PASSES; p++) { total += sumTree(root, p); }
+    println("${pool.len}");
+    println("${total}");
+}

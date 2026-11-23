@@ -1,0 +1,51 @@
+// The Benchmarks Game's binary-trees, included for recognisability: build a great
+// many short-lived complete binary trees, check each, throw it away, with one
+// long-lived tree kept across the run. It is famously an allocator benchmark.
+// As bintrees.zn, with the children linked by 4-byte self-relative links
+// (`TNode&<i32>?`, REFERENCES §7.2) instead of references, so a node is 8 bytes, as
+// in Goose, and half the memory. These trees fit in cache, so the add that follows a
+// link costs a little more than the load of a reference saves.
+
+i64 MAXDEPTH = 17;                       // BENCH_N
+i64 MINDEPTH = 4;
+
+class TNode {
+    TNode&<i32>? l;
+    TNode&<i32>? r;
+}
+
+TNode& make(TNode[..>]& pool, i64 depth) {
+    if (depth == 0) { return pool.push(new TNode(null, null)); }
+    TNode& l = make(pool, depth - 1);
+    TNode& r = make(pool, depth - 1);
+    return pool.push(new TNode(l, r));
+}
+
+i64 check(TNode& n) {
+    TNode&? l = n.l;
+    if (l == null) { return 1; }
+    TNode&? r = n.r;
+    if (r == null) { return 1; }
+    return 1 + check(l) + check(r);
+}
+
+i64 treeCheck(i64 depth) {
+    TNode[..>] pool = [];
+    TNode& root = make(pool, depth);
+    return check(root);
+}
+
+void main() {
+    println("${treeCheck(MAXDEPTH + 1)}");
+    TNode[..>] longLived = [];
+    TNode& lroot = make(longLived, MAXDEPTH);
+    for (i64 d = MINDEPTH; d <= MAXDEPTH; d += 2) {
+        i64 iters = 1 << (MAXDEPTH - d + MINDEPTH);
+        i64 sum = 0;
+        for (i64 i = 0; i < iters; i++) { sum += treeCheck(d); }
+        println("${iters}");
+        println("${d}");
+        println("${sum}");
+    }
+    println("${check(lroot)}");
+}

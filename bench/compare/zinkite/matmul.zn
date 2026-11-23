@@ -1,0 +1,47 @@
+// matmul (plb2): the product of two n x n f64 matrices by the i-k-j triple
+// loop, each matrix its rows back to back in one array. The entries are small
+// integers, so every product and sum is exact and all four languages print the
+// same checksums: the centre element and the sum of all of them. Floating-point
+// throughput, and whether the inner loop vectorizes.
+
+i64 N = 300;                             // BENCH_N
+
+// xorshift64, the same generator as the Goose, C++ and Rust versions.
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+void main() {
+    i64 n = N;
+    u64 r = 12345;
+    f64[..>] a = [];
+    f64[..>] b = [];
+    f64[..>] c = [];
+    for (i64 i = 0; i < n * n; i++) {
+        r = xsNext(r);
+        a +> (f64) (xsMod(r, 101) - 50);
+    }
+    for (i64 i = 0; i < n * n; i++) {
+        r = xsNext(r);
+        b +> (f64) (xsMod(r, 101) - 50);
+        c +> 0.0;
+    }
+    for (i64 i = 0; i < n; i++) {
+        f64[:]& ci = c[i * n:i * n + n];
+        for (i64 k = 0; k < n; k++) {
+            f64 aik = a[i * n + k];
+            f64[:] bk = b[k * n:k * n + n];
+            for (i64 j = 0; j < n; j++) { ci[j] += aik * bk[j]; }
+        }
+    }
+    f64 total = 0.0;
+    for (f64 x : c) { total += x; }
+    println("${(i64) c[(n / 2) * n + n / 2]}");
+    println("${(i64) total}");
+}

@@ -1,0 +1,67 @@
+// Word frequency counting: build a text, split it into words, count them.
+// The word list is `u8[.*][..>]`, one contiguous block of variable-size
+// strings, and the counts go in the built-in `hashmap<string, i32>`: Python's
+// compact dict in one block on a data stack, entries in insertion order and
+// never moved, with keys that are views into the text, so no key is copied
+// or allocated. This is the row of the Goose std dictionary;
+// words_open.zn is the hand-written open-addressed table of words.goose.
+// Zinkite hashes with its own seeded hash, so the hash function differs from
+// every other row's; the checksums don't depend on it.
+
+i64 N = 2000000;                         // BENCH_N
+
+// xorshift64, the same generator as the Goose, C++ and Rust versions.
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+void main() {
+    i64 vocab = N / 10 + 16;
+    u64 r = 12345;
+    // A vocabulary of capped words, inline in their array, so it stays
+    // randomly indexable.
+    u8[..~20][..>] dict = [];
+    for (i64 i = 0; i < vocab; i++) {
+        u8[..~20]& w = dict.push([]);
+        r = xsNext(r);
+        i64 n = 3 + xsMod(r, 12);
+        for (i64 j = 0; j < n; j++) {
+            r = xsNext(r);
+            w +> (u8) ('a' + xsMod(r, 26));
+        }
+    }
+    // A text of N words drawn with a skew towards the front of the vocabulary.
+    u8[..>] text = [];
+    for (i64 i = 0; i < N; i++) {
+        r = xsNext(r);
+        i64 a = xsMod(r, vocab);
+        i64 k = (a * a) / vocab;
+        text.append(dict[k]);
+        text +> ' ';
+    }
+    // Split: one contiguous block of variable-size strings; the trailing
+    // separator yields an empty part, which is not a word.
+    u8[.*][..>] words = [];
+    for (string w : text.splitBy(" ")) {
+        if (w.len > 0) { words +> w; }
+    }
+    // Count, with keys that are views into the text. The count walks the
+    // text's words again rather than the list: a `string` taken from an
+    // element of `words` comes out with the wrong C type today, a compiler
+    // bug. Splitting reads the same bytes the walk would.
+    hashmap<string, i32> counts = [];
+    for (string w : text.splitBy(" ")) {
+        if (w.len > 0) { counts.getOrAdd(w, 0)++; }
+    }
+    i64 total = 0;
+    for (var& e : counts) { total += e.value * (e.key.len + e.key[0]); }
+    println("${words.len}");
+    println("${counts.len}");
+    println("${total}");
+}

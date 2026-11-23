@@ -1,0 +1,212 @@
+// Many small parses with real error paths: N arithmetic expressions are generated,
+// parsed by recursive descent into an AST, and evaluated, and a quarter of them are
+// malformed (a dropped paren, a stray character, a truncated text, a division by
+// zero), so the error path is taken from deep inside the recursion on every fourth
+// input.
+//
+// Each input's tree is a local grow-only array of 16-byte nodes linked by index,
+// released when runOne returns however the input ends. A parse error is a failing
+// `return` that the callers don't read, and a division by zero is the language's
+// own DOMAIN check; either abandons the input at the `@@` in main, many frames up
+// (DESIGN §7.6), as Goose's `return ... from run_one` does. That costs a setjmp per
+// input and a predictable branch after each call. calc_status.zn reads every status
+// and passes it up frame by frame instead, as error codes and Rust's `?` do.
+//
+// The tree keeps a Paren node for a parenthesised subexpression so that every
+// implementation builds the same nodes and the counts and checksums agree.
+
+i64 N = 250000;                          // BENCH_N
+
+// The program's own status codes start at 224 (DESIGN §7.7). A division by zero is
+// the language's own DOMAIN.
+u8 E_EOF = 225;
+u8 E_PAREN = 226;
+u8 E_TOKEN = 227;
+
+enum Kind { NUM, NEG, PAREN, BIN }
+
+class Expr {
+    Kind kind;
+    u8 op;
+    i32 a;      // NUM: the value; NEG, PAREN: the operand; BIN: the left operand
+    i32 b;      // BIN: the right operand
+}
+
+u8[..~] text = [];
+i64 pos = 0;
+i64 nodes = 0;                           // Every node ever built, bad inputs included.
+
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+// --- generation --------------------------------------------------------------
+
+void emitNum(i64 v) {
+    if (v >= 10) { text +> (u8) ('0' + v / 10); }
+    text +> (u8) ('0' + v % 10);
+}
+
+u64 gen(i64 depth, u64 seed) {
+    u64 r = xsNext(seed);
+    i64 k = xsMod(r, 8);
+    if (depth == 0 || k == 0) { emitNum(1 + xsMod(r >> 8, 99)); return r; }
+    if (k == 1) { text +> '-'; return gen(depth - 1, r); }
+    if (k == 2) {
+        text +> '(';
+        r = gen(depth - 1, r);
+        text +> ')';
+        return r;
+    }
+    r = gen(depth - 1, r);
+    i64 op = xsMod(r >> 16, 4);
+    text +> ' ';
+    if (op == 0) { text +> '+'; } else if (op == 1) { text +> '-'; }
+    else if (op == 2) { text +> '*'; } else { text +> '/'; }
+    text +> ' ';
+    return gen(depth - 1, xsNext(r));
+}
+
+// One in four inputs is damaged after generation.
+void corrupt(u64 seed) {
+    i64 kind = xsMod(seed, 16);
+    if (kind == 0) {
+        for (i64 i = text.len - 1; i >= 0; i--) {
+            if (text[i] == ')') { text[i] = ' '; return; }
+        }
+        text[0] = '#';
+        return;
+    }
+    if (kind == 1) { text[xsMod(seed >> 8, text.len)] = '#'; return; }
+    if (kind == 2) { text.truncate(text.len / 2); return; }
+    if (kind == 3) { text.append(" / 0"); }
+}
+
+// --- parsing -----------------------------------------------------------------
+
+void skip() { while (pos < text.len && text[pos] == ' ') { pos++; } }
+
+i32 node(Expr[..>]& pool, Kind kind, u8 op, i32 a, i32 b) {
+    nodes++;
+    pool +> new Expr(kind, op, a, b);
+    return (i32) (pool.len - 1);
+}
+
+i32 parseExpr(Expr[..>]& pool) {
+    i32 lhs = parseTerm(pool);
+    while (true) {
+        skip();
+        if (pos >= text.len || (text[pos] != '+' && text[pos] != '-')) { break; }
+        u8 op = text[pos];
+        pos++;
+        i32 rhs = parseTerm(pool);
+        lhs = node(pool, Kind.BIN, op, lhs, rhs);
+    }
+    return lhs;
+}
+
+i32 parseTerm(Expr[..>]& pool) {
+    i32 lhs = parseFactor(pool);
+    while (true) {
+        skip();
+        if (pos >= text.len || (text[pos] != '*' && text[pos] != '/')) { break; }
+        u8 op = text[pos];
+        pos++;
+        i32 rhs = parseFactor(pool);
+        lhs = node(pool, Kind.BIN, op, lhs, rhs);
+    }
+    return lhs;
+}
+
+// A failure here goes unread by parseTerm and parseExpr, so it abandons the input
+// at the `@@` in main, many frames up, as Goose's `return ... from run_one` does.
+i32 parseFactor(Expr[..>]& pool) {
+    skip();
+    if (pos >= text.len) { return #E_EOF 0; }
+    u8 c = text[pos];
+    if (c >= '0' && c <= '9') {
+        i32 v = 0;
+        while (pos < text.len && text[pos] >= '0' && text[pos] <= '9') {
+            v = v * 10 + (text[pos] - '0');
+            pos++;
+        }
+        return node(pool, Kind.NUM, 0, v, 0);
+    }
+    if (c == '-') {
+        pos++;
+        i32 f = parseFactor(pool);
+        return node(pool, Kind.NEG, 0, f, 0);
+    }
+    if (c != '(') { return #E_TOKEN 0; }
+    pos++;
+    i32 e = parseExpr(pool);
+    skip();
+    if (pos >= text.len || text[pos] != ')') { return #E_PAREN 0; }
+    pos++;
+    return node(pool, Kind.PAREN, 0, e, 0);
+}
+
+// --- evaluation --------------------------------------------------------------
+// Unsigned and wrapping, so overflow wraps identically in every language.
+
+u64 eval(Expr[:] pool, i32 i) {
+    Expr& e = pool[i];
+    if (e.kind == Kind.NUM) { return (u64) e.a; }
+    if (e.kind == Kind.NEG) { return 0 -% eval(pool, e.a); }
+    if (e.kind == Kind.PAREN) { return eval(pool, e.a); }
+    u64 a = eval(pool, e.a);
+    u64 b = eval(pool, e.b);
+    if (e.op == '+') { return a +% b; }
+    if (e.op == '-') { return a -% b; }
+    if (e.op == '*') { return a *% b; }
+    return a / b;                        // fails with DOMAIN when b is 0
+}
+
+// One input: its own node array, released on return however the input ends.
+u64 runOne() {
+    Expr[..>] pool = [];
+    pos = 0;
+    i32 root = parseExpr(pool);
+    skip();
+    if (pos != text.len) { return #E_TOKEN 0; }
+    return eval(pool, root);             // a division by zero inside abandons it too
+}
+
+void main() {
+    u64 seed = 12345;
+    i64 ok = 0;
+    i64 eofs = 0;
+    i64 parens = 0;
+    i64 tokens = 0;
+    i64 div0s = 0;
+    u64 sum = 0;
+    i64 chars = 0;
+    for (i64 i = 0; i < N; i++) {
+        seed = xsNext(seed);
+        text.clear();
+        i64 depth = 3 + xsMod(seed, 4);
+        u64 s = gen(depth, seed >> 8);
+        corrupt(s);
+        chars += text.len;
+        u64 v @@err = runOne();
+        if (err == 0) { ok++; sum = sum *% 31 +% v; }
+        else if (err == E_EOF) { eofs++; }
+        else if (err == E_PAREN) { parens++; }
+        else if (err == E_TOKEN) { tokens++; }
+        else if (err == status.DOMAIN) { div0s++; }
+    }
+    println("${chars}");
+    println("${nodes}");
+    println("${ok}");
+    println("${eofs}");
+    println("${parens}");
+    println("${tokens}");
+    println("${div0s}");
+    println("${sum}");
+}

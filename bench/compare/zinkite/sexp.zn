@@ -1,0 +1,143 @@
+// The flagship: generate an s-expression text, parse it into a tree, walk it.
+// Every node is a record of the variable-size class Node, with a symbol's text
+// stored inline behind a varint length (DESIGN §3.2), so the whole tree is one block
+// in one grow-only array, each node built in place where `push` puts it, and never
+// freed. A node is 13 bytes of fixed fields plus its text. Children are linked
+// first-child / previous-sibling with 4-byte self-relative links (`Node&<i32>?`,
+// REFERENCES §7.2), as Goose's are, so every node is complete when it is pushed and
+// no link is patched. Goose's nodes are each their own variant's size; Zinkite has
+// no variants with payloads yet, so numbers and lists carry an empty name and the
+// fields they don't use.
+//
+// The parser has an error path it never takes on this input: a failing `return`
+// that nothing reads, which would abandon the parse at the `@@` in main (DESIGN
+// §7.6), as Goose's `return ... from parse_all` does. On this input it costs one
+// predictable branch after each call. The node array is main's, passed down by
+// reference, where Goose uses a global.
+
+i64 N = 200000;                          // BENCH_N
+i64 DEPTH = 4;
+i64 PASSES = 4;
+
+enum Kind { SYM, NUM, LIST }
+
+class Node {
+    Node&<i32>? first;  // a list's last child
+    Node&<i32>? next;   // the previous sibling
+    i32 v;              // a number's value
+    Kind kind;
+    u8[.*] name;        // a symbol's text, inline behind a varint length
+}
+
+u8[..>] text = [];
+i64 pos = 0;
+
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+// --- generation --------------------------------------------------------------
+
+void emitSym(u64 seed) {
+    u64 r = seed;
+    i64 n = 3 + xsMod(r, 12);
+    for (i64 i = 0; i < n; i++) {
+        r = xsNext(r);
+        text +> (u8) ('a' + xsMod(r, 26));
+    }
+}
+
+u64 gen(i64 depth, u64 seed) {
+    u64 r = xsNext(seed);
+    if (depth == 0 || xsMod(r, 4) == 0) {
+        if (xsMod(r >> 8, 2) == 0) { emitSym(r); }
+        else { text.append("${xsMod(r >> 16, 100000)}"); }
+        text +> ' ';
+        return r;
+    }
+    text +> '(';
+    i64 kids = 2 + xsMod(r >> 24, 4);
+    for (i64 k = 0; k < kids; k++) { r = gen(depth - 1, r); }
+    text +> ')' +> ' ';
+    return r;
+}
+
+// --- parsing -----------------------------------------------------------------
+
+void skipSpace() { while (pos < text.len && text[pos] == ' ') { pos++; } }
+
+Node&? parseNode(Node[..>]& pool, Node&? prev) {
+    skipSpace();
+    if (pos >= text.len) { return #status.END null; }
+    u8 c = text[pos];
+    if (c == '(') {
+        pos++;
+        Node&? chain = null;
+        while (true) {
+            skipSpace();
+            if (pos >= text.len) { return #status.INVALID null; }
+            if (text[pos] == ')') { pos++; break; }
+            chain .= parseNode(pool, chain);
+        }
+        return pool.push(new Node(chain, prev, 0, Kind.LIST, ""));
+    }
+    i64 start = pos;
+    if (c >= '0' && c <= '9') {
+        i32 v = 0;
+        while (pos < text.len && text[pos] >= '0' && text[pos] <= '9') {
+            v = v * 10 + (text[pos] - '0');
+            pos++;
+        }
+        return pool.push(new Node(null, prev, v, Kind.NUM, ""));
+    }
+    while (pos < text.len && text[pos] != ' ' && text[pos] != '(' && text[pos] != ')') { pos++; }
+    return pool.push(new Node(null, prev, 0, Kind.SYM, text[start:pos]));
+}
+
+i64 parseAll(Node[..>]& pool, Node&[..>]& roots) {
+    while (true) {
+        skipSpace();
+        if (pos >= text.len) { break; }
+        Node&? r = parseNode(pool, null);
+        if (r != null) { roots +> r; }
+    }
+    return roots.len;
+}
+
+// --- walking -----------------------------------------------------------------
+
+i64 walk(Node& n, i64 p) {
+    return switch (n.kind) {
+        case SYM => n.name.len + n.name[0] + p;
+        case NUM => n.v ^ p;
+        case LIST => 1 + walkChain(n.first, p);
+    };
+}
+
+i64 walkChain(Node&? c, i64 p) {
+    if (c == null) { return 0; }
+    return walk(c, p) + walkChain(c.next, p);
+}
+
+void main() {
+    u64 seed = 12345;
+    for (i64 i = 0; i < N; i++) { seed = gen(DEPTH, seed); }
+    Node[..>] pool = [];
+    Node&[..>] roots = [];
+    i64 nroots @@err = parseAll(pool, roots);
+    println("${text.len}");
+    println("${pool.len}");
+    println("${nroots}");
+    println("${err}");
+    i64 total = 0;
+    for (i64 p = 0; p < PASSES; p++) {
+        for (Node& r : roots) { total += walk(r, p); }
+    }
+    println("${total}");
+}

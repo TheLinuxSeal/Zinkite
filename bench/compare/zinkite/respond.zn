@@ -1,0 +1,131 @@
+// A web service's hot loop: for each request, build the typed response
+// object -- an id, a user name, a list of line items -- and render it as
+// JSON into an output buffer, then throw both away. The response is one
+// variable-size record: the user name inline behind a varint length, the
+// item list inline in it, and each item's sku inline in the item, so the
+// whole DTO is one contiguous block with no pointers. `new Resp(...)` writes
+// it field by field where the local lives, and both the response and its
+// rendered text are locals of `handle`, released when it returns.
+//
+// Goose builds the item list straight into the response's field. Here the
+// items are built in a local array first and copied into the record once,
+// since a function returning an array of variable-size records doesn't
+// compile yet (a compiler bug).
+//
+// Numbers are rendered with interpolation, which writes the digits straight
+// into the buffer, as C++'s to_chars does. Goose stores qty and price as
+// varints; Zinkite has no varint integers, so they are i32 here.
+
+i64 N = 400000;                          // BENCH_N
+
+class Item { u8[.*] sku; i32 qty; i32 price; }
+class Resp { i64 id; u8[.*] user; Item[.*] items; }
+
+// xorshift64, the same generator as the Goose, C++ and Rust versions.
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+// A user name of 3..10 letters; one in eight carries a quote or a backslash
+// so the escaping path in the renderer is real. Small capped arrays like this
+// one are inline values and never touch a data stack.
+u8[..~10] nameOf(u64 seed) {
+    u8[..~10] s = [];
+    u64 r = xsNext(seed);
+    i64 n = 3 + xsMod(r, 8);
+    bool odd = xsMod(r >> 8, 8) == 0;
+    for (i64 i = 0; i < n; i++) {
+        r = xsNext(r);
+        if (odd && i == 1) { s +> (xsMod(r, 2) == 0 ? '"' : '\\'); }
+        else { s +> (u8) ('a' + xsMod(r, 26)); }
+    }
+    return s;
+}
+
+// A stock keeping unit: two letters and four digits.
+u8[..~6] skuOf(u64 seed) {
+    u8[..~6] s = [];
+    u64 r = xsNext(seed);
+    s +> (u8) ('A' + xsMod(r, 26)) +> (u8) ('A' + xsMod(r >> 8, 26));
+    for (i64 i = 0; i < 4; i++) {
+        r = xsNext(r);
+        s +> (u8) ('0' + xsMod(r, 10));
+    }
+    return s;
+}
+
+void makeItems(Item[..>]& t, u64 seed, i64 n) {
+    u64 r = seed;
+    for (i64 i = 0; i < n; i++) {
+        r = xsNext(r);
+        t +> new Item(skuOf(r), (i32) (1 + xsMod(r >> 8, 5)), (i32) (100 + xsMod(r >> 16, 99900)));
+    }
+}
+
+// --- rendering ---------------------------------------------------------------
+
+void emitStr(u8[..>]& out, string s) {
+    out +> '"';
+    for (u8 c : s) {
+        if (c == '"' || c == '\\') { out +> '\\'; }
+        out +> c;
+    }
+    out +> '"';
+}
+
+void render(u8[..>]& out, Resp& r) {
+    out.append("{\"id\":${r.id},\"user\":");
+    emitStr(out, r.user);
+    out.append(",\"items\":[");
+    i64 total = 0;
+    bool first = true;
+    for (Item& it : r.items) {
+        if (!first) { out +> ','; }
+        first = false;
+        out.append("{\"sku\":");
+        emitStr(out, it.sku);
+        out.append(",\"qty\":${it.qty},\"price\":${it.price}}");
+        total += (i64) it.qty * it.price;
+    }
+    out.append("],\"total\":${total}}");
+}
+
+// FNV-1a, the checksum the other rows compute.
+u64 fnv(string s) {
+    u64 h = 14695981039346656037;
+    for (u8 b : s) { h = (h ^ b) *% 1099511628211; }
+    return h;
+}
+
+// One request: the response object and its rendering are both locals.
+(u64, i64) handle(u64 seed) {
+    u64 r = xsNext(seed);
+    i64 n = 1 + xsMod(r, 8);
+    Item[..>] items = [];
+    makeItems(items, r >> 16, n);
+    Resp resp = new Resp(xsMod(r >> 4, 1000000), nameOf(r >> 8), items);
+    u8[..>] out = [];
+    render(out, resp);
+    return (fnv(out), out.len);
+}
+
+void main() {
+    u64 seed = 12345;
+    u64 h = 0;
+    i64 bytes = 0;
+    for (i64 i = 0; i < N; i++) {
+        seed = xsNext(seed);
+        (u64 hh, i64 l) = handle(seed);
+        h = h ^ (hh *% 31 +% (u64) i);
+        bytes += l;
+    }
+    println("${N}");
+    println("${bytes}");
+    println("${h}");
+}

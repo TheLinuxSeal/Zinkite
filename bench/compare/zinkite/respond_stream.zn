@@ -1,0 +1,91 @@
+// The same responses as respond.zn, rendered straight into the output buffer
+// as they are generated, with no response object in between: the shape of
+// the streaming Goose, C++ and Rust rows, so the gap between the two Zinkite
+// rows is what building the DTO costs. The generator is consumed in exactly
+// the order respond.zn consumes it, so the bytes -- and the checksum -- are
+// identical. The buffer is a local of `handle` on a data stack, so each
+// request reuses the same memory.
+
+i64 N = 400000;                          // BENCH_N
+
+// xorshift64, the same generator as the Goose, C++ and Rust versions.
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+void emitName(u8[..>]& out, u64 seed) {
+    u64 r = xsNext(seed);
+    i64 n = 3 + xsMod(r, 8);
+    bool odd = xsMod(r >> 8, 8) == 0;
+    out +> '"';
+    for (i64 i = 0; i < n; i++) {
+        r = xsNext(r);
+        if (odd && i == 1) {
+            out +> '\\' +> (xsMod(r, 2) == 0 ? '"' : '\\');
+        } else {
+            out +> (u8) ('a' + xsMod(r, 26));
+        }
+    }
+    out +> '"';
+}
+
+void emitSku(u8[..>]& out, u64 seed) {
+    u64 r = xsNext(seed);
+    out +> '"' +> (u8) ('A' + xsMod(r, 26)) +> (u8) ('A' + xsMod(r >> 8, 26));
+    for (i64 i = 0; i < 4; i++) {
+        r = xsNext(r);
+        out +> (u8) ('0' + xsMod(r, 10));
+    }
+    out +> '"';
+}
+
+// FNV-1a, the checksum the other rows compute.
+u64 fnv(string s) {
+    u64 h = 14695981039346656037;
+    for (u8 b : s) { h = (h ^ b) *% 1099511628211; }
+    return h;
+}
+
+(u64, i64) handle(u64 seed) {
+    u64 r0 = xsNext(seed);
+    i64 n = 1 + xsMod(r0, 8);
+    u8[..>] out = [];
+    out.append("{\"id\":${xsMod(r0 >> 4, 1000000)},\"user\":");
+    emitName(out, r0 >> 8);
+    out.append(",\"items\":[");
+    i64 total = 0;
+    u64 r = r0 >> 16;
+    for (i64 i = 0; i < n; i++) {
+        r = xsNext(r);
+        if (i > 0) { out +> ','; }
+        i64 qty = 1 + xsMod(r >> 8, 5);
+        i64 price = 100 + xsMod(r >> 16, 99900);
+        out.append("{\"sku\":");
+        emitSku(out, r);
+        out.append(",\"qty\":${qty},\"price\":${price}}");
+        total += qty * price;
+    }
+    out.append("],\"total\":${total}}");
+    return (fnv(out), out.len);
+}
+
+void main() {
+    u64 seed = 12345;
+    u64 h = 0;
+    i64 bytes = 0;
+    for (i64 i = 0; i < N; i++) {
+        seed = xsNext(seed);
+        (u64 hh, i64 l) = handle(seed);
+        h = h ^ (hh *% 31 +% (u64) i);
+        bytes += l;
+    }
+    println("${N}");
+    println("${bytes}");
+    println("${h}");
+}

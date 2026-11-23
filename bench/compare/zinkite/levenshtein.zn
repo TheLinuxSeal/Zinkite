@@ -1,0 +1,77 @@
+// levenshtein: the edit distance of every pair of N random words, by
+// Wagner-Fischer in two rows as long as the shorter word plus one. It measures
+// a tight two-dimensional loop over small arrays, made fresh for each pair.
+
+i64 N = 1000;                            // BENCH_N
+
+// xorshift64, the same generator as the Goose, C++ and Rust versions.
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+u32 distance(string s1, string s2) {
+    // The shorter word is the row.
+    string a = s1.len <= s2.len ? s1 : s2;
+    string b = s1.len <= s2.len ? s2 : s1;
+    i64 m = a.len;
+    u32[..>] prevRow = [];
+    u32[..>] currRow = [];
+    for (i64 i = 0; i <= m; i++) {
+        prevRow +> (u32) i;
+        currRow +> 0;
+    }
+    // Views of the two rows, swapped after each row rather than copied.
+    u32[:]& prev = prevRow;
+    u32[:]& curr = currRow;
+    for (i64 j = 0; j < b.len; j++) {
+        u8 c = b[j];
+        curr[0] = (u32) (j + 1);
+        for (i64 i = 0; i < m; i++) {
+            u32 cost = a[i] == c ? 0 : 1;
+            curr[i + 1] = min(min(prev[i + 1] + 1, curr[i] + 1), prev[i] + cost);
+        }
+        u32[:]& t = prev;
+        prev .= curr;
+        curr .= t;
+    }
+    return prev[m];
+}
+
+void main() {
+    // One text of space-separated random words, then a view of each word.
+    u8[..>] text = [];
+    u64 r = 12345;
+    for (i64 i = 0; i < N; i++) {
+        r = xsNext(r);
+        i64 wl = 3 + xsMod(r, 18);
+        for (i64 j = 0; j < wl; j++) {
+            r = xsNext(r);
+            text +> (u8) ('a' + xsMod(r, 26));
+        }
+        text +> ' ';
+    }
+    string[..>] words = [];
+    i64 start = 0;
+    for (i64 i = 0; i < text.len; i++) {
+        if (text[i] == ' ') {
+            words +> text[start:i];
+            start = i + 1;
+        }
+    }
+    i64 total = 0;
+    i64 pairs = 0;
+    for (i64 i = 0; i < words.len; i++) {
+        for (i64 j = i + 1; j < words.len; j++) {
+            total += distance(words[i], words[j]);
+            pairs++;
+        }
+    }
+    println("${pairs}");
+    println("${total}");
+}

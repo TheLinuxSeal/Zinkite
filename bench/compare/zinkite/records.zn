@@ -1,0 +1,84 @@
+// An event log of variant records -- the shape of telemetry, game events, or
+// any tagged message stream. Zinkite has no enums with payloads yet (DESIGN
+// §17), so an event is one variable-size class: a kind, the fixed-size fields
+// of every variant, packed, and the Say text inline behind a varint length.
+// The compiler stores an enum in 4 bytes today, so a Tick costs 14 bytes where
+// Goose's variable-mode enum costs 1, but every event is still stored inline
+// in one block with no pointers and no per-event allocation, where the C++ and
+// Rust rows pad each element to their largest variant and allocate the string
+// separately.
+//
+// An array of variable-size records can be walked but not indexed, which is
+// what a log replay does anyway.
+
+i64 N = 2000000;                         // BENCH_N
+i64 PASSES = 4;
+
+enum Kind { TICK, MOVE, SAY, QUIT }
+
+class Event {
+    Kind kind;
+    i32 id;
+    i16 dx;
+    i16 dy;
+    u8 code;
+    u8[.*] text;
+}
+
+// xorshift64, the same generator as the Goose, C++ and Rust versions.
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+// A word of 4..15 letters from its own chain, so the caller's stream advances
+// once per event whatever the variant is. A small capped array: inline, no
+// data stack.
+u8[..~15] word(u64 seed) {
+    u8[..~15] w = [];
+    u64 r = xsNext(seed);
+    i64 n = 4 + xsMod(r, 12);
+    for (i64 i = 0; i < n; i++) {
+        r = xsNext(r);
+        w +> (u8) ('a' + xsMod(r, 26));
+    }
+    return w;
+}
+
+void main() {
+    Event[..>] log = [];
+    u64 r = 12345;
+    for (i64 i = 0; i < N; i++) {
+        r = xsNext(r);
+        i64 k = xsMod(r, 8);
+        i32 id = (i32) xsMod(r >> 3, 100000);
+        if (k < 4) {
+            log +> new Event(Kind.MOVE, id, (i16) (xsMod(r >> 20, 201) - 100),
+                             (i16) (xsMod(r >> 40, 201) - 100), 0, "");
+        } else if (k < 6) {
+            log +> new Event(Kind.SAY, id, 0, 0, 0, word(r));
+        } else if (k < 7) {
+            log +> new Event(Kind.QUIT, id, 0, 0, (u8) xsMod(r >> 20, 256), "");
+        } else {
+            log +> new Event(Kind.TICK, 0, 0, 0, 0, "");
+        }
+    }
+    i64 total = 0;
+    for (i64 p = 0; p < PASSES; p++) {
+        for (Event& e : log) {
+            total += switch (e.kind) {
+                case TICK => 1;
+                case MOVE => e.id + e.dx + e.dy;
+                case SAY => e.id + e.text.len + e.text[0];
+                case QUIT => e.id + e.code;
+            };
+        }
+    }
+    println("${log.len}");
+    println("${total}");
+}

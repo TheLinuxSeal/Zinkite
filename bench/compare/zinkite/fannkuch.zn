@@ -1,0 +1,54 @@
+// fannkuch-redux (Benchmarks Game): for every permutation of 0..n-1, count the
+// prefix reversals ("pancake flips") until 0 comes first. Prints the checksum
+// and the largest flip count. Small arrays, tight loops, indexing and swaps.
+// The plain single-threaded algorithm, the same in all four languages.
+
+i64 N = 10;                              // BENCH_N
+
+void main() {
+    i32 n = (i32) N;
+    i32[..>] perm = [];
+    i32[..>] perm1 = [];
+    i32[..>] count = [];
+    for (i32 i = 0; i < n; i++) {
+        perm +> 0;
+        perm1 +> i;
+        count +> 0;
+    }
+    i32 maxFlips = 0;
+    i64 permCount = 0;
+    i64 checksum = 0;
+    i32 r = n;
+    while (true) {
+        while (r != 1) {
+            count[r - 1] = r;
+            r--;
+        }
+        for (i32 i = 0; i < n; i++) { perm[i] = perm1[i]; }
+        i32 flips = 0;
+        i32 k = perm[0];
+        while (k != 0) {
+            perm[0:k + 1].reverse();
+            flips++;
+            k = perm[0];
+        }
+        maxFlips = max(maxFlips, flips);
+        checksum += permCount % 2 == 0 ? flips : -flips;
+        // The next permutation: rotate the first r + 1 elements left by one,
+        // and each counter that runs out brings one more element in.
+        while (true) {
+            if (r == n) {
+                println("${checksum}");
+                println("${maxFlips}");
+                return;
+            }
+            i32 perm0 = perm1[0];
+            for (i32 i = 0; i < r; i++) { perm1[i] = perm1[i + 1]; }
+            perm1[r] = perm0;
+            count[r]--;
+            if (count[r] > 0) { break; }
+            r++;
+        }
+        permCount++;
+    }
+}

@@ -1,0 +1,84 @@
+// Building an adjacency structure incrementally, then traversing it: V
+// vertices, 8V random edges, then a BFS from four sources.
+//
+// The Zinkite version is the one-pass linked build of graph.goose: one edge
+// array grown an edge at a time, each vertex's edges chained together, and
+// the first V entries are the per-vertex list heads. Goose chains them with
+// 4-byte self-relative links; Zinkite's code generator doesn't have links yet
+// (DESIGN §5.4), so the chain is an i32 index into the same array. An edge is
+// 8 bytes either way, and the array never moves as it grows, but each hop
+// re-indexes the array, as the C++ and Rust arena rows do. graph_csr.zn is
+// the two-pass CSR build.
+
+i64 V = 1000000;                         // BENCH_N
+i64 DEG = 8;
+i64 SOURCES = 4;
+
+// xorshift64, the same generator as the Goose, C++ and Rust versions.
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+class Edge {
+    i32 to;
+    i32 next;                            // the next edge of the same vertex; 0 ends the chain
+}
+
+i64 bfs(i64 src, Edge[:] pool, i32[:]& dist, i32[..~]& q) {
+    q.clear();
+    dist[src] = 0;
+    q +> (i32) src;
+    i64 total = 0;
+    i64 qh = 0;
+    while (qh < q.len) {
+        i32 u = q[qh];
+        qh++;
+        i32 d = dist[u];
+        total += d;
+        i32 c = pool[u].next;
+        while (c != 0) {
+            Edge& e = pool[c];
+            i32 w = e.to;
+            if (dist[w] < 0) {
+                dist[w] = d + 1;
+                q +> w;
+            }
+            c = e.next;
+        }
+    }
+    return total;
+}
+
+void main() {
+    i32[..>] dist = [];
+    for (i64 v = 0; v < V; v++) { dist +> -1; }
+    // pool[0..V) are the list heads, pool[V..) the edges themselves.
+    Edge[..>] pool = [];
+    for (i64 v = 0; v < V; v++) { pool +> new Edge(0, 0); }
+    u64 r = 12345;
+    for (i64 e = 0; e < V * DEG; e++) {
+        r = xsNext(r);
+        i64 u = xsMod(r, V);
+        i64 w = xsMod(r >> 24, V);
+        pool +> new Edge((i32) w, pool[u].next);
+        pool[u].next = (i32) (pool.len - 1);
+    }
+    // BFS from a few sources, walking each vertex's edge chain.
+    i32[..~] q = [];
+    i64 total = 0;
+    u64 seed = 999;
+    for (i64 s = 0; s < SOURCES; s++) {
+        seed = xsNext(seed);
+        i64 src = xsMod(seed, V);
+        dist.fill(-1);
+        total += bfs(src, pool, dist, q);
+    }
+    println("${pool.len}");
+    println("${total}");
+}

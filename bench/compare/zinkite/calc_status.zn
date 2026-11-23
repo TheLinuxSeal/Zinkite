@@ -1,0 +1,214 @@
+// calc.zn with the error passed up explicitly: every call that can fail is read
+// with `@` and its status returned with `#`, frame by frame, as C++ error codes and
+// Rust's `Result` with `?` do, and the division checks for zero itself. There is no
+// `@@` and no setjmp. Compare with calc.zn, which lets the failure go unread and
+// abandons the input at one `@@`.
+
+i64 N = 250000;                          // BENCH_N
+
+// The program's own status codes start at 224 (DESIGN §7.7). A division by zero is
+// the language's own DOMAIN.
+u8 E_EOF = 225;
+u8 E_PAREN = 226;
+u8 E_TOKEN = 227;
+
+enum Kind { NUM, NEG, PAREN, BIN }
+
+class Expr {
+    Kind kind;
+    u8 op;
+    i32 a;      // NUM: the value; NEG, PAREN: the operand; BIN: the left operand
+    i32 b;      // BIN: the right operand
+}
+
+u8[..~] text = [];
+i64 pos = 0;
+i64 nodes = 0;                           // Every node ever built, bad inputs included.
+
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+// --- generation --------------------------------------------------------------
+
+void emitNum(i64 v) {
+    if (v >= 10) { text +> (u8) ('0' + v / 10); }
+    text +> (u8) ('0' + v % 10);
+}
+
+u64 gen(i64 depth, u64 seed) {
+    u64 r = xsNext(seed);
+    i64 k = xsMod(r, 8);
+    if (depth == 0 || k == 0) { emitNum(1 + xsMod(r >> 8, 99)); return r; }
+    if (k == 1) { text +> '-'; return gen(depth - 1, r); }
+    if (k == 2) {
+        text +> '(';
+        r = gen(depth - 1, r);
+        text +> ')';
+        return r;
+    }
+    r = gen(depth - 1, r);
+    i64 op = xsMod(r >> 16, 4);
+    text +> ' ';
+    if (op == 0) { text +> '+'; } else if (op == 1) { text +> '-'; }
+    else if (op == 2) { text +> '*'; } else { text +> '/'; }
+    text +> ' ';
+    return gen(depth - 1, xsNext(r));
+}
+
+// One in four inputs is damaged after generation.
+void corrupt(u64 seed) {
+    i64 kind = xsMod(seed, 16);
+    if (kind == 0) {
+        for (i64 i = text.len - 1; i >= 0; i--) {
+            if (text[i] == ')') { text[i] = ' '; return; }
+        }
+        text[0] = '#';
+        return;
+    }
+    if (kind == 1) { text[xsMod(seed >> 8, text.len)] = '#'; return; }
+    if (kind == 2) { text.truncate(text.len / 2); return; }
+    if (kind == 3) { text.append(" / 0"); }
+}
+
+// --- parsing -----------------------------------------------------------------
+
+void skip() { while (pos < text.len && text[pos] == ' ') { pos++; } }
+
+i32 node(Expr[..>]& pool, Kind kind, u8 op, i32 a, i32 b) {
+    nodes++;
+    pool +> new Expr(kind, op, a, b);
+    return (i32) (pool.len - 1);
+}
+
+// Every call that can fail is read, and its status passed on, frame by frame.
+i32 parseExpr(Expr[..>]& pool) {
+    i32 lhs @err = parseTerm(pool);
+    if (err) { return #err 0; }
+    while (true) {
+        skip();
+        if (pos >= text.len || (text[pos] != '+' && text[pos] != '-')) { break; }
+        u8 op = text[pos];
+        pos++;
+        i32 rhs @rerr = parseTerm(pool);
+        if (rerr) { return #rerr 0; }
+        lhs = node(pool, Kind.BIN, op, lhs, rhs);
+    }
+    return lhs;
+}
+
+i32 parseTerm(Expr[..>]& pool) {
+    i32 lhs @err = parseFactor(pool);
+    if (err) { return #err 0; }
+    while (true) {
+        skip();
+        if (pos >= text.len || (text[pos] != '*' && text[pos] != '/')) { break; }
+        u8 op = text[pos];
+        pos++;
+        i32 rhs @rerr = parseFactor(pool);
+        if (rerr) { return #rerr 0; }
+        lhs = node(pool, Kind.BIN, op, lhs, rhs);
+    }
+    return lhs;
+}
+
+i32 parseFactor(Expr[..>]& pool) {
+    skip();
+    if (pos >= text.len) { return #E_EOF 0; }
+    u8 c = text[pos];
+    if (c >= '0' && c <= '9') {
+        i32 v = 0;
+        while (pos < text.len && text[pos] >= '0' && text[pos] <= '9') {
+            v = v * 10 + (text[pos] - '0');
+            pos++;
+        }
+        return node(pool, Kind.NUM, 0, v, 0);
+    }
+    if (c == '-') {
+        pos++;
+        i32 f @err = parseFactor(pool);
+        if (err) { return #err 0; }
+        return node(pool, Kind.NEG, 0, f, 0);
+    }
+    if (c != '(') { return #E_TOKEN 0; }
+    pos++;
+    i32 e @err = parseExpr(pool);
+    if (err) { return #err 0; }
+    skip();
+    if (pos >= text.len || text[pos] != ')') { return #E_PAREN 0; }
+    pos++;
+    return node(pool, Kind.PAREN, 0, e, 0);
+}
+
+// --- evaluation --------------------------------------------------------------
+// Unsigned and wrapping, so overflow wraps identically in every language.
+
+u64 eval(Expr[:] pool, i32 i) {
+    Expr& e = pool[i];
+    if (e.kind == Kind.NUM) { return (u64) e.a; }
+    if (e.kind == Kind.NEG) {
+        u64 x @err = eval(pool, e.a);
+        if (err) { return #err 0; }
+        return 0 -% x;
+    }
+    if (e.kind == Kind.PAREN) { return ## eval(pool, e.a); }
+    u64 a @aerr = eval(pool, e.a);
+    if (aerr) { return #aerr 0; }
+    u64 b @berr = eval(pool, e.b);
+    if (berr) { return #berr 0; }
+    if (e.op == '+') { return a +% b; }
+    if (e.op == '-') { return a -% b; }
+    if (e.op == '*') { return a *% b; }
+    if (b == 0) { return #status.DOMAIN 0; }
+    return a / b;
+}
+
+// One input: its own node array, released on return however the input ends.
+u64 runOne() {
+    Expr[..>] pool = [];
+    pos = 0;
+    i32 root @err = parseExpr(pool);
+    if (err) { return #err 0; }
+    skip();
+    if (pos != text.len) { return #E_TOKEN 0; }
+    return ## eval(pool, root);
+}
+
+void main() {
+    u64 seed = 12345;
+    i64 ok = 0;
+    i64 eofs = 0;
+    i64 parens = 0;
+    i64 tokens = 0;
+    i64 div0s = 0;
+    u64 sum = 0;
+    i64 chars = 0;
+    for (i64 i = 0; i < N; i++) {
+        seed = xsNext(seed);
+        text.clear();
+        i64 depth = 3 + xsMod(seed, 4);
+        u64 s = gen(depth, seed >> 8);
+        corrupt(s);
+        chars += text.len;
+        u64 v @err = runOne();
+        if (err == 0) { ok++; sum = sum *% 31 +% v; }
+        else if (err == E_EOF) { eofs++; }
+        else if (err == E_PAREN) { parens++; }
+        else if (err == E_TOKEN) { tokens++; }
+        else if (err == status.DOMAIN) { div0s++; }
+    }
+    println("${chars}");
+    println("${nodes}");
+    println("${ok}");
+    println("${eofs}");
+    println("${parens}");
+    println("${tokens}");
+    println("${div0s}");
+    println("${sum}");
+}

@@ -1,0 +1,30 @@
+// Control benchmark: a flat array of scalars, scanned repeatedly.
+
+i64 N = 4000000;                         // BENCH_N
+i64 PASSES = 8;
+
+// xorshift64, the same generator as the Goose, C++ and Rust versions.
+u64 xsNext(u64 x) {
+    u64 v = x;
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+i64 xsMod(u64 x, i64 k) { return (i64) (x % (u64) k); }
+
+void main() {
+    i32[..>] data = [];
+    u64 r = 12345;
+    for (i64 i = 0; i < N; i++) {
+        r = xsNext(r);
+        data +> (i32) xsMod(r, 1000);
+    }
+    i64 total = 0;
+    for (i64 p = 0; p < PASSES; p++) {
+        for (i32 x : data) { total += x ^ p; }
+    }
+    println("${data.len}");
+    println("${total}");
+}
