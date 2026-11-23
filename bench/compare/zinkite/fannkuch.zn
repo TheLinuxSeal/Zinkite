@@ -1,20 +1,18 @@
 // fannkuch-redux (Benchmarks Game): for every permutation of 0..n-1, count the
 // prefix reversals ("pancake flips") until 0 comes first. Prints the checksum
 // and the largest flip count. Small arrays, tight loops, indexing and swaps.
-// The plain single-threaded algorithm, the same in all four languages.
+// The plain single-threaded algorithm, the same in all four languages. The arrays
+// are fixed, `i32[.16]`, as Goose's are, so `perm = perm1` copies one in a single
+// move.
 
 i64 N = 10;                              // BENCH_N
 
 void main() {
     i32 n = (i32) N;
-    i32[..>] perm = [];
-    i32[..>] perm1 = [];
-    i32[..>] count = [];
-    for (i32 i = 0; i < n; i++) {
-        perm +> 0;
-        perm1 +> i;
-        count +> 0;
-    }
+    i32[.16] perm = [];
+    i32[.16] perm1 = [];
+    i32[.16] count = [];
+    for (i32 i = 0; i < n; i++) { perm1[i] = i; }
     i32 maxFlips = 0;
     i64 permCount = 0;
     i64 checksum = 0;
@@ -24,7 +22,7 @@ void main() {
             count[r - 1] = r;
             r--;
         }
-        for (i32 i = 0; i < n; i++) { perm[i] = perm1[i]; }
+        perm = perm1;
         i32 flips = 0;
         i32 k = perm[0];
         while (k != 0) {

@@ -12,8 +12,8 @@
 // The parser has an error path it never takes on this input: a failing `return`
 // that nothing reads, which would abandon the parse at the `@@` in main (DESIGN
 // §7.6), as Goose's `return ... from parse_all` does. On this input it costs one
-// predictable branch after each call. The node array is main's, passed down by
-// reference, where Goose uses a global.
+// predictable branch after each call. The nodes are in a static array, as
+// Goose's are in a global.
 
 i64 N = 200000;                          // BENCH_N
 i64 DEPTH = 4;
@@ -31,6 +31,7 @@ class Node {
 
 u8[..>] text = [];
 i64 pos = 0;
+Node[..>] pool = [];
 
 u64 xsNext(u64 x) {
     u64 v = x;
@@ -72,7 +73,7 @@ u64 gen(i64 depth, u64 seed) {
 
 void skipSpace() { while (pos < text.len && text[pos] == ' ') { pos++; } }
 
-Node&? parseNode(Node[..>]& pool, Node&? prev) {
+Node&? parseNode(Node&? prev) {
     skipSpace();
     if (pos >= text.len) { return #status.END null; }
     u8 c = text[pos];
@@ -83,7 +84,7 @@ Node&? parseNode(Node[..>]& pool, Node&? prev) {
             skipSpace();
             if (pos >= text.len) { return #status.INVALID null; }
             if (text[pos] == ')') { pos++; break; }
-            chain .= parseNode(pool, chain);
+            chain .= parseNode(chain);
         }
         return pool.push(new Node(chain, prev, 0, Kind.LIST, ""));
     }
@@ -100,11 +101,11 @@ Node&? parseNode(Node[..>]& pool, Node&? prev) {
     return pool.push(new Node(null, prev, 0, Kind.SYM, text[start:pos]));
 }
 
-i64 parseAll(Node[..>]& pool, Node&[..>]& roots) {
+i64 parseAll(Node&[..>]& roots) {
     while (true) {
         skipSpace();
         if (pos >= text.len) { break; }
-        Node&? r = parseNode(pool, null);
+        Node&? r = parseNode(null);
         if (r != null) { roots +> r; }
     }
     return roots.len;
@@ -128,9 +129,8 @@ i64 walkChain(Node&? c, i64 p) {
 void main() {
     u64 seed = 12345;
     for (i64 i = 0; i < N; i++) { seed = gen(DEPTH, seed); }
-    Node[..>] pool = [];
     Node&[..>] roots = [];
-    i64 nroots @@err = parseAll(pool, roots);
+    i64 nroots @@err = parseAll(roots);
     println("${text.len}");
     println("${pool.len}");
     println("${nroots}");

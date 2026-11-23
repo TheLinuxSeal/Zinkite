@@ -2,7 +2,7 @@
 // The word list is `u8[.*][..>]`, one contiguous block of variable-size
 // strings, and the counts go in the built-in `hashmap<string, i32>`: Python's
 // compact dict in one block on a data stack, entries in insertion order and
-// never moved, with keys that are views into the text, so no key is copied
+// never moved, with keys that are views into the list's words, so no key is copied
 // or allocated. This is the row of the Goose std dictionary;
 // words_open.zn is the hand-written open-addressed table of words.goose.
 // Zinkite hashes with its own seeded hash, so the hash function differs from
@@ -51,14 +51,9 @@ void main() {
     for (string w : text.splitBy(" ")) {
         if (w.len > 0) { words +> w; }
     }
-    // Count, with keys that are views into the text. The count walks the
-    // text's words again rather than the list: a `string` taken from an
-    // element of `words` comes out with the wrong C type today, a compiler
-    // bug. Splitting reads the same bytes the walk would.
+    // Count, with keys that are views into the list's words.
     hashmap<string, i32> counts = [];
-    for (string w : text.splitBy(" ")) {
-        if (w.len > 0) { counts.getOrAdd(w, 0)++; }
-    }
+    for (string w : words) { counts.getOrAdd(w, 0)++; }
     i64 total = 0;
     for (var& e : counts) { total += e.value * (e.key.len + e.key[0]); }
     println("${words.len}");

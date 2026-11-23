@@ -2,11 +2,11 @@
 // any tagged message stream. Zinkite has no enums with payloads yet (DESIGN
 // §17), so an event is one variable-size class: a kind, the fixed-size fields
 // of every variant, packed, and the Say text inline behind a varint length.
-// The compiler stores an enum in 4 bytes today, so a Tick costs 14 bytes where
-// Goose's variable-mode enum costs 1, but every event is still stored inline
-// in one block with no pointers and no per-event allocation, where the C++ and
-// Rust rows pad each element to their largest variant and allocate the string
-// separately.
+// The kind takes a byte, so a Tick costs 11 bytes, every variant's fields and an
+// empty text's length, where Goose's variable-mode enum costs 1; but every event
+// is still stored inline in one block with no pointers and no per-event
+// allocation, where the C++ and Rust rows pad each element to their largest
+// variant and allocate the string separately.
 //
 // An array of variable-size records can be walked but not indexed, which is
 // what a log replay does anyway.

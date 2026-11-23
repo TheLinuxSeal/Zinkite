@@ -76,22 +76,25 @@ export GOOSE=$PWD/build/goose
 - **mandelbrot** and **spectralnorm** are the plain row-by-row loops in all four
   languages, not the Benchmarks Game's vectorized versions.
 
-## What the latest run found (2026-11-22, second run)
+## What the latest run found (2026-11-22)
 
 Geometric means over the 26 benchmarks, at the large size, of each language's fastest
-implementation's time over Zinkite's (above 1 means Zinkite is faster), against the first
-run the same day:
+implementation's time over Zinkite's (above 1 means Zinkite is faster): the first run, the
+second after the compiler changes below, and the third after the ports dropped their
+workarounds for compiler bugs, which were fixed by then. The third re-ran the seven
+benchmarks whose ports changed (strlist, records, graph, words, sexp, respond and
+fannkuch), all four languages; the other nineteen keep their second-run times.
 
-| | first run | second run |
-|---|---:|---:|
-| Goose | 0.69 | 0.81 |
-| idiomatic C++ | 1.30 | 1.53 |
-| expert C++ (the sixteen with an expert row) | 1.02 | 1.05 |
-| Rust | 0.82 | 0.97 |
-| peak memory: Goose / C++ / Rust | 0.92 / 1.32 / 1.05 | 0.97 / 1.39 / 1.11 |
+| | first run | second run | third run |
+|---|---:|---:|---:|
+| Goose | 0.69 | 0.81 | 0.83 |
+| idiomatic C++ | 1.30 | 1.53 | 1.56 |
+| expert C++ (the sixteen with an expert row) | 1.02 | 1.05 | 1.08 |
+| Rust | 0.82 | 0.97 | 0.99 |
+| peak memory: Goose / C++ / Rust | 0.92 / 1.32 / 1.05 | 0.97 / 1.39 / 1.11 | 0.97 / 1.39 / 1.11 |
 
 Zinkite is now faster than Goose on 5 benchmarks (calc, respond, nbody, mandelbrot,
-nsieve), within 10% on 10 more, and slower on 11. What changed between the runs:
+nsieve), within 10% on 9 more, and slower on 12. What changed between the runs:
 
 | change | where it showed |
 |---|---|
@@ -100,15 +103,17 @@ nsieve), within 10% on 10 more, and slower on 11. What changed between the runs:
 | fixed arrays, `T[.k]`, keep no length: it is the constant `k` | scene's 3×3 matrices: 1431 → 1009 ms |
 | self-relative links, `T&<i32>`: 4-byte offsets in place of 8-byte references | sexp 2475 → 2105 ms, 750 → 511 MB; tree 12-byte nodes, 386 MB; bintrees 26 MB |
 | enums stored in the narrowest integer, a byte for up to 256 constants | records 252 → 206 MB |
+| third run: words counts from its list of words, with keys that are views into that compact block, where it split the text again and kept views into the text | words: open addressing 4118 → 2452 ms, the built-in hashmap 5199 → 4464 |
+| third run: fannkuch's arrays are `i32[.16]` and `perm = perm1` copies one, where a loop copied `[..>]` arrays | fannkuch 3120 → 2898 ms |
 
 The gaps that remain, largest first:
 
 | benchmark | Zinkite / Goose | cause |
 |---|---:|---|
 | levenshtein | 2.5× | every index and `+ 1` is checked, and none of the checks are removed; without them it would be 1.1× |
-| words | 2.0× | the built-in hashmap's layout: a lookup reads its index, then its entry, then the key, three cache misses where Goose's table makes two. DESIGN §4.14 chose this layout knowing it finds keys more slowly in maps too big for the cache |
+| words | 1.2×; 2.1× with the built-in hashmap | the hashmap's layout: a lookup reads its index, then its entry, then the key, three cache misses where Goose's table makes two. DESIGN §4.14 chose this layout knowing it finds keys more slowly in maps too big for the cache |
 | spectralnorm | 1.9× | the overflow checks in `(i + j) * (i + j + 1) / 2`: without them it takes 1440 ms, against Goose's 1277 |
-| fannkuch, fib | 1.6–1.7× | checked indexing and arithmetic; in fib, the check on `fib(n - 1) + fib(n - 2)` stops clang turning one call into a loop, which no form of the check avoids |
+| fib, fannkuch | 1.5–1.6× | checked indexing and arithmetic; in fib, the check on `fib(n - 1) + fib(n - 2)` stops clang turning one call into a loop, which no form of the check avoids |
 | interp | 1.6× | not yet explained; removing the checks gains 3% |
 | bintrees, tree, records | 1.4× | tree's and bintrees' nodes are now Goose's size, and checks are 6–14% of the rest; records has no variants with payloads, so every event carries every variant's fields |
 | sum | 1.24× | the overflow check on `total +=` keeps the loop from vectorizing |
@@ -117,16 +122,18 @@ The gaps that remain, largest first:
 Most of the rest would come from removing the checks the compiler can prove can't fail,
 and from loop versioning: checking once before a loop that its arithmetic can't overflow.
 
-Compiler bugs the ports work around:
-- `pushAll` on arrays passes the checker but isn't in the code generator.
-- A for-each over an array of inline strings (`u8[.*][..>]`) by reference generates C that
-  doesn't compile, and by `string` gives the element the wrong C type.
-- A function returning an array of variable-size records generates C that doesn't compile.
-- Copying into a writable view (`a[:] = b`) generates C that doesn't compile.
-- A function that stores a reference parameter into a static array gets a false
+Compiler bugs the first ports worked around, all fixed, with the ports changed to use what
+they had worked around before the third run:
+- `pushAll` on arrays passed the checker but wasn't in the code generator.
+- A for-each over an array of inline strings (`u8[.*][..>]`) by reference generated C
+  that didn't compile, and by `string` gave the element the wrong C type.
+- A function returning an array of variable-size records generated C that didn't compile.
+- Copying into a writable view (`a[:] = b`) generated C that didn't compile.
+- A function that stored a reference parameter into a static array got a false
   lifetime error, reported against `zink/io/File.zn`.
-- `long` as a name says "`i64` is a type, not a value" before it says `long` is reserved.
-- A constructor that fails doesn't reset the fields it set before failing (DESIGN §6.2).
+- `long` as a name said "`i64` is a type, not a value" before it said `long` is reserved.
+- A constructor that failed didn't reset the fields it set before failing (DESIGN §6.2).
+- `i32[.16] p = [];` gave a fixed array of length 0, instead of 16 zeros.
 
 ## Files
 

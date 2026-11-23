@@ -1,7 +1,7 @@
 // words.zn counted in a hand-written open-addressed table instead of the
 // built-in hashmap, as words.goose does: a power-of-two `Slot[..>]` of a
 // `string` key and a count, linear probing, FNV-1a as in the C++ and Rust
-// open-addressed rows. Keys are views into the text, so none is copied. The
+// open-addressed rows. Keys are views into the list's words, so none is copied. The
 // row measures the purpose-built table against the general-purpose one.
 
 i64 N = 2000000;                         // BENCH_N
@@ -56,18 +56,14 @@ void main() {
     for (string w : text.splitBy(" ")) {
         if (w.len > 0) { words +> w; }
     }
-    // Count, with keys that are views into the text. The count walks the
-    // text's words again rather than the list: a `string` taken from an
-    // element of `words` comes out with the wrong C type today, a compiler
-    // bug. Splitting reads the same bytes the walk would.
+    // Count, with keys that are views into the list's words.
     i64 nslots = 16;
     while (nslots < vocab * 4) { nslots *= 2; }
     u64 mask = (u64) (nslots - 1);
     Slot[..>] slots = [];
     for (i64 i = 0; i < nslots; i++) { slots +> new Slot("", 0); }
     i64 distinct = 0;
-    for (string key : text.splitBy(" ")) {
-        if (key.len == 0) { continue; }
+    for (string key : words) {
         u64 idx = fnv(key) & mask;
         while (true) {
             Slot& s = slots[idx];

@@ -7,10 +7,10 @@
 // it field by field where the local lives, and both the response and its
 // rendered text are locals of `handle`, released when it returns.
 //
-// Goose builds the item list straight into the response's field. Here the
-// items are built in a local array first and copied into the record once,
-// since a function returning an array of variable-size records doesn't
-// compile yet (a compiler bug).
+// Goose builds the item list straight into the response's field. Here a
+// function returns the list, and `new Resp` copies it into the record: the
+// field starts with the list's length as a varint, whose size isn't known until
+// the list is built.
 //
 // Numbers are rendered with interpolation, which writes the digits straight
 // into the buffer, as C++'s to_chars does. Goose stores qty and price as
@@ -60,12 +60,14 @@ u8[..~6] skuOf(u64 seed) {
     return s;
 }
 
-void makeItems(Item[..>]& t, u64 seed, i64 n) {
+Item[..>] makeItems(u64 seed, i64 n) {
+    Item[..>] t = [];
     u64 r = seed;
     for (i64 i = 0; i < n; i++) {
         r = xsNext(r);
         t +> new Item(skuOf(r), (i32) (1 + xsMod(r >> 8, 5)), (i32) (100 + xsMod(r >> 16, 99900)));
     }
+    return t;
 }
 
 // --- rendering ---------------------------------------------------------------
@@ -107,9 +109,7 @@ u64 fnv(string s) {
 (u64, i64) handle(u64 seed) {
     u64 r = xsNext(seed);
     i64 n = 1 + xsMod(r, 8);
-    Item[..>] items = [];
-    makeItems(items, r >> 16, n);
-    Resp resp = new Resp(xsMod(r >> 4, 1000000), nameOf(r >> 8), items);
+    Resp resp = new Resp(xsMod(r >> 4, 1000000), nameOf(r >> 8), makeItems(r >> 16, n));
     u8[..>] out = [];
     render(out, resp);
     return (fnv(out), out.len);

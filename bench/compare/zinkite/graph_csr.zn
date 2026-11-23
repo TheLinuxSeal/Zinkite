@@ -58,7 +58,7 @@ void main() {
     }
     for (i64 v = 0; v < V; v++) { start[v + 1] += start[v]; }
     i32[..>] cursor = [];
-    for (i32 x : start) { cursor +> x; }
+    cursor.pushAll(start);
     i32[..>] out = [];
     for (i64 e = 0; e < ne; e++) { out +> 0; }
     for (i64 e = 0; e < ne; e++) {

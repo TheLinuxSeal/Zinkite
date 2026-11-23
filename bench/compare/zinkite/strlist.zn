@@ -5,9 +5,8 @@
 // the vector plus one per string that doesn't fit the small-string buffer.
 // Word lengths run 3..20, straddling the SSO boundary on purpose. The words
 // are owned copies, like vector<string>, not views into the text; the split
-// itself is `splitBy`, a lazy iterator of views. The scan reads each word as
-// a `string` view of its inline bytes (`for (u8[.*]& w : words)` doesn't
-// compile yet, a compiler bug).
+// itself is `splitBy`, a lazy iterator of views. The scan reads each word in
+// place, by reference to its inline bytes.
 
 i64 N = 400000;                          // BENCH_N
 i64 PASSES = 4;
@@ -45,7 +44,7 @@ void main() {
     // Scan the list repeatedly: length and first/last character of each word.
     i64 total = 0;
     for (i64 p = 0; p < PASSES; p++) {
-        for (string w : words) { total += w.len + w[0] + w[w.len - 1]; }
+        for (u8[.*]& w : words) { total += w.len + w[0] + w[w.len - 1]; }
     }
     println("${words.len}");
     println("${total}");
