@@ -3,22 +3,22 @@
   "zinkite grow-only array": {
    "small": {
     "ok": true,
-    "ms": 20.017,
+    "ms": 20.523,
     "peak": 5758976,
     "out": "1000000\n3998750656\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 115.151,
+    "ms": 105.491,
     "peak": 65773568,
     "out": "16000000\n63945983872\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 818.229,
-    "peak": 513794048,
+    "ms": 853.114,
+    "peak": 513892352,
     "out": "128000000\n511523579712\n",
     "mismatch": false
    }
@@ -26,22 +26,22 @@
   "goose grow-only array": {
    "small": {
     "ok": true,
-    "ms": 14.871,
-    "peak": 6098944,
+    "ms": 20.097,
+    "peak": 6164480,
     "out": "1000000\n3998750656\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 101.693,
-    "peak": 66031616,
+    "ms": 106.575,
+    "peak": 65966080,
     "out": "16000000\n63945983872\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 813.183,
-    "peak": 514084864,
+    "ms": 835.366,
+    "peak": 514150400,
     "out": "128000000\n511523579712\n",
     "mismatch": false
    }
@@ -49,22 +49,22 @@
   "cpp vector": {
    "small": {
     "ok": true,
-    "ms": 11.4,
-    "peak": 7606272,
+    "ms": 13.264,
+    "peak": 7614464,
     "out": "1000000\n3998750656\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 151.091,
-    "peak": 70402048,
+    "ms": 156.005,
+    "peak": 70455296,
     "out": "16000000\n63945983872\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1125.826,
-    "peak": 540123136,
+    "ms": 1190.155,
+    "peak": 540119040,
     "out": "128000000\n511523579712\n",
     "mismatch": false
    }
@@ -72,21 +72,21 @@
   "cpp vector+reserve": {
    "small": {
     "ok": true,
-    "ms": 17.572,
-    "peak": 7532544,
+    "ms": 12.841,
+    "peak": 7385088,
     "out": "1000000\n3998750656\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 123.86,
+    "ms": 104.947,
     "peak": 67547136,
     "out": "16000000\n63945983872\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 806.51,
+    "ms": 823.896,
     "peak": 515518464,
     "out": "128000000\n511523579712\n",
     "mismatch": false
@@ -95,22 +95,22 @@
   "rust Vec, collect": {
    "small": {
     "ok": true,
-    "ms": 21.303,
+    "ms": 19.125,
     "peak": 6074368,
     "out": "1000000\n3998750656\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 103.625,
+    "ms": 108.624,
     "peak": 65941504,
     "out": "16000000\n63945983872\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 813.826,
-    "peak": 513994752,
+    "ms": 846.362,
+    "peak": 514060288,
     "out": "128000000\n511523579712\n",
     "mismatch": false
    }
@@ -120,22 +120,22 @@
   "zinkite array, typed references": {
    "small": {
     "ok": true,
-    "ms": 21.332,
-    "peak": 9879552,
+    "ms": 21.184,
+    "peak": 9773056,
     "out": "1000000\n15625\n499758894813\n750050\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 98.78,
-    "peak": 131731456,
+    "ms": 107.089,
+    "peak": 131825664,
     "out": "16000000\n250000\n7999220817282\n12000142\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 393.19,
-    "peak": 521756672,
+    "ms": 412.348,
+    "peak": 521846784,
     "out": "64000000\n1000000\n31997493912303\n48000119\n",
     "mismatch": false
    }
@@ -143,22 +143,22 @@
   "goose array, typed references": {
    "small": {
     "ok": true,
-    "ms": 19.619,
-    "peak": 10293248,
+    "ms": 21.653,
+    "peak": 10080256,
     "out": "1000000\n15625\n499758894813\n750050\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 102.631,
-    "peak": 132091904,
+    "ms": 109.667,
+    "peak": 132026368,
     "out": "16000000\n250000\n7999220817282\n12000142\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 398.884,
-    "peak": 522047488,
+    "ms": 418.61,
+    "peak": 522113024,
     "out": "64000000\n1000000\n31997493912303\n48000119\n",
     "mismatch": false
    }
@@ -166,22 +166,22 @@
   "cpp vector, indices": {
    "small": {
     "ok": true,
-    "ms": 21.92,
+    "ms": 26.728,
     "peak": 11771904,
     "out": "1000000\n15625\n499758894813\n750050\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 196.487,
-    "peak": 139448320,
+    "ms": 219.801,
+    "peak": 139464704,
     "out": "16000000\n250000\n7999220817282\n12000142\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 776.121,
-    "peak": 548495360,
+    "ms": 803.029,
+    "peak": 548462592,
     "out": "64000000\n1000000\n31997493912303\n48000119\n",
     "mismatch": false
    }
@@ -189,22 +189,22 @@
   "cpp vector+reserve, indices": {
    "small": {
     "ok": true,
-    "ms": 18.166,
+    "ms": 27.705,
     "peak": 11808768,
     "out": "1000000\n15625\n499758894813\n750050\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 139.876,
-    "peak": 133685248,
+    "ms": 130.969,
+    "peak": 133693440,
     "out": "16000000\n250000\n7999220817282\n12000142\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 484.795,
-    "peak": 523661312,
+    "ms": 529.589,
+    "peak": 523657216,
     "out": "64000000\n1000000\n31997493912303\n48000119\n",
     "mismatch": false
    }
@@ -212,22 +212,22 @@
   "cpp deque, pointers": {
    "small": {
     "ok": true,
-    "ms": 32.297,
-    "peak": 12500992,
+    "ms": 19.214,
+    "peak": 12521472,
     "out": "1000000\n15625\n499758894813\n750050\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 178.794,
-    "peak": 139423744,
+    "ms": 192.119,
+    "peak": 139571200,
     "out": "16000000\n250000\n7999220817282\n12000142\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 742.962,
-    "peak": 547549184,
+    "ms": 770.894,
+    "peak": 547508224,
     "out": "64000000\n1000000\n31997493912303\n48000119\n",
     "mismatch": false
    }
@@ -235,21 +235,21 @@
   "rust Vec+reserve, indices": {
    "small": {
     "ok": true,
-    "ms": 22.423,
+    "ms": 23.063,
     "peak": 10203136,
     "out": "1000000\n15625\n499758894813\n750050\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 134.088,
+    "ms": 137.298,
     "peak": 132149248,
     "out": "16000000\n250000\n7999220817282\n12000142\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 441.023,
+    "ms": 460.178,
     "peak": 522170368,
     "out": "64000000\n1000000\n31997493912303\n48000119\n",
     "mismatch": false
@@ -260,22 +260,22 @@
   "zinkite inline strings, owned": {
    "small": {
     "ok": true,
-    "ms": 20.239,
+    "ms": 34.94,
     "peak": 6692864,
     "out": "200000\n184370712\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 129.777,
-    "peak": 51650560,
+    "ms": 133.336,
+    "peak": 51757056,
     "out": "2000000\n1843958476\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 508.877,
-    "peak": 201625600,
+    "ms": 543.286,
+    "peak": 201719808,
     "out": "8000000\n7375857132\n",
     "mismatch": false
    }
@@ -283,22 +283,22 @@
   "goose inline strings, owned": {
    "small": {
     "ok": true,
-    "ms": 21.189,
-    "peak": 7573504,
+    "ms": 25.033,
+    "peak": 7639040,
     "out": "200000\n184370712\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 123.66,
+    "ms": 150.39,
     "peak": 58068992,
     "out": "2000000\n1843958476\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 503.472,
-    "peak": 226021376,
+    "ms": 507.247,
+    "peak": 225955840,
     "out": "8000000\n7375857132\n",
     "mismatch": false
    }
@@ -306,21 +306,21 @@
   "cpp vector<string>": {
    "small": {
     "ok": true,
-    "ms": 32.125,
-    "peak": 16113664,
+    "ms": 27.581,
+    "peak": 16138240,
     "out": "200000\n184370712\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 248.891,
-    "peak": 112107520,
+    "ms": 271.666,
+    "peak": 112099328,
     "out": "2000000\n1843958476\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1033.361,
+    "ms": 1072.072,
     "peak": 430632960,
     "out": "8000000\n7375857132\n",
     "mismatch": false
@@ -329,22 +329,22 @@
   "cpp vector<string_view>": {
    "small": {
     "ok": true,
-    "ms": 17.933,
-    "peak": 11993088,
+    "ms": 26.763,
+    "peak": 11984896,
     "out": "200000\n184370712\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 167.706,
-    "peak": 78557184,
+    "ms": 182.222,
+    "peak": 78508032,
     "out": "2000000\n1843958476\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 661.534,
-    "peak": 270913536,
+    "ms": 700.621,
+    "peak": 270864384,
     "out": "8000000\n7375857132\n",
     "mismatch": false
    }
@@ -352,22 +352,22 @@
   "cpp flat offsets": {
    "small": {
     "ok": true,
-    "ms": 30.147,
-    "peak": 9695232,
+    "ms": 28.369,
+    "peak": 9699328,
     "out": "200000\n184370712\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 149.898,
-    "peak": 61358080,
+    "ms": 180.955,
+    "peak": 61353984,
     "out": "2000000\n1843958476\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 608.242,
-    "peak": 203841536,
+    "ms": 658.467,
+    "peak": 203849728,
     "out": "8000000\n7375857132\n",
     "mismatch": false
    }
@@ -375,21 +375,21 @@
   "rust Vec<String>": {
    "small": {
     "ok": true,
-    "ms": 26.914,
-    "peak": 15642624,
+    "ms": 49.918,
+    "peak": 15659008,
     "out": "200000\n184370712\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 259.293,
-    "peak": 139067392,
+    "ms": 267.37,
+    "peak": 139014144,
     "out": "2000000\n1843958476\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1051.288,
+    "ms": 1094.244,
     "peak": 550039552,
     "out": "8000000\n7375857132\n",
     "mismatch": false
@@ -398,22 +398,22 @@
   "rust Vec<&str>": {
    "small": {
     "ok": true,
-    "ms": 26.515,
+    "ms": 30.905,
     "peak": 7843840,
     "out": "200000\n184370712\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 142.037,
-    "peak": 59158528,
+    "ms": 152.771,
+    "peak": 59142144,
     "out": "2000000\n1843958476\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 587.931,
-    "peak": 230055936,
+    "ms": 594.174,
+    "peak": 230060032,
     "out": "8000000\n7375857132\n",
     "mismatch": false
    }
@@ -423,21 +423,21 @@
   "zinkite variable-size class + switch": {
    "small": {
     "ok": true,
-    "ms": 27.62,
+    "ms": 35.661,
     "peak": 8560640,
     "out": "500000\n87531239268\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 231.222,
-    "peak": 55205888,
+    "ms": 230.762,
+    "peak": 55304192,
     "out": "4000000\n701055136604\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 832.104,
+    "ms": 866.137,
     "peak": 215883776,
     "out": "16000000\n2803538906112\n",
     "mismatch": false
@@ -446,22 +446,22 @@
   "goose variable enum": {
    "small": {
     "ok": true,
-    "ms": 39.499,
-    "peak": 6688768,
+    "ms": 20.126,
+    "peak": 6754304,
     "out": "500000\n87531239268\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 147.704,
+    "ms": 155.549,
     "peak": 38981632,
     "out": "4000000\n701055136604\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 590.724,
-    "peak": 150016000,
+    "ms": 634.057,
+    "peak": 150081536,
     "out": "16000000\n2803538906112\n",
     "mismatch": false
    }
@@ -469,21 +469,21 @@
   "cpp virtual + unique_ptr": {
    "small": {
     "ok": true,
-    "ms": 52.317,
-    "peak": 27570176,
+    "ms": 67.853,
+    "peak": 27561984,
     "out": "500000\n87531239268\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 410.704,
-    "peak": 195555328,
+    "ms": 434.218,
+    "peak": 195411968,
     "out": "4000000\n701055136604\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1668.949,
+    "ms": 1733.59,
     "peak": 771465216,
     "out": "16000000\n2803538906112\n",
     "mismatch": false
@@ -492,22 +492,22 @@
   "cpp variant + string": {
    "small": {
     "ok": true,
-    "ms": 61.152,
-    "peak": 28545024,
+    "ms": 49.451,
+    "peak": 28553216,
     "out": "500000\n87531239268\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 390.633,
-    "peak": 204705792,
+    "ms": 412.849,
+    "peak": 204730368,
     "out": "4000000\n701055136604\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1585.245,
-    "peak": 808660992,
+    "ms": 1642.929,
+    "peak": 808677376,
     "out": "16000000\n2803538906112\n",
     "mismatch": false
    }
@@ -515,22 +515,22 @@
   "cpp variant + buffer": {
    "small": {
     "ok": true,
-    "ms": 44.471,
-    "peak": 15966208,
+    "ms": 32.309,
+    "peak": 15978496,
     "out": "500000\n87531239268\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 245.348,
-    "peak": 104038400,
+    "ms": 257.847,
+    "peak": 104058880,
     "out": "4000000\n701055136604\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 986.163,
-    "peak": 406044672,
+    "ms": 1043.579,
+    "peak": 406056960,
     "out": "16000000\n2803538906112\n",
     "mismatch": false
    }
@@ -538,21 +538,21 @@
   "rust enum + String": {
    "small": {
     "ok": true,
-    "ms": 35.488,
+    "ms": 37.276,
     "peak": 21999616,
     "out": "500000\n87531239268\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 283.687,
-    "peak": 161918976,
+    "ms": 294.157,
+    "peak": 161935360,
     "out": "4000000\n701055136604\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1154.149,
+    "ms": 1183.131,
     "peak": 641904640,
     "out": "16000000\n2803538906112\n",
     "mismatch": false
@@ -563,22 +563,22 @@
   "zinkite links into a static array": {
    "small": {
     "ok": true,
-    "ms": 16.518,
+    "ms": 15.871,
     "peak": 3391488,
     "out": "131071\n522963940\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 91.889,
+    "ms": 76.555,
     "peak": 26984448,
     "out": "2097151\n8377899684\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1562.251,
-    "peak": 404320256,
+    "ms": 1632.602,
+    "peak": 404471808,
     "out": "33554431\n134079322148\n",
     "mismatch": false
    }
@@ -586,21 +586,21 @@
   "zinkite i32 indices": {
    "small": {
     "ok": true,
-    "ms": 17.824,
-    "peak": 3272704,
+    "ms": 16.728,
+    "peak": 3391488,
     "out": "131071\n522963940\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 75.084,
+    "ms": 102.34,
     "peak": 26984448,
     "out": "2097151\n8377899684\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1506.978,
+    "ms": 1582.307,
     "peak": 404471808,
     "out": "33554431\n134079322148\n",
     "mismatch": false
@@ -609,22 +609,22 @@
   "goose pool + typed relative refs": {
    "small": {
     "ok": true,
-    "ms": 6.844,
-    "peak": 3592192,
+    "ms": 11.737,
+    "peak": 3653632,
     "out": "131071\n522963940\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 76.342,
-    "peak": 27250688,
+    "ms": 88.566,
+    "peak": 27185152,
     "out": "2097151\n8377899684\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1509.156,
-    "peak": 404738048,
+    "ms": 1545.245,
+    "peak": 404672512,
     "out": "33554431\n134079322148\n",
     "mismatch": false
    }
@@ -632,22 +632,22 @@
   "cpp unique_ptr": {
    "small": {
     "ok": true,
-    "ms": 13.872,
-    "peak": 8069120,
+    "ms": 22.613,
+    "peak": 8077312,
     "out": "131071\n522963940\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 190.17,
-    "peak": 71045120,
+    "ms": 186.367,
+    "peak": 71028736,
     "out": "2097151\n8377899684\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 3062.323,
-    "peak": 1077710848,
+    "ms": 3077.206,
+    "peak": 1077735424,
     "out": "33554431\n134079322148\n",
     "mismatch": false
    }
@@ -655,22 +655,22 @@
   "cpp new/delete": {
    "small": {
     "ok": true,
-    "ms": 29.786,
-    "peak": 8097792,
+    "ms": 20.999,
+    "peak": 8077312,
     "out": "131071\n522963940\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 204.569,
-    "peak": 71057408,
+    "ms": 189.654,
+    "peak": 71028736,
     "out": "2097151\n8377899684\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 3141.502,
-    "peak": 1077698560,
+    "ms": 3196.846,
+    "peak": 1077719040,
     "out": "33554431\n134079322148\n",
     "mismatch": false
    }
@@ -678,21 +678,21 @@
   "cpp arena + indices": {
    "small": {
     "ok": true,
-    "ms": 11.569,
-    "peak": 5173248,
+    "ms": 18.391,
+    "peak": 5029888,
     "out": "131071\n522963940\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 73.363,
+    "ms": 77.234,
     "peak": 28766208,
     "out": "2097151\n8377899684\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1455.798,
+    "ms": 1501.256,
     "peak": 406253568,
     "out": "33554431\n134079322148\n",
     "mismatch": false
@@ -701,21 +701,21 @@
   "rust Box nodes": {
    "small": {
     "ok": true,
-    "ms": 14.97,
-    "peak": 6373376,
+    "ms": 14.045,
+    "peak": 6369280,
     "out": "131071\n522963940\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 167.751,
-    "peak": 69365760,
+    "ms": 152.281,
+    "peak": 69316608,
     "out": "2097151\n8377899684\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2367.089,
+    "ms": 2447.744,
     "peak": 1075916800,
     "out": "33554431\n134079322148\n",
     "mismatch": false
@@ -724,21 +724,21 @@
   "rust arena + indices": {
    "small": {
     "ok": true,
-    "ms": 18.435,
+    "ms": 18.56,
     "peak": 3567616,
     "out": "131071\n522963940\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 90.458,
+    "ms": 100.165,
     "peak": 27160576,
     "out": "2097151\n8377899684\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1812.064,
+    "ms": 1906.852,
     "peak": 404647936,
     "out": "33554431\n134079322148\n",
     "mismatch": false
@@ -749,21 +749,21 @@
   "zinkite interface calls + references": {
    "small": {
     "ok": true,
-    "ms": 3.338,
+    "ms": 6.885,
     "peak": 2510848,
     "out": "36407\n675881\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 23.079,
-    "peak": 6979584,
+    "ms": 14.424,
+    "peak": 7081984,
     "out": "294997\n950682\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 173.331,
+    "ms": 205.589,
     "peak": 57069568,
     "out": "3102543\n293458\n",
     "mismatch": false
@@ -772,21 +772,21 @@
   "zinkite enum tag + switch + indices": {
    "small": {
     "ok": true,
-    "ms": 8.147,
+    "ms": 8.21,
     "peak": 2220032,
     "out": "36407\n675881\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 30.078,
+    "ms": 15.731,
     "peak": 5316608,
     "out": "294997\n950682\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 175.285,
+    "ms": 188.395,
     "peak": 39084032,
     "out": "3102543\n293458\n",
     "mismatch": false
@@ -795,22 +795,22 @@
   "goose case functions + relative refs": {
    "small": {
     "ok": true,
-    "ms": 7.428,
-    "peak": 2330624,
+    "ms": 5.073,
+    "peak": 2265088,
     "out": "36407\n675881\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 29.302,
+    "ms": 13.925,
     "peak": 4034560,
     "out": "294997\n950682\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 119.79,
-    "peak": 23269376,
+    "ms": 116.666,
+    "peak": 23203840,
     "out": "3102543\n293458\n",
     "mismatch": false
    }
@@ -818,22 +818,22 @@
   "cpp virtual + unique_ptr": {
    "small": {
     "ok": true,
-    "ms": 13.353,
-    "peak": 5140480,
+    "ms": 14.006,
+    "peak": 5148672,
     "out": "36407\n675881\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 25.523,
-    "peak": 13406208,
+    "ms": 26.038,
+    "peak": 13361152,
     "out": "294997\n950682\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 425.731,
-    "peak": 103170048,
+    "ms": 430.638,
+    "peak": 103194624,
     "out": "3102543\n293458\n",
     "mismatch": false
    }
@@ -841,22 +841,22 @@
   "cpp variant + arena": {
    "small": {
     "ok": true,
-    "ms": 9.762,
-    "peak": 4157440,
+    "ms": 9.03,
+    "peak": 4153344,
     "out": "36407\n675881\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 23.609,
-    "peak": 9637888,
+    "ms": 16.983,
+    "peak": 9646080,
     "out": "294997\n950682\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 201.932,
-    "peak": 53735424,
+    "ms": 206.613,
+    "peak": 53678080,
     "out": "3102543\n293458\n",
     "mismatch": false
    }
@@ -864,22 +864,22 @@
   "cpp tagged union + arena": {
    "small": {
     "ok": true,
-    "ms": 7.93,
-    "peak": 4149248,
+    "ms": 10.512,
+    "peak": 4177920,
     "out": "36407\n675881\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 17.101,
-    "peak": 9662464,
+    "ms": 28.484,
+    "peak": 9641984,
     "out": "294997\n950682\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 210.233,
-    "peak": 53706752,
+    "ms": 214.674,
+    "peak": 53710848,
     "out": "3102543\n293458\n",
     "mismatch": false
    }
@@ -887,22 +887,22 @@
   "rust enum + Box": {
    "small": {
     "ok": true,
-    "ms": 13.368,
-    "peak": 3321856,
+    "ms": 12.993,
+    "peak": 3301376,
     "out": "36407\n675881\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 28.166,
-    "peak": 11534336,
+    "ms": 39.98,
+    "peak": 11558912,
     "out": "294997\n950682\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 446.907,
-    "peak": 101429248,
+    "ms": 501.435,
+    "peak": 101486592,
     "out": "3102543\n293458\n",
     "mismatch": false
    }
@@ -910,21 +910,21 @@
   "rust enum + arena indices": {
    "small": {
     "ok": true,
-    "ms": 8.312,
+    "ms": 8.172,
     "peak": 2535424,
     "out": "36407\n675881\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 16.383,
-    "peak": 5505024,
+    "ms": 15.339,
+    "peak": 5615616,
     "out": "294997\n950682\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 185.4,
+    "ms": 178.971,
     "peak": 39399424,
     "out": "3102543\n293458\n",
     "mismatch": false
@@ -935,21 +935,21 @@
   "zinkite one-pass, i32 next links": {
    "small": {
     "ok": true,
-    "ms": 64.634,
-    "peak": 9785344,
+    "ms": 64.677,
+    "peak": 9781248,
     "out": "900000\n2296959\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 723.226,
-    "peak": 41779200,
+    "ms": 845.438,
+    "peak": 41877504,
     "out": "4500000\n12991077\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 4749.144,
+    "ms": 4961.636,
     "peak": 161759232,
     "out": "18000000\n56916492\n",
     "mismatch": false
@@ -958,22 +958,22 @@
   "zinkite CSR two-pass": {
    "small": {
     "ok": true,
-    "ms": 26.89,
+    "ms": 28.129,
     "peak": 12980224,
     "out": "900000\n2296959\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 223.495,
-    "peak": 57806848,
+    "ms": 245.251,
+    "peak": 57700352,
     "out": "4500000\n12991077\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1584.872,
-    "peak": 225906688,
+    "ms": 1669.329,
+    "peak": 225759232,
     "out": "18000000\n56916492\n",
     "mismatch": false
    }
@@ -981,21 +981,21 @@
   "goose one-pass, typed relative refs": {
    "small": {
     "ok": true,
-    "ms": 67.854,
-    "peak": 10145792,
+    "ms": 78.454,
+    "peak": 10080256,
     "out": "900000\n2296959\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 708.785,
-    "peak": 42078208,
+    "ms": 788.379,
+    "peak": 42143744,
     "out": "4500000\n12991077\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 4618.941,
+    "ms": 4804.636,
     "peak": 161959936,
     "out": "18000000\n56916492\n",
     "mismatch": false
@@ -1004,22 +1004,22 @@
   "goose CSR two-pass": {
    "small": {
     "ok": true,
-    "ms": 25.321,
-    "peak": 13176832,
+    "ms": 42.995,
+    "peak": 13242368,
     "out": "900000\n2296959\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 202.923,
+    "ms": 237.221,
     "peak": 58068992,
     "out": "4500000\n12991077\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1488.729,
-    "peak": 226103296,
+    "ms": 1556.246,
+    "peak": 226168832,
     "out": "18000000\n56916492\n",
     "mismatch": false
    }
@@ -1027,21 +1027,21 @@
   "cpp vector<vector>": {
    "small": {
     "ok": true,
-    "ms": 50.579,
-    "peak": 13725696,
+    "ms": 73.43,
+    "peak": 13578240,
     "out": "900000\n2296959\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 566.568,
+    "ms": 607.483,
     "peak": 54276096,
     "out": "4500000\n12991077\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 3813.422,
+    "ms": 3963.861,
     "peak": 206745600,
     "out": "18000000\n56916492\n",
     "mismatch": false
@@ -1050,21 +1050,21 @@
   "cpp CSR two-pass": {
    "small": {
     "ok": true,
-    "ms": 29.319,
+    "ms": 30.657,
     "peak": 14757888,
     "out": "900000\n2296959\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 251.679,
-    "peak": 59580416,
+    "ms": 278.195,
+    "peak": 59584512,
     "out": "4500000\n12991077\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1662.834,
+    "ms": 1705.077,
     "peak": 227536896,
     "out": "18000000\n56916492\n",
     "mismatch": false
@@ -1073,21 +1073,21 @@
   "cpp arena + indices": {
    "small": {
     "ok": true,
-    "ms": 62.755,
+    "ms": 62.473,
     "peak": 11513856,
     "out": "900000\n2296959\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 680.472,
+    "ms": 772.305,
     "peak": 43511808,
     "out": "4500000\n12991077\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 4514.244,
+    "ms": 4690.391,
     "peak": 163540992,
     "out": "18000000\n56916492\n",
     "mismatch": false
@@ -1096,21 +1096,21 @@
   "rust Vec<Vec>": {
    "small": {
     "ok": true,
-    "ms": 66.469,
-    "peak": 12398592,
+    "ms": 51.595,
+    "peak": 12288000,
     "out": "900000\n2296959\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 574.6,
-    "peak": 53538816,
+    "ms": 604.803,
+    "peak": 53555200,
     "out": "4500000\n12991077\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 3344.926,
+    "ms": 3476.873,
     "peak": 208236544,
     "out": "18000000\n56916492\n",
     "mismatch": false
@@ -1119,21 +1119,21 @@
   "rust CSR two-pass": {
    "small": {
     "ok": true,
-    "ms": 31.808,
-    "peak": 13152256,
+    "ms": 30.279,
+    "peak": 13086720,
     "out": "900000\n2296959\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 232.61,
-    "peak": 57978880,
+    "ms": 250.503,
+    "peak": 57974784,
     "out": "4500000\n12991077\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1666.786,
+    "ms": 1745.651,
     "peak": 226078720,
     "out": "18000000\n56916492\n",
     "mismatch": false
@@ -1142,21 +1142,21 @@
   "rust arena + indices": {
    "small": {
     "ok": true,
-    "ms": 72.53,
+    "ms": 60.307,
     "peak": 10055680,
     "out": "900000\n2296959\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 663.781,
+    "ms": 732.943,
     "peak": 42053632,
     "out": "4500000\n12991077\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 4390.292,
+    "ms": 4544.274,
     "peak": 161935360,
     "out": "18000000\n56916492\n",
     "mismatch": false
@@ -1167,21 +1167,21 @@
   "zinkite std hashmap": {
    "small": {
     "ok": true,
-    "ms": 53.869,
+    "ms": 71.759,
     "peak": 14458880,
     "out": "500000\n37227\n58988349\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 583.504,
+    "ms": 615.879,
     "peak": 102047744,
     "out": "4000000\n287555\n472050912\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 4452.798,
+    "ms": 4768.48,
     "peak": 400498688,
     "out": "16000000\n1106823\n1888057790\n",
     "mismatch": false
@@ -1190,21 +1190,21 @@
   "zinkite slices + open addressing": {
    "small": {
     "ok": true,
-    "ms": 45.048,
-    "peak": 18583552,
+    "ms": 36.993,
+    "peak": 18731008,
     "out": "500000\n37227\n58988349\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 363.11,
-    "peak": 136441856,
+    "ms": 389.407,
+    "peak": 136548352,
     "out": "4000000\n287555\n472050912\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2418.547,
+    "ms": 2569.904,
     "peak": 540725248,
     "out": "16000000\n1106823\n1888057790\n",
     "mismatch": false
@@ -1213,22 +1213,22 @@
   "goose slices + open addressing": {
    "small": {
     "ok": true,
-    "ms": 36.069,
+    "ms": 32.67,
     "peak": 19369984,
     "out": "500000\n37227\n58988349\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 324.238,
-    "peak": 140431360,
+    "ms": 355.923,
+    "peak": 140496896,
     "out": "4000000\n287555\n472050912\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2066.157,
-    "peak": 555438080,
+    "ms": 2168.465,
+    "peak": 555372544,
     "out": "16000000\n1106823\n1888057790\n",
     "mismatch": false
    }
@@ -1236,21 +1236,21 @@
   "goose std dictionary": {
    "small": {
     "ok": true,
-    "ms": 33.748,
-    "peak": 15753216,
+    "ms": 34.227,
+    "peak": 15687680,
     "out": "500000\n37227\n58988349\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 317.369,
+    "ms": 333.886,
     "peak": 111091712,
     "out": "4000000\n287555\n472050912\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2188.099,
+    "ms": 2322.884,
     "peak": 438067200,
     "out": "16000000\n1106823\n1888057790\n",
     "mismatch": false
@@ -1259,21 +1259,21 @@
   "cpp unordered_map<string>": {
    "small": {
     "ok": true,
-    "ms": 68.331,
-    "peak": 22188032,
+    "ms": 78.424,
+    "peak": 22159360,
     "out": "500000\n37227\n58988349\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 752.62,
-    "peak": 154714112,
+    "ms": 821.976,
+    "peak": 154710016,
     "out": "4000000\n287555\n472050912\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 5896.477,
+    "ms": 6270.614,
     "peak": 545198080,
     "out": "16000000\n1106823\n1888057790\n",
     "mismatch": false
@@ -1282,22 +1282,22 @@
   "cpp unordered_map<string_view>": {
    "small": {
     "ok": true,
-    "ms": 84.925,
-    "peak": 22196224,
+    "ms": 65.843,
+    "peak": 22212608,
     "out": "500000\n37227\n58988349\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 753.036,
-    "peak": 154718208,
+    "ms": 807.548,
+    "peak": 154710016,
     "out": "4000000\n287555\n472050912\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 5997.066,
-    "peak": 527347712,
+    "ms": 6397.537,
+    "peak": 527511552,
     "out": "16000000\n1106823\n1888057790\n",
     "mismatch": false
    }
@@ -1305,22 +1305,22 @@
   "cpp open addressing": {
    "small": {
     "ok": true,
-    "ms": 45.522,
-    "peak": 28381184,
+    "ms": 67.999,
+    "peak": 28377088,
     "out": "500000\n37227\n58988349\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 463.025,
+    "ms": 490.615,
     "peak": 202219520,
     "out": "4000000\n287555\n472050912\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2973.119,
-    "peak": 697516032,
+    "ms": 3165.819,
+    "peak": 697667584,
     "out": "16000000\n1106823\n1888057790\n",
     "mismatch": false
    }
@@ -1328,22 +1328,22 @@
   "rust HashMap<&str>": {
    "small": {
     "ok": true,
-    "ms": 62.899,
-    "peak": 20213760,
+    "ms": 55.535,
+    "peak": 20180992,
     "out": "500000\n37227\n58988349\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 640.507,
-    "peak": 146153472,
+    "ms": 700.56,
+    "peak": 146186240,
     "out": "4000000\n287555\n472050912\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 4648.852,
-    "peak": 578387968,
+    "ms": 4900.491,
+    "peak": 578383872,
     "out": "16000000\n1106823\n1888057790\n",
     "mismatch": false
    }
@@ -1351,21 +1351,21 @@
   "rust open addressing": {
    "small": {
     "ok": true,
-    "ms": 67.206,
+    "ms": 57.43,
     "peak": 23916544,
     "out": "500000\n37227\n58988349\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 513.742,
+    "ms": 537.833,
     "peak": 176959488,
     "out": "4000000\n287555\n472050912\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 3305.968,
+    "ms": 3473.292,
     "peak": 701034496,
     "out": "16000000\n1106823\n1888057790\n",
     "mismatch": false
@@ -1376,21 +1376,21 @@
   "zinkite AoS, V3 methods": {
    "small": {
     "ok": true,
-    "ms": 42.128,
-    "peak": 4210688,
+    "ms": 31.258,
+    "peak": 4280320,
     "out": "100000\n1930703251\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 369.941,
+    "ms": 384.86,
     "peak": 25808896,
     "out": "1000000\n19381529234\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1861.227,
+    "ms": 1904.985,
     "peak": 97767424,
     "out": "4000000\n77519106729\n",
     "mismatch": false
@@ -1399,21 +1399,21 @@
   "zinkite AoS, per component": {
    "small": {
     "ok": true,
-    "ms": 28.883,
-    "peak": 4177920,
+    "ms": 28.742,
+    "peak": 4280320,
     "out": "100000\n1930703251\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 347.284,
+    "ms": 381.545,
     "peak": 25808896,
     "out": "1000000\n19381529234\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1808.114,
+    "ms": 1872.49,
     "peak": 97767424,
     "out": "4000000\n77519106729\n",
     "mismatch": false
@@ -1422,22 +1422,22 @@
   "goose AoS, elementwise": {
    "small": {
     "ok": true,
-    "ms": 42.98,
-    "peak": 4476928,
+    "ms": 31.209,
+    "peak": 4530176,
     "out": "100000\n1930703251\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 365.884,
-    "peak": 26071040,
+    "ms": 387.033,
+    "peak": 26005504,
     "out": "1000000\n19381529234\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1863.168,
-    "peak": 97964032,
+    "ms": 1940.483,
+    "peak": 98029568,
     "out": "4000000\n77519106729\n",
     "mismatch": false
    }
@@ -1445,22 +1445,22 @@
   "goose AoS, per component": {
    "small": {
     "ok": true,
-    "ms": 33.679,
+    "ms": 28.632,
     "peak": 4542464,
     "out": "100000\n1930703251\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 365.777,
-    "peak": 26005504,
+    "ms": 358.642,
+    "peak": 26071040,
     "out": "1000000\n19381529234\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1803.512,
-    "peak": 98029568,
+    "ms": 1848.661,
+    "peak": 97964032,
     "out": "4000000\n77519106729\n",
     "mismatch": false
    }
@@ -1468,21 +1468,21 @@
   "cpp AoS, per component": {
    "small": {
     "ok": true,
-    "ms": 29.375,
+    "ms": 47.47,
     "peak": 5910528,
     "out": "100000\n1930703251\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 352.073,
-    "peak": 27586560,
+    "ms": 384.124,
+    "peak": 27439104,
     "out": "1000000\n19381529234\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1810.713,
+    "ms": 1857.98,
     "peak": 99545088,
     "out": "4000000\n77519106729\n",
     "mismatch": false
@@ -1491,21 +1491,21 @@
   "cpp AoS, elementwise": {
    "small": {
     "ok": true,
-    "ms": 30.855,
+    "ms": 31.708,
     "peak": 5910528,
     "out": "100000\n1930703251\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 367.548,
+    "ms": 398.487,
     "peak": 27586560,
     "out": "1000000\n19381529234\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1879.182,
+    "ms": 1920.619,
     "peak": 99545088,
     "out": "4000000\n77519106729\n",
     "mismatch": false
@@ -1514,22 +1514,22 @@
   "cpp SoA": {
    "small": {
     "ok": true,
-    "ms": 50.572,
+    "ms": 53.394,
     "peak": 5910528,
     "out": "100000\n1930703251\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 498.441,
+    "ms": 522.119,
     "peak": 27586560,
     "out": "1000000\n19381529234\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2080.786,
-    "peak": 99545088,
+    "ms": 2145.114,
+    "peak": 99397632,
     "out": "4000000\n77519106729\n",
     "mismatch": false
    }
@@ -1537,21 +1537,21 @@
   "rust AoS, elementwise": {
    "small": {
     "ok": true,
-    "ms": 30.643,
+    "ms": 54.346,
     "peak": 4452352,
     "out": "100000\n1930703251\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 365.784,
-    "peak": 25964544,
+    "ms": 406.702,
+    "peak": 25976832,
     "out": "1000000\n19381529234\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1875.324,
+    "ms": 1936.031,
     "peak": 97939456,
     "out": "4000000\n77519106729\n",
     "mismatch": false
@@ -1560,21 +1560,21 @@
   "rust AoS, per component": {
    "small": {
     "ok": true,
-    "ms": 51.78,
+    "ms": 52.689,
     "peak": 4452352,
     "out": "100000\n1930703251\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 363.464,
-    "peak": 25964544,
+    "ms": 388.144,
+    "peak": 25980928,
     "out": "1000000\n19381529234\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1843.789,
+    "ms": 1904.735,
     "peak": 97939456,
     "out": "4000000\n77519106729\n",
     "mismatch": false
@@ -1585,21 +1585,21 @@
   "zinkite inline text + links": {
    "small": {
     "ok": true,
-    "ms": 135.121,
+    "ms": 150.576,
     "peak": 37462016,
     "out": "9594225\n1523168\n20000\n0\n109567807650\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 679.205,
+    "ms": 703.624,
     "peak": 179757056,
     "out": "47939902\n7609503\n100000\n0\n547350405826\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2066.725,
+    "ms": 2086.005,
     "peak": 535715840,
     "out": "143832776\n22827578\n300000\n0\n1642399445720\n",
     "mismatch": false
@@ -1608,22 +1608,22 @@
   "goose pool + refs, inline text": {
    "small": {
     "ok": true,
-    "ms": 131.367,
+    "ms": 127.051,
     "peak": 27840512,
     "out": "9594225\n1523168\n20000\n0\n109567807650\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 651.81,
-    "peak": 130912256,
+    "ms": 654.594,
+    "peak": 130846720,
     "out": "47939902\n7609503\n100000\n0\n547350405826\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1906.791,
-    "peak": 388370432,
+    "ms": 1960.152,
+    "peak": 388304896,
     "out": "143832776\n22827578\n300000\n0\n1642399445720\n",
     "mismatch": false
    }
@@ -1631,22 +1631,22 @@
   "cpp unique_ptr + string": {
    "small": {
     "ok": true,
-    "ms": 370.152,
-    "peak": 135036928,
+    "ms": 386.973,
+    "peak": 135184384,
     "out": "9594225\n1523168\n20000\n0\n109567807650\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 1914.343,
-    "peak": 661016576,
+    "ms": 1969.491,
+    "peak": 661012480,
     "out": "47939902\n7609503\n100000\n0\n547350405826\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 5788.69,
-    "peak": 1976025088,
+    "ms": 5997.512,
+    "peak": 1976016896,
     "out": "143832776\n22827578\n300000\n0\n1642399445720\n",
     "mismatch": false
    }
@@ -1654,22 +1654,22 @@
   "cpp arena + string_view": {
    "small": {
     "ok": true,
-    "ms": 179.29,
-    "peak": 75747328,
+    "ms": 178.826,
+    "peak": 75726848,
     "out": "9594225\n1523168\n20000\n0\n109567807650\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 855.503,
-    "peak": 302829568,
+    "ms": 882.435,
+    "peak": 302866432,
     "out": "47939902\n7609503\n100000\n0\n547350405826\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2713.714,
-    "peak": 1002737664,
+    "ms": 2808.121,
+    "peak": 1002692608,
     "out": "143832776\n22827578\n300000\n0\n1642399445720\n",
     "mismatch": false
    }
@@ -1677,22 +1677,22 @@
   "rust enum + Box + String": {
    "small": {
     "ok": true,
-    "ms": 267.374,
+    "ms": 262.522,
     "peak": 102367232,
     "out": "9594225\n1523168\n20000\n0\n109567807650\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 1278.283,
-    "peak": 503431168,
+    "ms": 1330.386,
+    "peak": 503447552,
     "out": "47939902\n7609503\n100000\n0\n547350405826\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 3879.512,
-    "peak": 1506242560,
+    "ms": 4075.51,
+    "peak": 1506295808,
     "out": "143832776\n22827578\n300000\n0\n1642399445720\n",
     "mismatch": false
    }
@@ -1700,22 +1700,22 @@
   "rust arena + &str": {
    "small": {
     "ok": true,
-    "ms": 153.265,
+    "ms": 159.037,
     "peak": 48394240,
     "out": "9594225\n1523168\n20000\n0\n109567807650\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 666.096,
+    "ms": 697.775,
     "peak": 233156608,
     "out": "47939902\n7609503\n100000\n0\n547350405826\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2022.525,
-    "peak": 695005184,
+    "ms": 2093.815,
+    "peak": 694988800,
     "out": "143832776\n22827578\n300000\n0\n1642399445720\n",
     "mismatch": false
    }
@@ -1725,21 +1725,21 @@
   "zinkite pool + hashmap": {
    "small": {
     "ok": true,
-    "ms": 183.088,
+    "ms": 192.532,
     "peak": 21979136,
     "out": "1232608\n641958\n82565\n250000\n16746048090193918132\n125422431\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 1531.968,
+    "ms": 1661.133,
     "peak": 82583552,
     "out": "4937489\n2561689\n329505\n1000000\n1009107182135619685\n501925078\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 9376.532,
+    "ms": 9764.273,
     "peak": 325001216,
     "out": "19745198\n10252790\n1316534\n4000000\n10422696209916603086\n2007848176\n",
     "mismatch": false
@@ -1748,22 +1748,22 @@
   "zinkite array arena + open addressing": {
    "small": {
     "ok": true,
-    "ms": 86.066,
+    "ms": 86.619,
     "peak": 10039296,
     "out": "1232608\n641958\n82565\n250000\n16746048090193918132\n125422431\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 649.319,
+    "ms": 740.126,
     "peak": 34664448,
     "out": "4937489\n2561689\n329505\n1000000\n1009107182135619685\n501925078\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 4950.27,
-    "peak": 132870144,
+    "ms": 5141.274,
+    "peak": 132915200,
     "out": "19745198\n10252790\n1316534\n4000000\n10422696209916603086\n2007848176\n",
     "mismatch": false
    }
@@ -1771,22 +1771,22 @@
   "goose reusable pool + pool-relative refs": {
    "small": {
     "ok": true,
-    "ms": 81.969,
-    "peak": 10227712,
+    "ms": 79.55,
+    "peak": 10293248,
     "out": "1232608\n641958\n82565\n250000\n16746048090193918132\n125422431\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 657.165,
-    "peak": 34852864,
+    "ms": 749.373,
+    "peak": 34918400,
     "out": "4937489\n2561689\n329505\n1000000\n1009107182135619685\n501925078\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 5116.096,
-    "peak": 133271552,
+    "ms": 5391.902,
+    "peak": 133206016,
     "out": "19745198\n10252790\n1316534\n4000000\n10422696209916603086\n2007848176\n",
     "mismatch": false
    }
@@ -1794,22 +1794,22 @@
   "cpp list + unordered_map": {
    "small": {
     "ok": true,
-    "ms": 272.606,
-    "peak": 22355968,
+    "ms": 294.614,
+    "peak": 22351872,
     "out": "1232608\n641958\n82565\n250000\n16746048090193918132\n125422431\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 2449.653,
-    "peak": 79089664,
+    "ms": 2704.585,
+    "peak": 79085568,
     "out": "4937489\n2561689\n329505\n1000000\n1009107182135619685\n501925078\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 13717.768,
-    "peak": 307261440,
+    "ms": 14446.097,
+    "peak": 307249152,
     "out": "19745198\n10252790\n1316534\n4000000\n10422696209916603086\n2007848176\n",
     "mismatch": false
    }
@@ -1817,21 +1817,21 @@
   "cpp arena + open addressing": {
    "small": {
     "ok": true,
-    "ms": 80.542,
+    "ms": 83.64,
     "peak": 11808768,
     "out": "1232608\n641958\n82565\n250000\n16746048090193918132\n125422431\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 731.524,
-    "peak": 36859904,
+    "ms": 828.961,
+    "peak": 36868096,
     "out": "4937489\n2561689\n329505\n1000000\n1009107182135619685\n501925078\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 5419.667,
+    "ms": 5882.288,
     "peak": 137555968,
     "out": "19745198\n10252790\n1316534\n4000000\n10422696209916603086\n2007848176\n",
     "mismatch": false
@@ -1840,22 +1840,22 @@
   "rust HashMap + arena": {
    "small": {
     "ok": true,
-    "ms": 120.03,
+    "ms": 140.172,
     "peak": 12902400,
     "out": "1232608\n641958\n82565\n250000\n16746048090193918132\n125422431\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 851.529,
-    "peak": 45166592,
+    "ms": 1001.434,
+    "peak": 45117440,
     "out": "4937489\n2561689\n329505\n1000000\n1009107182135619685\n501925078\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 6138.026,
-    "peak": 173662208,
+    "ms": 6660.208,
+    "peak": 173834240,
     "out": "19745198\n10252790\n1316534\n4000000\n10422696209916603086\n2007848176\n",
     "mismatch": false
    }
@@ -1863,22 +1863,22 @@
   "rust open addressing + arena": {
    "small": {
     "ok": true,
-    "ms": 89.854,
+    "ms": 104.798,
     "peak": 10203136,
     "out": "1232608\n641958\n82565\n250000\n16746048090193918132\n125422431\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 696.378,
+    "ms": 784.882,
     "peak": 34828288,
     "out": "4937489\n2561689\n329505\n1000000\n1009107182135619685\n501925078\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 5386.548,
-    "peak": 133160960,
+    "ms": 5655.178,
+    "peak": 133165056,
     "out": "19745198\n10252790\n1316534\n4000000\n10422696209916603086\n2007848176\n",
     "mismatch": false
    }
@@ -1888,22 +1888,22 @@
   "zinkite references in capped child arrays": {
    "small": {
     "ok": true,
-    "ms": 25.336,
+    "ms": 18.049,
     "peak": 7675904,
     "out": "40724\n2731850\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 149.393,
-    "peak": 38494208,
+    "ms": 153.362,
+    "peak": 38424576,
     "out": "254401\n16563864\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1017.466,
-    "peak": 230924288,
+    "ms": 1035.121,
+    "peak": 230825984,
     "out": "1591388\n43322611\n",
     "mismatch": false
    }
@@ -1911,21 +1911,21 @@
   "goose pool + inline child refs": {
    "small": {
     "ok": true,
-    "ms": 17.775,
-    "peak": 6901760,
+    "ms": 37.567,
+    "peak": 6836224,
     "out": "40724\n2731850\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 124.938,
+    "ms": 140.172,
     "peak": 31821824,
     "out": "254401\n16563864\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 885.782,
+    "ms": 944.505,
     "peak": 188207104,
     "out": "1591388\n43322611\n",
     "mismatch": false
@@ -1934,22 +1934,22 @@
   "cpp unique_ptr children": {
    "small": {
     "ok": true,
-    "ms": 30.928,
-    "peak": 10452992,
+    "ms": 32.476,
+    "peak": 10444800,
     "out": "40724\n2731850\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 327.345,
-    "peak": 44658688,
+    "ms": 366.139,
+    "peak": 44654592,
     "out": "254401\n16563864\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2667.057,
-    "peak": 258605056,
+    "ms": 2792.69,
+    "peak": 258621440,
     "out": "1591388\n43322611\n",
     "mismatch": false
    }
@@ -1957,22 +1957,22 @@
   "cpp arena + child indices": {
    "small": {
     "ok": true,
-    "ms": 32.043,
-    "peak": 11210752,
+    "ms": 21.561,
+    "peak": 11239424,
     "out": "40724\n2731850\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 134.155,
-    "peak": 34844672,
+    "ms": 162.946,
+    "peak": 34852864,
     "out": "254401\n16563864\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1055.037,
-    "peak": 255025152,
+    "ms": 1089.955,
+    "peak": 255008768,
     "out": "1591388\n43322611\n",
     "mismatch": false
    }
@@ -1980,22 +1980,22 @@
   "rust Box children": {
    "small": {
     "ok": true,
-    "ms": 31.412,
-    "peak": 8761344,
+    "ms": 30.456,
+    "peak": 8777728,
     "out": "40724\n2731850\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 302.061,
-    "peak": 43724800,
+    "ms": 318.062,
+    "peak": 43663360,
     "out": "254401\n16563864\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2369.957,
-    "peak": 261926912,
+    "ms": 2471.266,
+    "peak": 261959680,
     "out": "1591388\n43322611\n",
     "mismatch": false
    }
@@ -2003,22 +2003,22 @@
   "rust arena + child indices": {
    "small": {
     "ok": true,
-    "ms": 18.103,
+    "ms": 37.525,
     "peak": 6959104,
     "out": "40724\n2731850\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 115.388,
-    "peak": 32600064,
+    "ms": 140.505,
+    "peak": 32616448,
     "out": "254401\n16563864\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 881.285,
-    "peak": 192983040,
+    "ms": 929.86,
+    "peak": 193032192,
     "out": "1591388\n43322611\n",
     "mismatch": false
    }
@@ -2028,21 +2028,21 @@
   "zinkite local array + @@": {
    "small": {
     "ok": true,
-    "ms": 59.971,
+    "ms": 67.438,
     "peak": 1720320,
     "out": "4149826\n1689408\n64873\n1451\n15377\n14237\n4062\n2440448890907290840\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 184.908,
-    "peak": 1785856,
+    "ms": 177.159,
+    "peak": 1720320,
     "out": "16589727\n6746064\n259281\n5627\n61247\n57752\n16093\n17094074625383217522\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 659.952,
+    "ms": 690.161,
     "peak": 1720320,
     "out": "66413553\n27015808\n1035426\n22521\n245953\n231341\n64759\n1155945665853164803\n",
     "mismatch": false
@@ -2051,22 +2051,22 @@
   "zinkite local array + @ and #": {
    "small": {
     "ok": true,
-    "ms": 44.152,
+    "ms": 44.045,
     "peak": 1724416,
     "out": "4149826\n1689408\n64873\n1451\n15377\n14237\n4062\n2440448890907290840\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 172.19,
+    "ms": 193.343,
     "peak": 1724416,
     "out": "16589727\n6746064\n259281\n5627\n61247\n57752\n16093\n17094074625383217522\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 671.663,
-    "peak": 1789952,
+    "ms": 680.32,
+    "peak": 1724416,
     "out": "66413553\n27015808\n1035426\n22521\n245953\n231341\n64759\n1155945665853164803\n",
     "mismatch": false
    }
@@ -2074,22 +2074,22 @@
   "goose local pool + return from": {
    "small": {
     "ok": true,
-    "ms": 45.812,
-    "peak": 2039808,
+    "ms": 47.438,
+    "peak": 1974272,
     "out": "4149826\n1689408\n64873\n1451\n15377\n14237\n4062\n2440448890907290840\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 175.021,
-    "peak": 2039808,
+    "ms": 182.049,
+    "peak": 1974272,
     "out": "16589727\n6746064\n259281\n5627\n61247\n57752\n16093\n17094074625383217522\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 694.017,
-    "peak": 1974272,
+    "ms": 740.439,
+    "peak": 2035712,
     "out": "66413553\n27015808\n1035426\n22521\n245953\n231341\n64759\n1155945665853164803\n",
     "mismatch": false
    }
@@ -2097,22 +2097,22 @@
   "cpp unique_ptr + exceptions": {
    "small": {
     "ok": true,
-    "ms": 199.459,
-    "peak": 4116480,
+    "ms": 183.965,
+    "peak": 4026368,
     "out": "4149826\n1689408\n64873\n1451\n15377\n14237\n4062\n2440448890907290840\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 700.262,
-    "peak": 4116480,
+    "ms": 723.857,
+    "peak": 4022272,
     "out": "16589727\n6746064\n259281\n5627\n61247\n57752\n16093\n17094074625383217522\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2812.648,
-    "peak": 4100096,
+    "ms": 2941.984,
+    "peak": 4116480,
     "out": "66413553\n27015808\n1035426\n22521\n245953\n231341\n64759\n1155945665853164803\n",
     "mismatch": false
    }
@@ -2120,22 +2120,22 @@
   "cpp arena + error codes": {
    "small": {
     "ok": true,
-    "ms": 61.064,
-    "peak": 3960832,
+    "ms": 75.056,
+    "peak": 3964928,
     "out": "4149826\n1689408\n64873\n1451\n15377\n14237\n4062\n2440448890907290840\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 205.872,
-    "peak": 3969024,
+    "ms": 223.087,
+    "peak": 3948544,
     "out": "16589727\n6746064\n259281\n5627\n61247\n57752\n16093\n17094074625383217522\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 764.555,
-    "peak": 3952640,
+    "ms": 798.587,
+    "peak": 3948544,
     "out": "66413553\n27015808\n1035426\n22521\n245953\n231341\n64759\n1155945665853164803\n",
     "mismatch": false
    }
@@ -2143,21 +2143,21 @@
   "rust Box + Result": {
    "small": {
     "ok": true,
-    "ms": 82.009,
-    "peak": 2146304,
+    "ms": 85.307,
+    "peak": 2125824,
     "out": "4149826\n1689408\n64873\n1451\n15377\n14237\n4062\n2440448890907290840\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 320.424,
-    "peak": 2080768,
+    "ms": 356.504,
+    "peak": 2121728,
     "out": "16589727\n6746064\n259281\n5627\n61247\n57752\n16093\n17094074625383217522\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1276.399,
+    "ms": 1327.152,
     "peak": 2129920,
     "out": "66413553\n27015808\n1035426\n22521\n245953\n231341\n64759\n1155945665853164803\n",
     "mismatch": false
@@ -2166,22 +2166,22 @@
   "rust arena + Result": {
    "small": {
     "ok": true,
-    "ms": 54.968,
-    "peak": 2101248,
+    "ms": 67.202,
+    "peak": 2134016,
     "out": "4149826\n1689408\n64873\n1451\n15377\n14237\n4062\n2440448890907290840\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 191.322,
+    "ms": 197.302,
     "peak": 2101248,
     "out": "16589727\n6746064\n259281\n5627\n61247\n57752\n16093\n17094074625383217522\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 696.322,
-    "peak": 2101248,
+    "ms": 722.517,
+    "peak": 2076672,
     "out": "66413553\n27015808\n1035426\n22521\n245953\n231341\n64759\n1155945665853164803\n",
     "mismatch": false
    }
@@ -2191,22 +2191,22 @@
   "zinkite local array per tree": {
    "small": {
     "ok": true,
-    "ms": 21.404,
+    "ms": 29.779,
     "peak": 5013504,
     "out": "131071\n32768\n4\n1015808\n8192\n6\n1040384\n2048\n8\n1046528\n512\n10\n1048064\n128\n12\n1048448\n32\n14\n1048544\n65535\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 103.627,
-    "peak": 14450688,
+    "ms": 98.832,
+    "peak": 14348288,
     "out": "524287\n131072\n4\n4063232\n32768\n6\n4161536\n8192\n8\n4186112\n2048\n10\n4192256\n512\n12\n4193792\n128\n14\n4194176\n32\n16\n4194272\n262143\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 429.511,
-    "peak": 52199424,
+    "ms": 444.102,
+    "peak": 52105216,
     "out": "2097151\n524288\n4\n16252928\n131072\n6\n16646144\n32768\n8\n16744448\n8192\n10\n16769024\n2048\n12\n16775168\n512\n14\n16776704\n128\n16\n16777088\n32\n18\n16777184\n1048575\n",
     "mismatch": false
    }
@@ -2214,21 +2214,21 @@
   "zinkite local array per tree, links": {
    "small": {
     "ok": true,
-    "ms": 32.674,
+    "ms": 25.971,
     "peak": 3391488,
     "out": "131071\n32768\n4\n1015808\n8192\n6\n1040384\n2048\n8\n1046528\n512\n10\n1048064\n128\n12\n1048448\n32\n14\n1048544\n65535\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 110.443,
-    "peak": 8019968,
+    "ms": 116.745,
+    "peak": 8110080,
     "out": "524287\n131072\n4\n4063232\n32768\n6\n4161536\n8192\n8\n4186112\n2048\n10\n4192256\n512\n12\n4193792\n128\n14\n4194176\n32\n16\n4194272\n262143\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 530.585,
+    "ms": 547.946,
     "peak": 26984448,
     "out": "2097151\n524288\n4\n16252928\n131072\n6\n16646144\n32768\n8\n16744448\n8192\n10\n16769024\n2048\n12\n16775168\n512\n14\n16776704\n128\n16\n16777088\n32\n18\n16777184\n1048575\n",
     "mismatch": false
@@ -2237,22 +2237,22 @@
   "goose local pool per tree": {
    "small": {
     "ok": true,
-    "ms": 20.587,
+    "ms": 21.838,
     "peak": 3592192,
     "out": "131071\n32768\n4\n1015808\n8192\n6\n1040384\n2048\n8\n1046528\n512\n10\n1048064\n128\n12\n1048448\n32\n14\n1048544\n65535\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 89.743,
+    "ms": 103.251,
     "peak": 8376320,
     "out": "524287\n131072\n4\n4063232\n32768\n6\n4161536\n8192\n8\n4186112\n2048\n10\n4192256\n512\n12\n4193792\n128\n14\n4194176\n32\n16\n4194272\n262143\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 414.178,
-    "peak": 27185152,
+    "ms": 437.869,
+    "peak": 27250688,
     "out": "2097151\n524288\n4\n16252928\n131072\n6\n16646144\n32768\n8\n16744448\n8192\n10\n16769024\n2048\n12\n16775168\n512\n14\n16776704\n128\n16\n16777088\n32\n18\n16777184\n1048575\n",
     "mismatch": false
    }
@@ -2260,22 +2260,22 @@
   "cpp new/delete": {
    "small": {
     "ok": true,
-    "ms": 155.52,
-    "peak": 8052736,
+    "ms": 155.615,
+    "peak": 8093696,
     "out": "131071\n32768\n4\n1015808\n8192\n6\n1040384\n2048\n8\n1046528\n512\n10\n1048064\n128\n12\n1048448\n32\n14\n1048544\n65535\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 660.328,
-    "peak": 20746240,
+    "ms": 686.063,
+    "peak": 20758528,
     "out": "524287\n131072\n4\n4063232\n32768\n6\n4161536\n8192\n8\n4186112\n2048\n10\n4192256\n512\n12\n4193792\n128\n14\n4194176\n32\n16\n4194272\n262143\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 3113.208,
-    "peak": 71053312,
+    "ms": 3190.742,
+    "peak": 71049216,
     "out": "2097151\n524288\n4\n16252928\n131072\n6\n16646144\n32768\n8\n16744448\n8192\n10\n16769024\n2048\n12\n16775168\n512\n14\n16776704\n128\n16\n16777088\n32\n18\n16777184\n1048575\n",
     "mismatch": false
    }
@@ -2283,22 +2283,22 @@
   "cpp vector arena": {
    "small": {
     "ok": true,
-    "ms": 43.429,
-    "peak": 5599232,
+    "ms": 53.261,
+    "peak": 5595136,
     "out": "131071\n32768\n4\n1015808\n8192\n6\n1040384\n2048\n8\n1046528\n512\n10\n1048064\n128\n12\n1048448\n32\n14\n1048544\n65535\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 142.873,
+    "ms": 147.029,
     "peak": 11739136,
     "out": "524287\n131072\n4\n4063232\n32768\n6\n4161536\n8192\n8\n4186112\n2048\n10\n4192256\n512\n12\n4193792\n128\n14\n4194176\n32\n16\n4194272\n262143\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 612.392,
-    "peak": 37036032,
+    "ms": 635.088,
+    "peak": 37056512,
     "out": "2097151\n524288\n4\n16252928\n131072\n6\n16646144\n32768\n8\n16744448\n8192\n10\n16769024\n2048\n12\n16775168\n512\n14\n16776704\n128\n16\n16777088\n32\n18\n16777184\n1048575\n",
     "mismatch": false
    }
@@ -2306,22 +2306,22 @@
   "rust Box": {
    "small": {
     "ok": true,
-    "ms": 141.335,
-    "peak": 6418432,
+    "ms": 170.972,
+    "peak": 6377472,
     "out": "131071\n32768\n4\n1015808\n8192\n6\n1040384\n2048\n8\n1046528\n512\n10\n1048064\n128\n12\n1048448\n32\n14\n1048544\n65535\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 682.664,
-    "peak": 18935808,
+    "ms": 710.775,
+    "peak": 18903040,
     "out": "524287\n131072\n4\n4063232\n32768\n6\n4161536\n8192\n8\n4186112\n2048\n10\n4192256\n512\n12\n4193792\n128\n14\n4194176\n32\n16\n4194272\n262143\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 3119.989,
-    "peak": 69251072,
+    "ms": 3259.749,
+    "peak": 69214208,
     "out": "2097151\n524288\n4\n16252928\n131072\n6\n16646144\n32768\n8\n16744448\n8192\n10\n16769024\n2048\n12\n16775168\n512\n14\n16776704\n128\n16\n16777088\n32\n18\n16777184\n1048575\n",
     "mismatch": false
    }
@@ -2329,22 +2329,22 @@
   "rust Vec arena": {
    "small": {
     "ok": true,
-    "ms": 27.066,
+    "ms": 27.929,
     "peak": 3588096,
     "out": "131071\n32768\n4\n1015808\n8192\n6\n1040384\n2048\n8\n1046528\n512\n10\n1048064\n128\n12\n1048448\n32\n14\n1048544\n65535\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 112.005,
-    "peak": 8433664,
+    "ms": 135.644,
+    "peak": 8306688,
     "out": "524287\n131072\n4\n4063232\n32768\n6\n4161536\n8192\n8\n4186112\n2048\n10\n4192256\n512\n12\n4193792\n128\n14\n4194176\n32\n16\n4194272\n262143\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 520.333,
-    "peak": 27308032,
+    "ms": 556.604,
+    "peak": 27291648,
     "out": "2097151\n524288\n4\n16252928\n131072\n6\n16646144\n32768\n8\n16744448\n8192\n10\n16769024\n2048\n12\n16775168\n512\n14\n16776704\n128\n16\n16777088\n32\n18\n16777184\n1048575\n",
     "mismatch": false
    }
@@ -2354,21 +2354,21 @@
   "zinkite inline DTO": {
    "small": {
     "ok": true,
-    "ms": 65.009,
+    "ms": 74.75,
     "peak": 1777664,
     "out": "100000\n22983649\n4263108621399969415\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 201.548,
-    "peak": 1576960,
+    "ms": 220.718,
+    "peak": 1777664,
     "out": "400000\n91800236\n8685297199210497210\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 791.697,
+    "ms": 825.82,
     "peak": 1777664,
     "out": "1600000\n367459487\n7480137599999527189\n",
     "mismatch": false
@@ -2377,21 +2377,21 @@
   "zinkite streaming": {
    "small": {
     "ok": true,
-    "ms": 37.402,
+    "ms": 38.738,
     "peak": 1773568,
     "out": "100000\n22983649\n4263108621399969415\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 155.193,
+    "ms": 155.732,
     "peak": 1773568,
     "out": "400000\n91800236\n8685297199210497210\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 576.781,
+    "ms": 605.443,
     "peak": 1773568,
     "out": "1600000\n367459487\n7480137599999527189\n",
     "mismatch": false
@@ -2400,21 +2400,21 @@
   "goose inline DTO": {
    "small": {
     "ok": true,
-    "ms": 52.653,
-    "peak": 2039808,
+    "ms": 77.817,
+    "peak": 1974272,
     "out": "100000\n22983649\n4263108621399969415\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 205.3,
+    "ms": 224.309,
     "peak": 1974272,
     "out": "400000\n91800236\n8685297199210497210\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 810.689,
+    "ms": 839.508,
     "peak": 2039808,
     "out": "1600000\n367459487\n7480137599999527189\n",
     "mismatch": false
@@ -2423,21 +2423,21 @@
   "goose streaming": {
    "small": {
     "ok": true,
-    "ms": 45.33,
+    "ms": 42.169,
     "peak": 1970176,
     "out": "100000\n22983649\n4263108621399969415\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 145.193,
-    "peak": 1970176,
+    "ms": 149.563,
+    "peak": 2035712,
     "out": "400000\n91800236\n8685297199210497210\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 590.68,
+    "ms": 592.22,
     "peak": 1970176,
     "out": "1600000\n367459487\n7480137599999527189\n",
     "mismatch": false
@@ -2446,22 +2446,22 @@
   "cpp DTO + string": {
    "small": {
     "ok": true,
-    "ms": 71.505,
-    "peak": 3973120,
+    "ms": 73.882,
+    "peak": 3969024,
     "out": "100000\n22983649\n4263108621399969415\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 282.912,
-    "peak": 3969024,
+    "ms": 311.286,
+    "peak": 3936256,
     "out": "400000\n91800236\n8685297199210497210\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1105.589,
-    "peak": 3969024,
+    "ms": 1165.099,
+    "peak": 3960832,
     "out": "1600000\n367459487\n7480137599999527189\n",
     "mismatch": false
    }
@@ -2469,21 +2469,21 @@
   "cpp streaming": {
    "small": {
     "ok": true,
-    "ms": 47.12,
-    "peak": 3932160,
+    "ms": 48.188,
+    "peak": 3928064,
     "out": "100000\n22983649\n4263108621399969415\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 181.153,
-    "peak": 3960832,
+    "ms": 188.065,
+    "peak": 3940352,
     "out": "400000\n91800236\n8685297199210497210\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 717.06,
+    "ms": 743.313,
     "peak": 3940352,
     "out": "1600000\n367459487\n7480137599999527189\n",
     "mismatch": false
@@ -2492,22 +2492,22 @@
   "rust DTO + String": {
    "small": {
     "ok": true,
-    "ms": 114.19,
-    "peak": 2265088,
+    "ms": 108.477,
+    "peak": 2105344,
     "out": "100000\n22983649\n4263108621399969415\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 413.405,
-    "peak": 2146304,
+    "ms": 453.518,
+    "peak": 2097152,
     "out": "400000\n91800236\n8685297199210497210\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1671.603,
-    "peak": 2015232,
+    "ms": 1759.441,
+    "peak": 2277376,
     "out": "1600000\n367459487\n7480137599999527189\n",
     "mismatch": false
    }
@@ -2515,22 +2515,22 @@
   "rust streaming": {
    "small": {
     "ok": true,
-    "ms": 54.714,
-    "peak": 2142208,
+    "ms": 57.389,
+    "peak": 2011136,
     "out": "100000\n22983649\n4263108621399969415\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 220.262,
-    "peak": 2125824,
+    "ms": 240.556,
+    "peak": 2142208,
     "out": "400000\n91800236\n8685297199210497210\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 862.259,
-    "peak": 2109440,
+    "ms": 898.414,
+    "peak": 2142208,
     "out": "1600000\n367459487\n7480137599999527189\n",
     "mismatch": false
    }
@@ -2540,21 +2540,21 @@
   "zinkite flat indexing": {
    "small": {
     "ok": true,
-    "ms": 25.015,
-    "peak": 3887104,
+    "ms": 24.29,
+    "peak": 3989504,
     "out": "1024\n125433619\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 52.781,
+    "ms": 32.741,
     "peak": 10182656,
     "out": "2048\n502239988\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 610.99,
+    "ms": 511.79,
     "peak": 136110080,
     "out": "8192\n8047969911\n",
     "mismatch": false
@@ -2563,22 +2563,22 @@
   "zinkite row slices": {
    "small": {
     "ok": true,
-    "ms": 22.854,
-    "peak": 3891200,
+    "ms": 25.649,
+    "peak": 3989504,
     "out": "1024\n125433619\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 44.862,
+    "ms": 32.53,
     "peak": 10182656,
     "out": "2048\n502239988\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 511.325,
-    "peak": 136110080,
+    "ms": 528.409,
+    "peak": 136040448,
     "out": "8192\n8047969911\n",
     "mismatch": false
    }
@@ -2586,22 +2586,22 @@
   "goose flat indexing": {
    "small": {
     "ok": true,
-    "ms": 24.577,
+    "ms": 24.951,
     "peak": 4182016,
     "out": "1024\n125433619\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 31.218,
-    "peak": 10375168,
+    "ms": 32.002,
+    "peak": 10440704,
     "out": "2048\n502239988\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 477.754,
-    "peak": 136368128,
+    "ms": 498.756,
+    "peak": 136302592,
     "out": "8192\n8047969911\n",
     "mismatch": false
    }
@@ -2609,21 +2609,21 @@
   "goose row slices": {
    "small": {
     "ok": true,
-    "ms": 20.327,
+    "ms": 27.24,
     "peak": 4182016,
     "out": "1024\n125433619\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 39.67,
-    "peak": 10440704,
+    "ms": 32.292,
+    "peak": 10375168,
     "out": "2048\n502239988\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 478.347,
+    "ms": 495.51,
     "peak": 136368128,
     "out": "8192\n8047969911\n",
     "mismatch": false
@@ -2632,22 +2632,22 @@
   "cpp flat indexing": {
    "small": {
     "ok": true,
-    "ms": 22.738,
-    "peak": 5906432,
+    "ms": 11.574,
+    "peak": 5918720,
     "out": "1024\n125433619\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 54.309,
+    "ms": 39.033,
     "peak": 12161024,
     "out": "2048\n502239988\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 598.515,
-    "peak": 138035200,
+    "ms": 627.612,
+    "peak": 138039296,
     "out": "8192\n8047969911\n",
     "mismatch": false
    }
@@ -2655,21 +2655,21 @@
   "cpp row pointers": {
    "small": {
     "ok": true,
-    "ms": 23.806,
+    "ms": 27.766,
     "peak": 5615616,
     "out": "1024\n125433619\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 44.781,
+    "ms": 45.799,
     "peak": 11956224,
     "out": "2048\n502239988\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 668.591,
+    "ms": 699.932,
     "peak": 137736192,
     "out": "8192\n8047969911\n",
     "mismatch": false
@@ -2678,21 +2678,21 @@
   "rust flat indexing": {
    "small": {
     "ok": true,
-    "ms": 19.475,
+    "ms": 13.844,
     "peak": 4304896,
     "out": "1024\n125433619\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 34.834,
+    "ms": 35.829,
     "peak": 10498048,
     "out": "2048\n502239988\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 498.686,
+    "ms": 521.39,
     "peak": 136425472,
     "out": "8192\n8047969911\n",
     "mismatch": false
@@ -2701,21 +2701,21 @@
   "rust row slices": {
    "small": {
     "ok": true,
-    "ms": 27.3,
+    "ms": 13.874,
     "peak": 4304896,
     "out": "1024\n125433619\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 44.627,
+    "ms": 32.889,
     "peak": 10498048,
     "out": "2048\n502239988\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 513.968,
+    "ms": 515.169,
     "peak": 136425472,
     "out": "8192\n8047969911\n",
     "mismatch": false
@@ -2726,21 +2726,21 @@
   "zinkite recursion": {
    "small": {
     "ok": true,
-    "ms": 22.817,
+    "ms": 16.651,
     "peak": 1769472,
     "out": "2178309\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 67.053,
+    "ms": 70.489,
     "peak": 1769472,
     "out": "24157817\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1169.878,
+    "ms": 1217.275,
     "peak": 1769472,
     "out": "433494437\n",
     "mismatch": false
@@ -2749,22 +2749,22 @@
   "goose recursion": {
    "small": {
     "ok": true,
-    "ms": 13.659,
+    "ms": 13.708,
     "peak": 2031616,
     "out": "2178309\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 70.344,
+    "ms": 67.321,
     "peak": 2031616,
     "out": "24157817\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1140.947,
-    "peak": 2031616,
+    "ms": 1195.693,
+    "peak": 1966080,
     "out": "433494437\n",
     "mismatch": false
    }
@@ -2772,22 +2772,22 @@
   "cpp recursion": {
    "small": {
     "ok": true,
-    "ms": 23.996,
-    "peak": 3948544,
+    "ms": 23.104,
+    "peak": 3964928,
     "out": "2178309\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 67.628,
+    "ms": 70.611,
     "peak": 3948544,
     "out": "24157817\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1169.69,
-    "peak": 3956736,
+    "ms": 1212.961,
+    "peak": 3923968,
     "out": "433494437\n",
     "mismatch": false
    }
@@ -2795,22 +2795,22 @@
   "rust recursion": {
    "small": {
     "ok": true,
-    "ms": 24.256,
-    "peak": 2097152,
+    "ms": 24.124,
+    "peak": 2121728,
     "out": "2178309\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 89.855,
-    "peak": 2113536,
+    "ms": 74.182,
+    "peak": 2105344,
     "out": "24157817\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1251.728,
-    "peak": 2097152,
+    "ms": 1292.192,
+    "peak": 2138112,
     "out": "433494437\n",
     "mismatch": false
    }
@@ -2820,22 +2820,22 @@
   "zinkite two rows, swapped views": {
    "small": {
     "ok": true,
-    "ms": 16.221,
+    "ms": 27.934,
     "peak": 1777664,
     "out": "44850\n599148\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 345.609,
+    "ms": 213.683,
     "peak": 1925120,
     "out": "1124250\n14732595\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2324.595,
-    "peak": 1925120,
+    "ms": 1384.885,
+    "peak": 1806336,
     "out": "7998000\n105293957\n",
     "mismatch": false
    }
@@ -2843,21 +2843,21 @@
   "goose two rows, swapped slices": {
    "small": {
     "ok": true,
-    "ms": 13.511,
-    "peak": 2035712,
+    "ms": 25.018,
+    "peak": 1970176,
     "out": "44850\n599148\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 184.292,
+    "ms": 195.833,
     "peak": 2117632,
     "out": "1124250\n14732595\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1244.866,
+    "ms": 1317.823,
     "peak": 2117632,
     "out": "7998000\n105293957\n",
     "mismatch": false
@@ -2866,22 +2866,22 @@
   "cpp two vectors, swap": {
    "small": {
     "ok": true,
-    "ms": 22.389,
-    "peak": 3960832,
+    "ms": 35.253,
+    "peak": 3964928,
     "out": "44850\n599148\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 295.086,
-    "peak": 4083712,
+    "ms": 307.136,
+    "peak": 4096000,
     "out": "1124250\n14732595\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2078.411,
-    "peak": 4259840,
+    "ms": 2150.103,
+    "peak": 4227072,
     "out": "7998000\n105293957\n",
     "mismatch": false
    }
@@ -2889,22 +2889,22 @@
   "rust two Vecs, mem::swap": {
    "small": {
     "ok": true,
-    "ms": 16.843,
-    "peak": 2269184,
+    "ms": 15.478,
+    "peak": 2289664,
     "out": "44850\n599148\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 283.731,
-    "peak": 2248704,
+    "ms": 298.275,
+    "peak": 2273280,
     "out": "1124250\n14732595\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2019.244,
-    "peak": 2412544,
+    "ms": 2087.785,
+    "peak": 2437120,
     "out": "7998000\n105293957\n",
     "mismatch": false
    }
@@ -2914,22 +2914,22 @@
   "zinkite fixed array of classes": {
    "small": {
     "ok": true,
-    "ms": 9.957,
+    "ms": 23.363,
     "peak": 2031616,
     "out": "-0.169075164\n-0.169079859\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 299.983,
+    "ms": 320.106,
     "peak": 2031616,
     "out": "-0.169075164\n-0.169083134\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1195.742,
-    "peak": 2031616,
+    "ms": 1260.018,
+    "peak": 1970176,
     "out": "-0.169075164\n-0.169031665\n",
     "mismatch": false
    }
@@ -2937,22 +2937,22 @@
   "goose fixed array of structs": {
    "small": {
     "ok": true,
-    "ms": 17.046,
+    "ms": 21.872,
     "peak": 2043904,
     "out": "-0.169075164\n-0.169079859\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 307.391,
-    "peak": 1933312,
+    "ms": 320.527,
+    "peak": 2043904,
     "out": "-0.169075164\n-0.169083134\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1228.88,
-    "peak": 1933312,
+    "ms": 1286.903,
+    "peak": 1978368,
     "out": "-0.169075164\n-0.169031665\n",
     "mismatch": false
    }
@@ -2960,22 +2960,22 @@
   "cpp std::array of structs": {
    "small": {
     "ok": true,
-    "ms": 19.493,
-    "peak": 3964928,
+    "ms": 17.112,
+    "peak": 3960832,
     "out": "-0.169075164\n-0.169079859\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 304.725,
-    "peak": 3948544,
+    "ms": 316.902,
+    "peak": 3936256,
     "out": "-0.169075164\n-0.169083134\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1221.288,
-    "peak": 3936256,
+    "ms": 1259.429,
+    "peak": 3964928,
     "out": "-0.169075164\n-0.169031665\n",
     "mismatch": false
    }
@@ -2983,21 +2983,21 @@
   "rust array of structs": {
    "small": {
     "ok": true,
-    "ms": 18.534,
-    "peak": 2158592,
+    "ms": 12.449,
+    "peak": 2138112,
     "out": "-0.169075164\n-0.169079859\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 235.359,
-    "peak": 2117632,
+    "ms": 237.119,
+    "peak": 2158592,
     "out": "-0.169075164\n-0.169083134\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 849.245,
+    "ms": 894.291,
     "peak": 2158592,
     "out": "-0.169075164\n-0.169031665\n",
     "mismatch": false
@@ -3008,21 +3008,21 @@
   "zinkite per-pixel loop": {
    "small": {
     "ok": true,
-    "ms": 19.945,
-    "peak": 1925120,
+    "ms": 33.423,
+    "peak": 1818624,
     "out": "31500\n99274\n4978112956291099708\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 283.322,
+    "ms": 297.753,
     "peak": 2367488,
     "out": "500000\n1588053\n13682736581936804428\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1745.48,
+    "ms": 1847.472,
     "peak": 5021696,
     "out": "3125000\n9923455\n8310310449100445431\n",
     "mismatch": false
@@ -3031,21 +3031,21 @@
   "goose per-pixel loop": {
    "small": {
     "ok": true,
-    "ms": 28.871,
+    "ms": 19.827,
     "peak": 2117632,
     "out": "31500\n99274\n4978112956291099708\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 276.086,
-    "peak": 2625536,
+    "ms": 290.711,
+    "peak": 2560000,
     "out": "500000\n1588053\n13682736581936804428\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1729.666,
+    "ms": 1787.593,
     "peak": 5279744,
     "out": "3125000\n9923455\n8310310449100445431\n",
     "mismatch": false
@@ -3054,21 +3054,21 @@
   "cpp per-pixel loop": {
    "small": {
     "ok": true,
-    "ms": 28.504,
-    "peak": 3948544,
+    "ms": 20.418,
+    "peak": 3964928,
     "out": "31500\n99274\n4978112956291099708\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 277.273,
-    "peak": 4026368,
+    "ms": 292.546,
+    "peak": 4022272,
     "out": "500000\n1588053\n13682736581936804428\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1730.54,
+    "ms": 1790.062,
     "peak": 6647808,
     "out": "3125000\n9923455\n8310310449100445431\n",
     "mismatch": false
@@ -3077,21 +3077,21 @@
   "rust per-pixel loop": {
    "small": {
     "ok": true,
-    "ms": 32.252,
-    "peak": 2273280,
+    "ms": 20.047,
+    "peak": 2248704,
     "out": "31500\n99274\n4978112956291099708\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 275.208,
+    "ms": 311.313,
     "peak": 2535424,
     "out": "500000\n1588053\n13682736581936804428\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1698.618,
+    "ms": 1792.419,
     "peak": 5189632,
     "out": "3125000\n9923455\n8310310449100445431\n",
     "mismatch": false
@@ -3102,22 +3102,22 @@
   "zinkite row by row": {
    "small": {
     "ok": true,
-    "ms": 19.958,
+    "ms": 14.587,
     "peak": 2031616,
     "out": "1.274224116\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 178.427,
+    "ms": 191.866,
     "peak": 2179072,
     "out": "1.274224152\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1318.444,
-    "peak": 2179072,
+    "ms": 1342.82,
+    "peak": 2134016,
     "out": "1.274224153\n",
     "mismatch": false
    }
@@ -3125,22 +3125,22 @@
   "goose row by row": {
    "small": {
     "ok": true,
-    "ms": 13.285,
-    "peak": 1982464,
+    "ms": 32.157,
+    "peak": 2064384,
     "out": "1.274224116\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 182.024,
+    "ms": 177.14,
     "peak": 2195456,
     "out": "1.274224152\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1290.818,
-    "peak": 2195456,
+    "ms": 1320.924,
+    "peak": 2129920,
     "out": "1.274224153\n",
     "mismatch": false
    }
@@ -3148,21 +3148,21 @@
   "cpp row by row": {
    "small": {
     "ok": true,
-    "ms": 21.787,
-    "peak": 3923968,
+    "ms": 26.916,
+    "peak": 3964928,
     "out": "1.274224116\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 163.276,
-    "peak": 3944448,
+    "ms": 159.323,
+    "peak": 3928064,
     "out": "1.274224152\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1152.252,
+    "ms": 1201.435,
     "peak": 4075520,
     "out": "1.274224153\n",
     "mismatch": false
@@ -3171,22 +3171,22 @@
   "rust row by row": {
    "small": {
     "ok": true,
-    "ms": 13.916,
-    "peak": 2138112,
+    "ms": 23.955,
+    "peak": 2125824,
     "out": "1.274224116\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 190.05,
-    "peak": 2306048,
+    "ms": 204.058,
+    "peak": 2273280,
     "out": "1.274224152\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1280.272,
-    "peak": 2273280,
+    "ms": 1349.268,
+    "peak": 2240512,
     "out": "1.274224153\n",
     "mismatch": false
    }
@@ -3196,22 +3196,22 @@
   "zinkite bit masks": {
    "small": {
     "ok": true,
-    "ms": 25.913,
-    "peak": 1769472,
+    "ms": 20.851,
+    "peak": 1679360,
     "out": "14200\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 463.885,
-    "peak": 1675264,
+    "ms": 483.472,
+    "peak": 1769472,
     "out": "365596\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2934.785,
-    "peak": 1769472,
+    "ms": 3041.832,
+    "peak": 1667072,
     "out": "2279184\n",
     "mismatch": false
    }
@@ -3219,22 +3219,22 @@
   "goose bit masks": {
    "small": {
     "ok": true,
-    "ms": 25.576,
+    "ms": 16.637,
     "peak": 1970176,
     "out": "14200\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 477.605,
+    "ms": 500.178,
     "peak": 1970176,
     "out": "365596\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 3024.785,
-    "peak": 1970176,
+    "ms": 3139.68,
+    "peak": 2035712,
     "out": "2279184\n",
     "mismatch": false
    }
@@ -3242,22 +3242,22 @@
   "cpp bit masks": {
    "small": {
     "ok": true,
-    "ms": 23.729,
+    "ms": 16.523,
     "peak": 3969024,
     "out": "14200\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 445.6,
-    "peak": 3960832,
+    "ms": 469.595,
+    "peak": 3903488,
     "out": "365596\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2832.811,
-    "peak": 3923968,
+    "ms": 2924.316,
+    "peak": 3948544,
     "out": "2279184\n",
     "mismatch": false
    }
@@ -3265,22 +3265,22 @@
   "rust bit masks": {
    "small": {
     "ok": true,
-    "ms": 36.45,
-    "peak": 2142208,
+    "ms": 17.183,
+    "peak": 2088960,
     "out": "14200\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 457.923,
+    "ms": 502.108,
     "peak": 2142208,
     "out": "365596\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2885.35,
-    "peak": 2142208,
+    "ms": 2994.484,
+    "peak": 2076672,
     "out": "2279184\n",
     "mismatch": false
    }
@@ -3290,21 +3290,21 @@
   "zinkite arrays, slice reverse": {
    "small": {
     "ok": true,
-    "ms": 33.425,
+    "ms": 17.03,
     "peak": 1777664,
     "out": "8629\n30\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 161.726,
+    "ms": 167.83,
     "peak": 1773568,
     "out": "73196\n38\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2085.548,
+    "ms": 2156.624,
     "peak": 1777664,
     "out": "556355\n51\n",
     "mismatch": false
@@ -3313,22 +3313,22 @@
   "goose fixed arrays, reverse": {
    "small": {
     "ok": true,
-    "ms": 29.814,
-    "peak": 2023424,
+    "ms": 23.583,
+    "peak": 1970176,
     "out": "8629\n30\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 168.587,
+    "ms": 162.2,
     "peak": 2035712,
     "out": "73196\n38\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1861.243,
-    "peak": 1970176,
+    "ms": 1911.391,
+    "peak": 2035712,
     "out": "556355\n51\n",
     "mismatch": false
    }
@@ -3336,22 +3336,22 @@
   "cpp vector, std::reverse": {
    "small": {
     "ok": true,
-    "ms": 26.849,
-    "peak": 3960832,
+    "ms": 17.371,
+    "peak": 3964928,
     "out": "8629\n30\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 197.466,
-    "peak": 3964928,
+    "ms": 219.98,
+    "peak": 3932160,
     "out": "73196\n38\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2153.806,
-    "peak": 3948544,
+    "ms": 2225.7,
+    "peak": 3960832,
     "out": "556355\n51\n",
     "mismatch": false
    }
@@ -3359,22 +3359,22 @@
   "rust Vec, slice reverse": {
    "small": {
     "ok": true,
-    "ms": 16.119,
+    "ms": 16.353,
     "peak": 2142208,
     "out": "8629\n30\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 187.076,
+    "ms": 193.409,
     "peak": 2142208,
     "out": "73196\n38\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 2038.025,
-    "peak": 2101248,
+    "ms": 2134.94,
+    "peak": 2121728,
     "out": "556355\n51\n",
     "mismatch": false
    }
@@ -3384,22 +3384,22 @@
   "zinkite bool array": {
    "small": {
     "ok": true,
-    "ms": 9.4,
+    "ms": 13.49,
     "peak": 2506752,
     "out": "640000\n52074\n320000\n27608\n160000\n14683\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 96.725,
+    "ms": 100.586,
     "peak": 12091392,
     "out": "10240000\n679461\n5120000\n356244\n2560000\n187134\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1275.508,
-    "peak": 83755008,
+    "ms": 1349.196,
+    "peak": 83648512,
     "out": "81920000\n4774995\n40960000\n2488465\n20480000\n1299069\n",
     "mismatch": false
    }
@@ -3407,21 +3407,21 @@
   "goose bool array": {
    "small": {
     "ok": true,
-    "ms": 11.458,
+    "ms": 12.126,
     "peak": 2707456,
     "out": "640000\n52074\n320000\n27608\n160000\n14683\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 99.414,
-    "peak": 12300288,
+    "ms": 103.043,
+    "peak": 12357632,
     "out": "10240000\n679461\n5120000\n356244\n2560000\n187134\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1327.239,
+    "ms": 1331.748,
     "peak": 84021248,
     "out": "81920000\n4774995\n40960000\n2488465\n20480000\n1299069\n",
     "mismatch": false
@@ -3430,21 +3430,21 @@
   "cpp vector<uint8_t>": {
    "small": {
     "ok": true,
-    "ms": 10.295,
-    "peak": 4284416,
+    "ms": 10.538,
+    "peak": 4296704,
     "out": "640000\n52074\n320000\n27608\n160000\n14683\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 112.296,
+    "ms": 122.826,
     "peak": 13725696,
     "out": "10240000\n679461\n5120000\n356244\n2560000\n187134\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1345.156,
+    "ms": 1351.716,
     "peak": 85536768,
     "out": "81920000\n4774995\n40960000\n2488465\n20480000\n1299069\n",
     "mismatch": false
@@ -3453,21 +3453,21 @@
   "rust Vec<bool>": {
    "small": {
     "ok": true,
-    "ms": 14.98,
+    "ms": 14.797,
     "peak": 2678784,
     "out": "640000\n52074\n320000\n27608\n160000\n14683\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 100.361,
+    "ms": 119.501,
     "peak": 12263424,
     "out": "10240000\n679461\n5120000\n356244\n2560000\n187134\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1347.652,
+    "ms": 1375.339,
     "peak": 83927040,
     "out": "81920000\n4774995\n40960000\n2488465\n20480000\n1299069\n",
     "mismatch": false
@@ -3478,22 +3478,22 @@
   "zinkite row slices": {
    "small": {
     "ok": true,
-    "ms": 20.196,
-    "peak": 3985408,
+    "ms": 12.113,
+    "peak": 3993600,
     "out": "8690\n2459828\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 115.909,
-    "peak": 13570048,
+    "ms": 114.872,
+    "peak": 13578240,
     "out": "13350\n825202\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1253.39,
-    "peak": 55820288,
+    "ms": 1184.05,
+    "peak": 55832576,
     "out": "-18236\n-60431731\n",
     "mismatch": false
    }
@@ -3501,21 +3501,21 @@
   "goose simd fn, row slices": {
    "small": {
     "ok": true,
-    "ms": 13.67,
-    "peak": 4247552,
+    "ms": 11.497,
+    "peak": 4182016,
     "out": "8690\n2459828\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 125.05,
-    "peak": 13832192,
+    "ms": 114.712,
+    "peak": 13766656,
     "out": "13350\n825202\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1125.294,
+    "ms": 1182.039,
     "peak": 56086528,
     "out": "-18236\n-60431731\n",
     "mismatch": false
@@ -3524,22 +3524,22 @@
   "cpp flat vector": {
    "small": {
     "ok": true,
-    "ms": 24.518,
-    "peak": 5758976,
+    "ms": 25.82,
+    "peak": 5763072,
     "out": "8690\n2459828\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 126.269,
+    "ms": 132.454,
     "peak": 15347712,
     "out": "13350\n825202\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1193.848,
-    "peak": 57520128,
+    "ms": 1226.154,
+    "peak": 57372672,
     "out": "-18236\n-60431731\n",
     "mismatch": false
    }
@@ -3547,21 +3547,21 @@
   "rust chunks + zip": {
    "small": {
     "ok": true,
-    "ms": 14.499,
+    "ms": 13.711,
     "peak": 4157440,
     "out": "8690\n2459828\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 128.98,
-    "peak": 13725696,
+    "ms": 118.473,
+    "peak": 13742080,
     "out": "13350\n825202\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1165.999,
+    "ms": 1212.948,
     "peak": 56061952,
     "out": "-18236\n-60431731\n",
     "mismatch": false
@@ -3572,21 +3572,21 @@
   "zinkite zink.encoding": {
    "small": {
     "ok": true,
-    "ms": 2.76,
-    "peak": 2326528,
+    "ms": 3.535,
+    "peak": 2392064,
     "out": "133336\n3071754103414902928\n2134717\n1602344\n1\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 45.668,
-    "peak": 13156352,
+    "ms": 24.638,
+    "peak": 13090816,
     "out": "2666668\n1978982248864565112\n42668009\n32002381\n1\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 325.122,
+    "ms": 314.468,
     "peak": 137904128,
     "out": "32000000\n6965357518505982565\n512001406\n384001888\n1\n",
     "mismatch": false
@@ -3595,21 +3595,21 @@
   "goose std base64 (simd)": {
    "small": {
     "ok": true,
-    "ms": 6.131,
-    "peak": 2457600,
+    "ms": 5.938,
+    "peak": 2408448,
     "out": "133336\n3071754103414902928\n2134717\n1602344\n1\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 25.405,
-    "peak": 9379840,
+    "ms": 20.211,
+    "peak": 9388032,
     "out": "2666668\n1978982248864565112\n42668009\n32002381\n1\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 270.863,
+    "ms": 275.498,
     "peak": 90046464,
     "out": "32000000\n6965357518505982565\n512001406\n384001888\n1\n",
     "mismatch": false
@@ -3618,22 +3618,22 @@
   "cpp hand-written tables": {
    "small": {
     "ok": true,
-    "ms": 21.53,
+    "ms": 14.196,
     "peak": 4263936,
     "out": "133336\n3071754103414902928\n2134717\n1602344\n1\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 142.129,
-    "peak": 10944512,
+    "ms": 149.612,
+    "peak": 10940416,
     "out": "2666668\n1978982248864565112\n42668009\n32002381\n1\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1513.399,
-    "peak": 91619328,
+    "ms": 1596.286,
+    "peak": 91615232,
     "out": "32000000\n6965357518505982565\n512001406\n384001888\n1\n",
     "mismatch": false
    }
@@ -3641,35 +3641,35 @@
   "rust hand-written tables": {
    "small": {
     "ok": true,
-    "ms": 18.383,
+    "ms": 18.287,
     "peak": 2400256,
     "out": "133336\n3071754103414902928\n2134717\n1602344\n1\n",
     "mismatch": false
    },
    "medium": {
     "ok": true,
-    "ms": 86.635,
+    "ms": 90.385,
     "peak": 9334784,
     "out": "2666668\n1978982248864565112\n42668009\n32002381\n1\n",
     "mismatch": false
    },
    "large": {
     "ok": true,
-    "ms": 1021.32,
-    "peak": 90058752,
+    "ms": 1054.094,
+    "peak": 90079232,
     "out": "32000000\n6965357518505982565\n512001406\n384001888\n1\n",
     "mismatch": false
    }
   }
  },
  "_env": {
-  "date": "2026-11-22 22:34",
+  "date": "2026-11-23 12:11",
   "cpu": "Intel(R) Xeon(R) W-2195 CPU @ 2.30GHz",
   "os": "Linux 7.0.0-43-generic",
   "cc": "Ubuntu clang version 18.1.3 (1ubuntu1)",
   "cxx": "Ubuntu clang version 18.1.3 (1ubuntu1)",
   "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
-  "zink": "zink at 1092096",
+  "zink": "zink at fddd512",
   "goose": "goose 2322149 (runtime 68cc5acec0ef)"
  }
 }

@@ -81,24 +81,30 @@ export GOOSE=$PWD/build/goose
 ## What the latest run found (2026-11-22)
 
 Geometric means over the 26 benchmarks, at the large size, of each language's fastest
-implementation's time over Zinkite's (above 1 means Zinkite is faster), over the four
-runs of the day:
+implementation's time over Zinkite's (above 1 means Zinkite is faster), over five runs
+on 2026-11-22 and 23:
 1. the first run;
 2. after the compiler changes in the table below;
 3. after the ports dropped their workarounds for compiler bugs, then fixed (the seven
    benchmarks whose ports changed, re-run in all four languages);
-4. after `+`, `-` and `*` began to wrap (DESIGN §9.2), every benchmark re-run.
+4. after `+`, `-` and `*` began to wrap (DESIGN §9.2), every benchmark re-run;
+5. after loop versioning (DESIGN §14.2) and `simd` functions (§12.8), every benchmark
+   re-run. Every implementation, in all four languages, took 2 to 5% longer in this run
+   than in the one before, so its ratios are what compare.
 
-| | 1 | 2 | 3 | 4 |
-|---|---:|---:|---:|---:|
-| Goose | 0.69 | 0.81 | 0.83 | 0.92 |
-| idiomatic C++ | 1.30 | 1.53 | 1.56 | 1.73 |
-| expert C++ (the sixteen with an expert row) | 1.02 | 1.05 | 1.08 | 1.15 |
-| Rust | 0.82 | 0.97 | 0.99 | 1.10 |
-| peak memory: Goose / C++ / Rust | 0.92 / 1.32 / 1.05 | 0.97 / 1.39 / 1.11 | 0.97 / 1.39 / 1.11 | 0.97 / 1.38 / 1.10 |
+| | 1 | 2 | 3 | 4 | 5 |
+|---|---:|---:|---:|---:|---:|
+| Goose | 0.69 | 0.81 | 0.83 | 0.92 | 0.94 |
+| idiomatic C++ | 1.30 | 1.53 | 1.56 | 1.73 | 1.77 |
+| expert C++ (the sixteen with an expert row) | 1.02 | 1.05 | 1.08 | 1.15 | 1.16 |
+| Rust | 0.82 | 0.97 | 0.99 | 1.10 | 1.12 |
+| peak memory: Goose / C++ / Rust | 0.92 / 1.32 / 1.05 | 0.97 / 1.39 / 1.11 | 0.97 / 1.39 / 1.11 | 0.97 / 1.38 / 1.10 | 0.97 / 1.39 / 1.11 |
 
-Zinkite is now faster than Goose on 8 benchmarks (push, tree, lru, calc, respond, nbody,
-nqueen, nsieve), within 10% on 10 more, and slower on 8. What changed between the runs:
+Zinkite is now faster than Goose on 5 benchmarks (push, lru, calc, nbody, nqueen), within
+10% on 16 more, and slower on 5. Nine of the 16 (sum, tree, particles, bintrees,
+respond, fib, spectralnorm, nsieve, matmul) are within 2%, less than these runs vary;
+tree, respond and nsieve were faster than Goose's in run 4. What changed between the
+runs:
 
 | change | where it showed |
 |---|---|
@@ -109,23 +115,23 @@ nqueen, nsieve), within 10% on 10 more, and slower on 8. What changed between th
 | enums stored in the narrowest integer, a byte for up to 256 constants | records 252 → 206 MB |
 | run 3: words counts from its list of words, with keys that are views into that compact block, where it split the text again and kept views into the text | words: open addressing 4118 → 2452 ms, the built-in hashmap 5199 → 4464 |
 | run 3: fannkuch's arrays are `i32[.16]` and `perm = perm1` copies one, where a loop copied `[..>]` arrays | fannkuch 3120 → 2898 ms |
+| run 5: a counted loop runs without its index checks when a test before it shows every index in range | levenshtein 2325 → 1385 ms, against Goose's 1318 |
+| run 5: matmul's kernel is a `simd` function, as Goose's is, so it runs with AVX-512 here | matmul 1253 → 1184 ms, against Goose's 1182 |
 | run 4: `+`, `-` and `*` wrap, and `+#`, `-#` and `*#` check, where `+` checked | fib 1793 → 1170 ms; spectralnorm 2421 → 1318; tree 2071 → 1507; bintrees 586 → 430; sum 1014 → 818; levenshtein 3146 → 2325; fannkuch 2898 → 2086; nqueen 3319 → 2935. One got slower: mandelbrot 1691 → 1745, though its inner loop compiles to the same instructions, because the check on `inside++` had kept clang from setting each pixel's bit without a branch, and with a branch it was faster. matmul's 1173 → 1253 and base64's 300 → 325 are noise: timed side by side, the binaries before and after the change take the same time (1165 and 1163 ms, 301 and 301) |
 
 The gaps that remain, largest first:
 
 | benchmark | Zinkite / Goose | cause |
 |---|---:|---|
-| levenshtein | 1.9× | every index is checked against its view's length, and nothing proves them in range, where Goose's compiler does (`checkfree`): about 870 ms, measured with the checks taken out; `-fno-strict-aliasing` costs about 270 ms more |
-| interp | 1.4× | not yet explained |
+| interp | 1.6× | not yet explained: building the tree takes 1.8 times as long as Goose's, and the eight evaluations 1.5 times; its nodes are 12 bytes where Goose's are 5 or 9, and each is reached through a checked index |
 | records | 1.4× | no variants with payloads, so every event carries every variant's fields |
-| base64 | 1.2× | not yet explained; 1.1× in the side-by-side timing above |
-| words | 1.2× | not yet explained for the open-addressed table; the built-in hashmap's row is 2.0× Goose's std dictionary, from its layout: a lookup reads its index, then its entry, then the key, three cache misses where Goose's table makes two, a trade DESIGN §4.14 made knowingly |
-| scene | 1.15× | its children are 8-byte references in an array, since links are only fields |
-| fannkuch | 1.1× | checked indexing |
-| matmul | 1.1× | Goose's `simd fn` runs AVX2 or AVX-512 copies of the kernel; the others are built for baseline x86-64 |
+| words | 1.2× | not yet explained for the open-addressed table; the built-in hashmap's row is 2.1× Goose's std dictionary, from its layout: a lookup reads its index, then its entry, then the key, three cache misses where Goose's table makes two, a trade DESIGN §4.14 made knowingly |
+| base64 | 1.1× | not yet explained |
+| fannkuch | 1.1× | its rotation loop keeps its checks, since without them clang makes it a call to `memmove`, slower on such short copies; the rest isn't yet explained |
+| scene | 1.1× | its children are 8-byte references in an array, since links are only fields |
 
-Most of what's left would come from proving index checks away, as Goose does, and from
-variants with payloads (DESIGN §17).
+Most of what's left would come from variants with payloads (DESIGN §17), and from what
+profiling finds in interp, words, base64 and fannkuch.
 
 Compiler bugs the first ports worked around, all fixed, with the ports changed to use what
 they had worked around before the third run:
