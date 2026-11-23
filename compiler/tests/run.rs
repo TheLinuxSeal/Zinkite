@@ -4602,6 +4602,157 @@ void main(string[.] args) {
     assert!(c.contains("struct zc2_Pair { int32_t f_a; int32_t f_partner; };"), "Pair");
 }
 
+/// `pushAll` (STDLIB §7.1): every element of a slice at the end, one copy on a data
+/// stack, all or nothing with FULL on a capped array, one by one on a deque.
+#[test]
+fn push_all() {
+    prints(
+        r##"void main() {
+    i64[..>] a = [];
+    a +> 1 +> 2 +> 3;
+    a.pushAll(a);
+    i64[..~4] c = [];
+    @_ = c.pushAll(a[0:3]);
+    u8 st = @c.pushAll(a[0:3]);
+    i64[~.~] d = [];
+    d +< 9;
+    d.pushAll(a[1:3]);
+    println("${a} ${c} ${st} ${d}");
+}
+"##,
+        "[1, 2, 3, 1, 2, 3] [1, 2, 3] 193 [9, 2, 3]\n",
+    );
+}
+
+/// A for-each over an array of variable-size arrays: by reference, writes reach the
+/// records; as `string`s, the elements are slices, usable as hashmap keys.
+#[test]
+fn for_each_over_arrays_of_variable_size_arrays() {
+    prints(
+        r##"void main() {
+    u8[.*][..>] words = [];
+    words +> "abc" +> "de" +> "abc";
+    for (u8[.*]& w : words) { w[0] = 'X'; }
+    hashmap<string, i32> counts = [];
+    for (string w : words) { counts.getOrAdd(w, 0)++; }
+    for (var& e : counts) { println("${e.key} ${e.value}"); }
+    i64 total = 0;
+    for (u8[.*]& w : words) { total += w.len; }
+    println("${total}");
+}
+"##,
+        "Xbc 2\nXe 1\n8\n",
+    );
+}
+
+/// A function returning an array of variable-size records builds it where the caller
+/// keeps it, and copies it by its bytes when that is a temporary.
+#[test]
+fn returning_arrays_of_variable_size_records() {
+    prints(
+        r##"class Item { u8[.*] sku; i32 qty; }
+class Resp { i64 id; Item[.*] items; }
+
+Item[..>] makeItems(i64 n) {
+    Item[..>] t = [];
+    for (i64 i = 0; i < n; i++) { t +> new Item(i % 2 == 0 ? "ab" : "cdef", (i32) i); }
+    return t;
+}
+
+Item[..>] passOn(i64 n) { return makeItems(n); }
+
+void main() {
+    Item[..>] direct = makeItems(4);
+    Item[..>] passed = passOn(3);
+    Resp r = new Resp(1, makeItems(3));
+    i64 a = 0;
+    for (Item& it : direct) { a += it.qty * 10 + it.sku.len; }
+    i64 b = 0;
+    for (Item& it : passed) { b += it.qty * 10 + it.sku.len; }
+    i64 c = 0;
+    for (Item& it : r.items) { c += it.qty + it.sku.len; }
+    println("${direct.len} ${a} ${passed.len} ${b} ${c} ${makeItems(5).len}");
+}
+"##,
+        "4 72 3 38 11 5\n",
+    );
+}
+
+/// `=` on a slice or a writable view copies into what it views, overlapping or not, and
+/// stops the program when the lengths differ (DESIGN §4.10); `.=` rebinds the view.
+#[test]
+fn copying_into_views() {
+    let exe = build(
+        r##"void fill(u8[:]& w, string from) { w = from; }
+
+void main(string[.] args) {
+    i32[..>] a = [];
+    for (i32 i = 0; i < 6; i++) { a +> i; }
+    a[1:] = a[0:5];
+    i32[..>] b = [];
+    for (i32 i = 0; i < 4; i++) { b +> i * 10; }
+    a[0:2] = b[2:4];
+    u8[..>] buf = [];
+    buf.append("..........");
+    u8[:]& w = buf[2:6];
+    w = "abcd";
+    fill(buf[6:8], "XY");
+    w .= buf[0:2];
+    w = "<>";
+    println("${a} ${buf}");
+    if (args.len > 0) { a[0:2] = a[0:3]; }
+}
+"##,
+    );
+    let r = exec(&exe, &[]);
+    assert_eq!(r.stdout, "[20, 30, 1, 2, 3, 4] <>abcdXY..\n", "stderr: {}", r.stderr);
+    let r = exec(&exe, &["bad"]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("prog.zn:18: the lengths differ, so the copy doesn't fit the view"), "{}", r.stderr);
+}
+
+/// A constructor that fails leaves its class's zero value (DESIGN §6.2): the fields it set
+/// are reset, and a growable field is emptied but keeps its storage.
+#[test]
+fn a_failing_constructor_resets_its_fields() {
+    prints(
+        r##"class Box {
+    i64 a;
+    i32[.3] cells;
+    i64[..>] items;
+
+    new(i64 t) {
+        a = 5;
+        cells = [7, 8, 9];
+        items +> 1 +> 2;
+        if (t < 0) { return #status.INVALID; }
+    }
+}
+
+class Wrap {
+    string name;
+    hashmap<i64, i64> m;
+
+    new(bool fail) {
+        name = "set";
+        m.getOrAdd(1, 10);
+        if (fail) { return #status.RANGE; }
+    }
+}
+
+void main() {
+    Box b @e = new Box(-1);
+    b.items +> 3;
+    Box ok @e2 = new Box(1);
+    Wrap w @e3 = new Wrap(true);
+    w.m.getOrAdd(2, 20);
+    println("${b.a} ${b.cells} ${b.items} ${e} | ${ok.a} ${ok.items} ${e2} | [${w.name}] ${w.m.len} ${e3}");
+}
+"##,
+        "0 [0, 0, 0] [3] 22 | 5 [1, 2] 0 | [] 1 34\n",
+    );
+}
+
 /// Pool links (REFERENCES §7.3): the offset of the target from the start of a static
 /// grow-only array, plus one, so 0 is null. A value holding them can be copied anywhere
 /// and still reaches its targets, and an offset that doesn't fit stops the program (L4).

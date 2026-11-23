@@ -855,6 +855,12 @@ static ZR_UNUSED zr_vec zr_vec_scratch(zr_vec v, size_t sz) {
     return c;
 }
 
+/* The same for an array of variable-size records, which is its bytes. */
+static ZR_UNUSED zr_rvec zr_rvec_scratch(zr_rvec v) {
+    zr_rvec c = {zr_scratch_copy(v.p, (size_t)v.bytes), v.n, v.bytes};
+    return c;
+}
+
 static ZR_UNUSED zr_vec zr_scratch_begin(void) { zr_sm(); zr_vec v = {zr_scratch_top, 0}; return v; }
 static ZR_UNUSED zr_slice zr_scratch_end(zr_vec v) { zr_scratch_top = (char *)v.p + v.n; zr_slice s = {v.p, v.n}; return s; }
 

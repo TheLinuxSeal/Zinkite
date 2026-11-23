@@ -446,16 +446,25 @@ impl<'p, 'a> Gen<'p, 'a> {
             return code;
         }
         let el = r.elem().cloned().unwrap_or(Ty::u8());
-        let sz = self.elem_size(&el, span);
         self.used_scratch = true;
+        // An array of variable-size records is copied as its bytes.
+        let vs = self.vs_elems(r);
+        let sz = self.elem_size(&el, span);
+        let copy = |v: &str| -> String {
+            if vs {
+                format!("zr_rvec_scratch({})", v)
+            } else {
+                format!("zr_vec_scratch({}, {})", v, sz)
+            }
+        };
         if fails {
             format!(
-                "({{ __typeof__({c}) _rv = {c}; _rv.v = zr_vec_scratch(_rv.v, {sz}); _rv; }})",
+                "({{ __typeof__({c}) _rv = {c}; _rv.v = {copy}; _rv; }})",
                 c = code,
-                sz = sz
+                copy = copy("_rv.v")
             )
         } else {
-            format!("zr_vec_scratch({}, {})", code, sz)
+            copy(&code)
         }
     }
 
@@ -1653,7 +1662,11 @@ impl<'p, 'a> Gen<'p, 'a> {
                     && layout(&ty) == Some(Layout::Vec)
                 {
                     let s = self.site();
-                    format!("((zr_vec){{_dst ? _dst : zr_stack({}), 0}})", s)
+                    if self.vs_elems(&ty) {
+                        format!("((zr_rvec){{_dst ? _dst : zr_stack({}), 0, 0}})", s)
+                    } else {
+                        format!("((zr_vec){{_dst ? _dst : zr_stack({}), 0}})", s)
+                    }
                 } else {
                     self.stack_init(&ty)
                 };
@@ -1770,7 +1783,62 @@ impl<'p, 'a> Gen<'p, 'a> {
             .count()
     }
 
-    /// An empty array on data stacks of its own: one, or two for a cursor array.
+    /// Statements that make the value at `place`, of type `t`, its zero value again: zero
+    /// bytes, except that a growable field, whose storage whoever made the value set up,
+    /// is emptied, keeping its storage.
+    fn reset_value(&mut self, place: &str, t: &Ty, span: Span) -> String {
+        if let Ty::Class(id, args) = t
+            && self.prog.classes[*id].kind != ClassKind::Enum
+            && self.holds_growable(t)
+        {
+            let mut out = String::new();
+            for (i, f) in self.prog.classes[*id].fields.iter().enumerate() {
+                if f.is_static {
+                    continue;
+                }
+                let ft = self.field_ty(*id, i, args);
+                let fp = format!("{}.f_{}", place, f.name);
+                out.push_str(&self.reset_value(&fp, &ft, span));
+            }
+            return out;
+        }
+        if starts_empty(t) {
+            return match t {
+                Ty::Map(..) | Ty::Set(_) => format!("zr_map_clear(&{}); ", place),
+                Ty::Pool(el) => {
+                    let slot = self.pool_slot(el, span);
+                    format!("zr_pool_clear(&{}, sizeof({})); ", place, slot)
+                }
+                _ if self.vs_elems(t) => format!("{p}.n = 0; {p}.bytes = 0; ", p = place),
+                _ => {
+                    let el = t.elem().cloned().unwrap_or(Ty::u8());
+                    let arr = Arr {
+                        a: format!("(&{})", place),
+                        lay: layout(t).unwrap_or(Layout::Vec),
+                        ec: self.cty(&el, span),
+                        cap: cap_of(t),
+                    };
+                    format!("{} ", arr.clear())
+                }
+            };
+        }
+        format!("memset(&{p}, 0, sizeof {p}); ", p = place)
+    }
+
+    /// Whether a value of `t` holds a growable field, itself or in a field it holds by value.
+    fn holds_growable(&self, t: &Ty) -> bool {
+        let Ty::Class(id, args) = t else { return false };
+        (0..self.prog.classes[*id].fields.len()).any(|i| {
+            let f = &self.prog.classes[*id].fields[i];
+            if f.is_static {
+                return false;
+            }
+            let ft = self.field_ty(*id, i, args);
+            starts_empty(&ft) || (matches!(ft, Ty::Class(..)) && self.holds_growable(&ft))
+        })
+    }
+
+    /// An empty array on data stacks of its own: one, or two for a cursor array.    /// An empty array on data stacks of its own: one, or two for a cursor array.
     fn stack_init(&mut self, ty: &Ty) -> String {
         if matches!(ty, Ty::Map(..) | Ty::Set(_)) {
             let a = self.site();
@@ -2043,6 +2111,13 @@ impl<'p, 'a> Gen<'p, 'a> {
                 let t = self.tmp("ret");
                 self.line(&format!("uint8_t {} = {};", t, st));
                 self.set_at(&format!("{} != 0", t), &st, passes_on, span);
+                // A constructor that fails leaves its class's zero value: the fields it
+                // set are reset (DESIGN §6.2).
+                if st != "0" {
+                    let this = self.this_class();
+                    let reset = self.reset_value("(*self)", &this, span);
+                    self.line(&format!("if ({}) {{ {}}}", t, reset));
+                }
                 self.line(&format!("return {};", t));
             } else {
                 self.line("return;");
@@ -2076,11 +2151,16 @@ impl<'p, 'a> Gen<'p, 'a> {
                 format!("({{ zr_slice _rs = {}; (zr_vec){{_rs.p, _rs.n}}; }})", s)
             };
             self.direct_result = None;
-            let sz = self.elem_size(&el, span);
+            // An array of variable-size records is its bytes.
+            let bytes = if self.vs_elems(&ret) {
+                "(size_t)_rv.bytes".to_string()
+            } else {
+                format!("(size_t)_rv.n * {}", self.elem_size(&el, span))
+            };
             format!(
-                "({{ __typeof__({c}) _rv = {c}; if (_dst && _dst != _rv.p) {{ memmove(_dst, _rv.p, (size_t)_rv.n * {sz}); _rv.p = _dst; }} _rv; }})",
+                "({{ __typeof__({c}) _rv = {c}; if (_dst && _dst != _rv.p) {{ memmove(_dst, _rv.p, {b}); _rv.p = _dst; }} _rv; }})",
                 c = code,
-                sz = sz
+                b = bytes
             )
         });
         let rc = self.ret_c_of(&ret, self.fails, span);
@@ -3630,6 +3710,14 @@ impl<'p, 'a> Gen<'p, 'a> {
                     let v = self.expr(value, &ct);
                     return format!("({} = {})", c, v);
                 }
+                // `=` on a slice or a writable view copies into what it views; the lengths
+                // must match (DESIGN §4.10).
+                let tt = settle(&self.ty(target));
+                if matches!(strip_paren(target).kind, E::Slice { .. })
+                    || matches!(tt, Ty::View(_))
+                {
+                    return self.copy_into_view(target, value, span);
+                }
                 let (p, pt) = self.place(target);
                 if self.vs_class(&pt) {
                     return self.vs_assign(&p, value, &pt);
@@ -3671,6 +3759,32 @@ impl<'p, 'a> Gen<'p, 'a> {
                 format!("({{ {} *_p = &({}); *_p = {}; }})", ct, p, code)
             }
         }
+    }
+
+    /// `v[i:j] = x` or `view = x`: the elements of `x` copied into what the left side
+    /// views, which fails with RANGE when the lengths differ (DESIGN §4.10). The two may
+    /// overlap, as `a[1:] = a[:n - 1]` does.
+    fn copy_into_view(&mut self, target: &Expr, value: &Expr, span: Span) -> String {
+        let tt = settle(&self.ty(target));
+        let Some(el) = tt.unref().elem().cloned() else {
+            return self.unsupported(span, "copying into this");
+        };
+        let slice = Ty::Slice(Box::new(el.clone()));
+        let dst = self.expr(target, &slice);
+        let src = self.expr(value, &slice);
+        let sz = self.elem_size(&el, span);
+        let loc = self.loc(span);
+        let bad = self.on_fail(
+            34,
+            format!(
+                "zr_stop({}, 34, \"the lengths differ, so the copy doesn't fit the view\")",
+                loc
+            ),
+        );
+        format!(
+            "({{ zr_slice _d = {}, _s = {}; if (_d.n != _s.n) {{ {}; }} memmove(_d.p, _s.p, (size_t)_d.n * {}); }})",
+            dst, src, bad, sz
+        )
     }
 
     fn arith_code(&mut self, op: BinOp, a: &str, b: &str, t: &Ty, span: Span) -> String {
@@ -5645,6 +5759,43 @@ impl<'p, 'a> Gen<'p, 'a> {
                         ptr, ac, init, len, ac, step
                     ),
                     acc_t,
+                )
+            }
+            // All of a slice's elements at the end (STDLIB §7.1): one copy on a data stack,
+            // all or nothing on a capped array, which fails with FULL without room for
+            // them all.
+            "pushAll" => {
+                let src = arg(self, 0);
+                if lay == Layout::Vec {
+                    return ok(
+                        format!(
+                            "({{ {ptr} zr_slice _s = {src}; memmove(({ec}*){a}->p + {a}->n, _s.p, (size_t)_s.n * sizeof({ec})); {a}->n += _s.n; }})",
+                            ptr = ptr,
+                            src = src,
+                            ec = ec,
+                            a = a
+                        ),
+                        Ty::Void,
+                    );
+                }
+                let put = arr.put(Where::End);
+                let each = format!(
+                    "for (int64_t _i = 0; _i < _s.n; _i++) {{ {ec} _x = (({ec}*)_s.p)[_i]; {ec} *_e; {put} (void)_e; }}",
+                    ec = ec,
+                    put = put
+                );
+                if lay.capped() {
+                    return fail(
+                        format!(
+                            "({{ {} zr_slice _s = {}; uint8_t _st = 0; if ({} + _s.n > {}) _st = 193; else {{ {} }} _st; }})",
+                            ptr, src, len, cap, each
+                        ),
+                        Ty::Void,
+                    );
+                }
+                ok(
+                    format!("({{ {} zr_slice _s = {}; uint8_t _st = 0; {} (void)_st; }})", ptr, src, each),
+                    Ty::Void,
                 )
             }
             "append" if is_u8 => {

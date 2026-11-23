@@ -1295,6 +1295,24 @@ impl Parser {
         let m = self.mark();
         let ok = (|| -> PResult<(LocalType, Name)> {
             let ty = self.local_type()?;
+            // A reserved word where the name goes, as in `i64[..>] long = [];`: said so,
+            // then taken as the name, so nothing after it reads as a stray expression.
+            if let Tok::Kw(k) = self.tok()
+                && let Some(reason) = k.reserved_reason()
+                && matches!(
+                    self.tok_at(1),
+                    Tok::P(P::Assign | P::Semi | P::Comma | P::At)
+                )
+            {
+                let k = *k;
+                let span = self.bump().span;
+                self.error(span, format!("`{}` is reserved: {}", k.as_str(), reason));
+                let name = Name::Ident(Ident {
+                    name: k.as_str().to_string(),
+                    span,
+                });
+                return Ok((ty, name));
+            }
             if !matches!(self.tok(), Tok::Ident(_) | Tok::Underscore) {
                 return Err(Fail);
             }

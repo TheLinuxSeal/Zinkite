@@ -778,3 +778,16 @@ fn links_point_into_their_own_array() {
         "this pool link is measured from `ps`, and what it would refer to is in `others`",
     );
 }
+
+/// What a function stores into a static from its parameters is mapped to each caller's
+/// roots: the parameter means nothing in another function, so it isn't kept in the
+/// static's own roots, where it would be taken for that function's first parameter.
+#[test]
+fn a_parameter_stored_into_a_static_stays_its_own_functions() {
+    let defs = "class Node { Node&? next; i32 v; }\nNode[..>] nodes = [];\nNode& add(Node&? prev, i32 v) { return nodes.push(new Node(prev, v)); }\n";
+    ok(&format!("{}void main() {{ Node& a = add(null, 1); add(a, 2); u8[..>] buf = []; buf +> 1; buf.clear(); }}\n", defs));
+    rejects(
+        &format!("{}void main() {{ Node[..>] mine = []; Node& m = mine.push(new Node(null, 1)); add(m, 2); }}\n", defs),
+        "a reference into `mine`, a variable of this function, can't be stored in a static",
+    );
+}

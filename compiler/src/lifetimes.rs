@@ -816,10 +816,18 @@ impl<'p, 'a> Analysis<'p, 'a> {
                            statics: &mut HashMap<u32, Roots>,
                            d: &Root,
                            src: &Roots| match d.var {
+                // A static is the whole program's, so it keeps only roots that are too:
+                // statics and literals. One of this function's parameters, or locals, means
+                // nothing in another function; what a call stores into a static is mapped
+                // to the caller's own roots through the summary's `stores` instead.
                 Var::Static(id) => {
                     let e = statics.entry(id).or_default();
                     let n = e.len();
-                    e.extend(src.iter().copied());
+                    e.extend(
+                        src.iter()
+                            .copied()
+                            .filter(|r| matches!(r.var, Var::Static(_) | Var::Literal)),
+                    );
                     changed |= e.len() != n;
                 }
                 Var::Literal | Var::Temp(..) => {}

@@ -621,16 +621,28 @@ impl<'p, 'a> Gen<'p, 'a> {
                         format!("{} *{} = ({} *){};", s, vname, s, p)
                     }
                 } else {
-                    // An array element: a view of it.
+                    // An array element: a view of its elements where they are. A `string`
+                    // variable is that view as a slice; a reference to the element is the
+                    // view's address, so writes through it reach the record.
                     let Ty::Array(_, kind) = &*el else {
                         self.unsupported(iter.span, "this for-each");
                         return;
                     };
+                    let ct = if matches!(vty, Ty::Slice(_) | Ty::View(_)) {
+                        "zr_slice"
+                    } else {
+                        "zr_vec"
+                    };
+                    if is_ref(&vty) {
+                        self.locals
+                            .insert(key(n.span), (format!("(&{})", vname), vty.clone()));
+                    }
                     format!(
-                        "zr_vec {} = ({{ const uint8_t *_q = {}; {} (zr_vec){{(void *)(_q + _h), (int64_t)_c}}; }});",
+                        "{ct} {} = ({{ const uint8_t *_q = {}; {} ({ct}){{(void *)(_q + _h), (int64_t)_c}}; }});",
                         vname,
                         p,
-                        header_read("_q", kind)
+                        header_read("_q", kind),
+                        ct = ct
                     )
                 }
             }

@@ -616,6 +616,12 @@ fn reserved_words_explain_themselves() {
         &file_errors("class C { void delete() { } }"),
         "use `defer`"
     ));
+    // As the name of a local, the reserved word is what's reported, and only it.
+    let errs = stmt_errors("i64[..>] long = [];");
+    assert_eq!(errs.len(), 1, "{:?}", errs);
+    assert!(has(&errs, "`long` is reserved: the type is spelled `i64`"), "{:?}", errs);
+    let errs = stmt_errors("i64 short = 3;");
+    assert!(has(&errs, "`short` is reserved: the type is spelled `i16`"), "{:?}", errs);
 }
 
 #[test]
