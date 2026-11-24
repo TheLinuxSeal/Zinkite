@@ -724,8 +724,16 @@ impl<'p, 'a> Checker<'p, 'a> {
         }
         // A link holds only an offset, so it refers to a value, not an interface, whose
         // references carry a method table too (REFERENCES §7.2).
-        for f in c.fields.iter().filter(|f| f.link.is_some() || f.pool_link.is_some()) {
-            let target = match &f.ty {
+        for f in c
+            .fields
+            .iter()
+            .filter(|f| f.link.is_some() || f.pool_link.is_some() || f.elem_link.is_some())
+        {
+            let held = match &f.ty {
+                Ty::Array(el, _) if f.elem_link.is_some() => el,
+                t => t,
+            };
+            let target = match held {
                 Ty::Nullable(x) => x.unref(),
                 t => t.unref(),
             };
@@ -737,6 +745,65 @@ impl<'p, 'a> Checker<'p, 'a> {
                     "a link can't refer to an interface: it holds only an offset, and an interface reference needs its method table too",
                     "make it a plain reference, `Shape&?`, or link to the class itself",
                 );
+            }
+        }
+        // Each element of an array of links is measured from its own slot, so the array
+        // is a capped one whose elements stay in their slots, inside a value in an
+        // array: `T&<i32>[..~k]`, which grows and shrinks at its end (REFERENCES §7.5).
+        for f in c.fields.iter().filter(|f| f.elem_link.is_some()) {
+            let plain = matches!(&f.ty, Ty::Array(_, k)
+                if k.cap == CapKind::Capped
+                    && !k.has_cursor()
+                    && !k.push_front()
+                    && !k.pop_front()
+                    && !k.is_frozen());
+            if !plain {
+                self.err_help(
+                    f.span,
+                    "an array of links is a capped array that grows at its end, `T&<i32>[..~k]`: in any other its elements would move, or it would be stored apart from the value that holds it",
+                    "make it `T&<i32>[..~k]`, or an array of plain references, `T&[...]`",
+                );
+            } else if f.is_static {
+                self.err_help(
+                    f.span,
+                    "an array of links is a field of a value that is in an array, which its links point into (REFERENCES §7.4, L1)",
+                    "make it a field of an instance, or an array of plain references",
+                );
+            }
+        }
+        // A packed class has no padding, so each field may sit at any address (DESIGN
+        // §6.1): it holds only what is read and written there whole, with no reference
+        // into it, and its layout is known where it is declared.
+        if c.packed {
+            if !c.type_params.is_empty() {
+                self.err_help(
+                    c.span,
+                    format!("`{}` is `packed`, and a `packed` type can't have type parameters yet", c.name),
+                    "declare it with `class`, or with the types it holds",
+                );
+            }
+            for f in c.fields.iter().filter(|f| !f.is_static) {
+                let ok = match &f.ty {
+                    Ty::Prim(_)
+                    | Ty::Ref(_)
+                    | Ty::Nullable(_)
+                    | Ty::Slice(_)
+                    | Ty::View(_)
+                    | Ty::Func(..) => f.elem_link.is_none(),
+                    Ty::Class(k, _) => {
+                        let k = &prog.classes[*k];
+                        k.kind == ClassKind::Enum || k.packed
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    let shown = self.show(&f.ty);
+                    self.err_help(
+                        f.span,
+                        format!("`{}` is `packed`, so a field of it is a number, `bool`, an enum, a reference, a link, a slice, a function or another `packed` type, and `{}` is {}", c.name, f.name, shown),
+                        "make the field one of those, or declare the type with `class`; arrays and other classes in a `packed` type aren't supported yet (DESIGN §6.1)",
+                    );
+                }
             }
         }
         // A pool link is measured from a static grow-only array of what it refers to
@@ -1170,8 +1237,55 @@ impl<'p, 'a> Checker<'p, 'a> {
         }
     }
 
+    /// When `e` names a field of a `packed` value whose type isn't `packed` itself: the
+    /// field's name and its class's. Such a field may sit at any address, so no reference
+    /// can point at it (DESIGN §6.1).
+    fn packed_field(&self, e: &Expr) -> Option<(String, String)> {
+        let (c, i) = match &e.kind {
+            E::Paren(x) => return self.packed_field(x),
+            E::Member { expr, name } => {
+                let Some(Ty::Class(c, _)) = self.facts.types.get(&key(expr.span)).map(|t| t.unref().clone())
+                else {
+                    return None;
+                };
+                let i = self.prog.classes[c]
+                    .fields
+                    .iter()
+                    .position(|f| f.name == name.name)?;
+                (c, i)
+            }
+            E::Ident(_) => match self.facts.names.get(&key(e.span)) {
+                Some(NameRes::Field(c, i)) => (*c, *i),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let cls = &self.prog.classes[c];
+        let f = &cls.fields[i];
+        let packed_value = matches!(f.ty.unref(), Ty::Class(k, _) if self.prog.classes[*k].packed);
+        (cls.packed && !f.is_static && !packed_value).then(|| (f.name.clone(), cls.name.clone()))
+    }
+
+    fn packed_field_referred(&mut self, span: Span, field: &str, class: &str) {
+        self.err_help(
+            span,
+            format!("`{}` is a field of `{}`, which is `packed`, so it may sit at any address and a reference can't point at it", field, class),
+            format!("copy it into a variable, or refer to the whole value, `{}&` (DESIGN §6.1)", class),
+        );
+    }
+
     /// Checks that a value of type `from`, computed by `e`, can go where `to` is expected.
     fn expect(&mut self, from: &Ty, to: &Ty, e: &Expr) -> bool {
+        // A reference bound to a field of a packed value.
+        let binds = matches!(to, Ty::Ref(_) | Ty::View(_))
+            || matches!(to, Ty::Nullable(x) if matches!(**x, Ty::Ref(_)));
+        if binds
+            && !matches!(from, Ty::Ref(_) | Ty::Nullable(_) | Ty::Null | Ty::View(_))
+            && let Some((field, class)) = self.packed_field(e)
+        {
+            self.packed_field_referred(e.span, &field, &class);
+            return false;
+        }
         // A value with self-relative links is never copied: only built in its array.
         if self.prog.link_bearing(to) && !from.is_unknown() && !self.built_in_place(e) {
             self.links_copied(e.span, to);
@@ -1926,6 +2040,11 @@ impl<'p, 'a> Checker<'p, 'a> {
                 (Some(want), _, None) => want.clone(),
                 (None, LocalType::VarRef, Some(init)) => {
                     let t = self.expr_c(init, None, consumed);
+                    if !matches!(t, Ty::Ref(_) | Ty::Unknown)
+                        && let Some((field, class)) = self.packed_field(init)
+                    {
+                        self.packed_field_referred(init.span, &field, &class);
+                    }
                     match t {
                         Ty::Ref(_) | Ty::Unknown => t,
                         t if self.is_place(init) => Ty::Ref(Box::new(t.unref().clone())),
@@ -5749,6 +5868,12 @@ impl<'p, 'a> Checker<'p, 'a> {
             if (is_ref_ty(p) || matches!(p, Ty::View(_)))
                 && let Some(e) = exprs[i]
             {
+                // A field of a packed value can't be passed by reference (DESIGN §6.1).
+                if !matches!(&tys[i], Some(Ty::Ref(_) | Ty::Nullable(_) | Ty::View(_)) | None)
+                    && let Some((field, class)) = self.packed_field(e)
+                {
+                    self.packed_field_referred(e.span, &field, &class);
+                }
                 let action = format!("can't pass this to `{}`, which may change it", what);
                 self.need_writable_through(e, &action);
             }
@@ -6520,7 +6645,7 @@ fn jumps_out(s: &Stmt, depth: usize) -> Option<Span> {
 }
 
 /// The statements and expressions directly inside a statement.
-fn stmt_children(s: &Stmt) -> (Vec<&Stmt>, Vec<&Expr>) {
+pub(crate) fn stmt_children(s: &Stmt) -> (Vec<&Stmt>, Vec<&Expr>) {
     match &s.kind {
         S::Block(b) => (b.stmts.iter().collect(), vec![]),
         S::Local(d) => (

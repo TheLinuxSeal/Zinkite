@@ -42,7 +42,7 @@ Reserved keywords:
 
 The unused keywords are reserved so the compiler can explain why they aren't available: there is no inheritance (DESIGN §6.1), nothing is thrown (DESIGN §7), there are no destructors (`delete()` suggests `defer`, DESIGN §6.4), the number types are spelled `i32`, `u8`, `f64` and so on, and code points are `u32` (DESIGN §9.1).
 
-`root` is a keyword only at the start of a type declaration (`root Parser { ... }`, DESIGN §6.6), so variables and fields may still be named `root`. `simd` is one only as a modifier (DESIGN §12.8): where a declaration's modifiers are read, followed by a keyword, `<`, `(`, or a type that isn't directly followed by `;`, `=`, `,` or `(`. So `simd i64 f()` and `simd Vec f()` mark a function, while `simd x;` declares a field of a class named `simd`, and `simd f()` a function returning one.
+`root` and `packed` are keywords only at the start of a type declaration (`root Parser { ... }`, DESIGN §6.6; `packed Node { ... }`, DESIGN §6.1), so variables and fields may still be named `root` or `packed`. `simd` is one only as a modifier (DESIGN §12.8): where a declaration's modifiers are read, followed by a keyword, `<`, `(`, or a type that isn't directly followed by `;`, `=`, `,` or `(`. So `simd i64 f()` and `simd Vec f()` mark a function, while `simd x;` declares a field of a class named `simd`, and `simd f()` a function returning one.
 
 `hashmap`, `hashset` and `pool` are built-in generic type names (DESIGN §4.14, `STDLIB.md` §7), and `sint`, `uint`, `int`, `float`, `number`, `ordered` and `hashable` are built-in generic bounds (DESIGN §10.1). They aren't keywords, but no declaration may reuse them. `int` and `float` used as a type are errors that suggest `i64` and `f64`.
 
@@ -222,9 +222,12 @@ modifier       = "public" | "private" | "static" | "mut"
                | "extern" [ "(" STRING ")" ]      (* a C function, with its C name: extern("glClearColor") *)
                | "simd" ;                         (* contextual: §1.3, DESIGN §12.8 *)
 
-type_decl      = { modifier } ( class_decl | root_decl | interface_decl | enum_decl ) ;
+type_decl      = { modifier } ( class_decl | packed_decl | root_decl | interface_decl | enum_decl ) ;
 
 class_decl     = "class" IDENT [ type_params ]
+                 [ "implements" class_type { "," class_type } ]
+                 class_body ;
+packed_decl    = "packed" IDENT                                (* DESIGN §6.1 *)
                  [ "implements" class_type { "," class_type } ]
                  class_body ;
 root_decl      = "root" IDENT [ type_params ]                  (* DESIGN §6.6 *)
@@ -260,6 +263,7 @@ constructor_decl = { modifier } "new" "(" [ param { "," param } ] ")" block ;
 Checked after parsing:
 - **`mut`** goes only on instance methods and interface methods (DESIGN §6.1). `static` goes only on fields and methods. `public` and `private` go on declarations, not on locals. `simd` goes only on functions and methods with a body, and not on `main` (DESIGN §12.8).
 - **Constructors** are written `new(...)` and have no return type (DESIGN §6.2). Each must assign every field on every path that doesn't fail (DESIGN §6.2), which the type checker verifies. `this.new(...)` appears only in a constructor, as a statement or after `@err =`.
+- **Packed classes** (DESIGN §6.1): a `packed` class has no type parameters, and each field is a number, `bool`, an enum, a reference, a link, a slice, a function or another `packed` class. A reference can't point at one of its fields, except one that is `packed` itself.
 - **Roots** (DESIGN §6.6): a `class` may have only one growable field, and no cursor-array field; either is an error that suggests `root`. A root can't be copied, passed as a plain parameter, returned by value, stored by value in a class, root or array, or created as an unnamed temporary.
 - **Overloads** (DESIGN §6.5): methods, static functions and constructors with the same name in one class must differ in a parameter's type, not only in `&`, `?`, array slots, the return type or the parameter names. A slice and an array differ in kind, so `f(string)` beside `f(u8[..>]&)` is allowed.
 - **Interfaces** declare methods only; they have no fields and no bodies (default methods are Open, §8).

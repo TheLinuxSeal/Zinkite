@@ -6,7 +6,9 @@
 
 i64 N = 2000000;                         // BENCH_N
 
-class Slot { string key; i32 count; }
+// 20 bytes, `packed` (DESIGN §6.1), as Goose's struct is: 24 with the padding after
+// the count.
+packed Slot { string key; i32 count; }
 
 // FNV-1a, as the C++ and Rust open-addressed rows hash.
 u64 fnv(string s) {

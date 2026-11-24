@@ -276,6 +276,17 @@ A structure built from self-relative links:
 - means the same thing wherever the whole array is copied;
 - can be saved and loaded as bytes, after a check that every link lands on an element (Open, §12).
 
+**An array of them**, `T&<i32>[..~k]` or `T&<i32>?[..~k]`, holds each link as its offset from its own slot. It is a capped array field that grows and shrinks at its end, so its elements stay in their slots, and the value holding it is in an array like any value with links:
+
+```
+class Node { i32 key; Node&<i32>[..~4] kids; }   // 4 + 1 + 16 bytes, padded to 24
+
+Node[..>] tree = [];
+Node& root = tree.push(new Node(1, []));
+root.kids +> tree.push(new Node(2, [])) +> tree.push(new Node(3, []));
+for (Node& k : root.kids) { println("${k.key}"); }   // 2, then 3
+```
+
 ### 7.3 Pool links
 `T&<u32 in arr>` stores an unsigned byte offset from the start of `arr`, plus one, so that 0 can mean null in `T&<u32 in arr>?`. `arr` must be a static grow-only array (Goose §3.9); the built-in `pool<T>` isn't one.
 
@@ -299,10 +310,14 @@ L1–L3 keep every link inside its array, and that memory never holds another ty
 ### 7.5 What the compiler does (2026-11-22)
 - **Both kinds of link are implemented.** A link field is its offset: `int8_t`, `int16_t` or `int32_t` for a self-relative link, `uint8_t`, `uint16_t` or `uint32_t` for a pool link, sorted with the other fixed-size fields by that width. Its type is the reference it holds, so rules S and R, and the rule that a reference in a field points only into an array that keeps its elements in place (L3), apply to it as to any reference field.
 - **L1 is checked with the roots of rule S.** Storing a link compares the roots of what it refers to with the roots of the array its field is in, for a self-relative link, or with its static array, for a pool link; a store that may be in one of two arrays is an error too. A store through a parameter, or a constructor's, is checked at each call, where the arguments' roots are known: `attach(x, y)` with `void attach(Node& into, Node& what) { into.left .= what; }` is an error when `x` and `y` are in different arrays, and `p2.push(new Pair(q, 2))` when the constructor links to `q` and `q` is in `p1`.
-- **L2 is checked as "never copied"** for self-relative links: a value whose class has one, itself or in a field it holds by value, is made only by `new` as the argument of `push`, `+>` or another insertion, where it is built in its slot. It can't be a local, a parameter, a result, a loop variable or a copy of an element, and the methods that move or copy elements, such as `sort`, `reverse`, `retain` and `filter`, are compile errors on an array of them. A whole array of them can be copied, since its links stay inside it. A value with only pool links copies anywhere. A link can't refer to an interface, which would need its method table too.
+- **L2 is checked as "never copied"** for self-relative links: a value whose class has one, itself or in a field it holds by value, is made only by `new` as the argument of `push`, `+>` or another insertion, where it is built in its slot. The constructor's arguments are evaluated first, in order, then the slot is taken (2026-11-23; it used to be taken first, so an argument reading the array's length read one more). It can't be a local, a parameter, a result, a loop variable or a copy of an element, and the methods that move or copy elements, such as `sort`, `reverse`, `retain` and `filter`, are compile errors on an array of them. A whole array of them can be copied, since its links stay inside it. A value with only pool links copies anywhere. A link can't refer to an interface, which would need its method table too.
 - **A pool link's array** must be a static `T[..>]` of what the link refers to: a static of the same class, a script's top-level one, or `C.name`.
 - **L4 checks every store**, as a second line behind L1; the check isn't yet left out when the reservation is small enough for the width.
-- **Not yet**: links in an array of records that have to be built aside (V4), and in arrays other than grow-only ones on a data stack, which are compile errors that say so; and constructors that can fail, for a value with self-relative links.
+- **Arrays of links (2026-11-23)** are capped arrays of offsets, `int8_t`, `int16_t` or `int32_t`, each measured from its own slot. `+>` and its chains append, storing each link as its offset under L1 and L4. `a[i]` and a for-each follow them. `.len` and `clear` don't read them. Binding an element, `a[i] .= x`, stores a new offset, and a constructor given an array of references stores each as an offset from the slot the value is built in.
+  - **L1** compares what each link refers to with the array that holds the value whose field it is, through parameters and constructors as for a link field.
+  - **The array** must be a capped one that grows at its end, `T&<i32>[..~k]`, in a field of an instance. Any other is a compile error, since its elements would move or it would be stored apart from the value holding it, and so is a pool link as an element.
+  - **A link written anywhere else**, as the type of a local, a parameter or a result, or as the elements of any other array, is a compile error. Before, it was taken for a plain reference.
+- **Not yet**: links in an array of records that have to be built aside (V4), and in arrays other than grow-only ones on a data stack, which are compile errors that say so; constructors that can fail, for a value with self-relative links; and, on an array of links, `push` (which gives a reference to the new slot, where there is only an offset), the removals that give an element back, slices, and passing the array whole.
 
 ---
 

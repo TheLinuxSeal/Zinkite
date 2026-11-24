@@ -131,6 +131,16 @@ struct Gen<'p, 'a> {
     /// Index expressions generated without their check, by span: inside the copy of a
     /// versioned loop whose test showed them in range (DESIGN §14.2).
     unchecked_ix: HashSet<(u32, u32)>,
+    /// The C name of the function being generated when its base case is copied to its
+    /// calls to itself (DESIGN §14.2), and whether a call was sent to that copy.
+    base_name: Option<String>,
+    base_used: bool,
+    /// While that copy is generated: the `return switch` it ends with, by span, and the
+    /// call to the whole function that its arms that call something become.
+    base_switch: Option<((u32, u32), String)>,
+    /// Arrays of links, by span, that the operation being generated reaches as the
+    /// offsets they are: every other use of one is reported (REFERENCES §7.5).
+    link_ok: HashSet<(u32, u32)>,
     status_tests: usize,
     /// For the call about to be generated, when its array result goes straight into a
     /// variable: where to build it (DESIGN §3.3), as C, or `NULL` for the callee's own
@@ -179,7 +189,8 @@ struct Gen<'p, 'a> {
     lib_done: HashSet<(ClassId, usize, bool)>,
     /// The size functions of variable-size types (records.rs), by type.
     vs_fns: HashMap<String, String>,
-    /// Structs laid out packed: the fixed part of a variable-size record (DESIGN §11).
+    /// Structs laid out packed: the fixed part of a variable-size record, and `packed`
+    /// classes (DESIGN §6.1, §11).
     packed: HashSet<String>,
     /// In the constructor of a variable-size record: its type, and the first of its
     /// variable-size fields not written yet (records.rs).
@@ -351,6 +362,10 @@ impl<'p, 'a> Gen<'p, 'a> {
             aliased: HashSet::new(),
             owned_arrays: HashSet::new(),
             unchecked_ix: HashSet::new(),
+            base_name: None,
+            base_used: false,
+            base_switch: None,
+            link_ok: HashSet::new(),
             status_tests: 0,
             direct_result: None,
             fresh_dst: false,
@@ -889,7 +904,8 @@ impl<'p, 'a> Gen<'p, 'a> {
             self.file = c.file;
             let (body, deps) = self.struct_body(id, &[]);
             let name = self.class_name(id);
-            if self.vs(&Ty::Class(id, Vec::new())) {
+            // A variable-size record's fixed part, and a `packed` class (DESIGN §6.1).
+            if self.vs(&Ty::Class(id, Vec::new())) || c.packed {
                 self.packed.insert(name.clone());
             }
             self.def_names.insert(name.clone(), name.clone());
@@ -1140,16 +1156,41 @@ impl<'p, 'a> Gen<'p, 'a> {
             && level.is_none()
             && !dispatch
             && m.decl.body.as_ref().is_some_and(|b| small_fn(&b.stmts));
+        let body = m.decl.body.as_ref().expect("a body");
+        // Its calls to itself go to a copy of its base case, when it starts with one and
+        // calls itself at least twice. With one call, as in a walk down a list, the copy
+        // saves only the last call, and it keeps the C compiler from making the
+        // recursion a loop: sexp's walk took 3% longer with it.
+        let base = (!self.is_main
+            && level.is_none()
+            && !dispatch
+            && !m.can_fail
+            && !self.dst_fn
+            && self.self_calls(&body.stmts, m) >= 2)
+            .then(|| self.base_case(&body.stmts))
+            .flatten();
+        self.base_name = base.as_ref().map(|_| name.to_string());
+        self.label_fn(&m.name);
+        self.block_stmts(&body.stmts);
+        self.base_name = None;
+        let based = std::mem::take(&mut self.base_used);
+        // Falling off the end returns status 0, and 0 from `u8 main` (DESIGN §7.2, §8.6).
+        if (self.fails && m_ret == Ty::Void) || (self.is_main && m_ret == Ty::u8()) {
+            self.line("return 0;");
+        }
+        let mut out = self.take_body();
+        let c_params = if params.is_empty() {
+            "void".to_string()
+        } else {
+            params.join(", ")
+        };
+        // A function whose base case its calls copy isn't inlined itself, as measured.
         let sig = format!(
             "static {}{} {}({})",
-            if small { "inline " } else { "" },
+            if small && !based { "inline " } else { "" },
             ret,
             name,
-            if params.is_empty() {
-                "void".to_string()
-            } else {
-                params.join(", ")
-            }
+            c_params
         );
         // A wider version exists only where the runtime builds them.
         let (open, attr, close) = match level {
@@ -1157,14 +1198,6 @@ impl<'p, 'a> Gen<'p, 'a> {
             None => ("", String::new(), ""),
         };
         let _ = write!(self.protos, "{}{}{};\n{}", open, attr, sig, close);
-        let body = m.decl.body.as_ref().expect("a body");
-        self.label_fn(&m.name);
-        self.block_stmts(&body.stmts);
-        // Falling off the end returns status 0, and 0 from `u8 main` (DESIGN §7.2, §8.6).
-        if (self.fails && m_ret == Ty::Void) || (self.is_main && m_ret == Ty::u8()) {
-            self.line("return 0;");
-        }
-        let mut out = self.take_body();
         if dispatch {
             // The C parameters' names, passed on as they came.
             let args: Vec<&str> = params
@@ -1204,6 +1237,167 @@ impl<'p, 'a> Gen<'p, 'a> {
                 body
             );
         }
+        if based && let Some(base) = base {
+            self.base_copy(id, m, name, &ret, &params, &c_params, &ptys, &body.stmts, base);
+        }
+    }
+
+    /// The base case of a function that calls itself, which those calls copy (DESIGN
+    /// §14.2): how many statements its body starts with that only declare locals and
+    /// return a value computed without calling anything when a test holds, ending at
+    /// the last such test; or ending with a `return switch` some of whose cases call
+    /// nothing. `None` when the body doesn't start that way.
+    fn base_case(&self, stmts: &[Stmt]) -> Option<BaseCase> {
+        // The size of what's copied so far, as `small_fn` counts, and of the copy found.
+        let mut size = 0;
+        let mut found = None;
+        for (i, s) in stmts.iter().enumerate() {
+            let mut n = 0;
+            match &s.kind {
+                S::Local(d) if self.cheap_locals(d, &mut n) => size += n,
+                S::If {
+                    cond,
+                    then,
+                    els: None,
+                } if pure_expr(cond, &mut n) && leaf_return(then, &mut n) => {
+                    size += n;
+                    found = Some((
+                        size,
+                        BaseCase {
+                            len: i + 1,
+                            switch: None,
+                        },
+                    ));
+                }
+                S::Return {
+                    status: None,
+                    value: Some(v),
+                } => {
+                    if let E::Switch(sw) = &v.kind
+                        && pure_expr(&sw.scrutinee, &mut n)
+                    {
+                        let leaves = sw
+                            .rules
+                            .iter()
+                            .filter(|r| matches!(&r.body, SwitchBody::Expr(x) if pure_expr(x, &mut n)))
+                            .count();
+                        if leaves > 0 && leaves < sw.rules.len() {
+                            found = Some((
+                                size + n,
+                                BaseCase {
+                                    len: i + 1,
+                                    switch: Some(sw.span),
+                                },
+                            ));
+                        }
+                    }
+                    break;
+                }
+                _ => break,
+            }
+        }
+        // Copied to every call, so small.
+        found.filter(|(size, _)| *size <= 48).map(|(_, b)| b)
+    }
+
+    /// How many calls in `stmts` call `m`, outside lambdas.
+    fn self_calls(&self, stmts: &[Stmt], m: &MethodInfo) -> usize {
+        fn expr(g: &Gen, e: &Expr, m: &MethodInfo, n: &mut usize) {
+            if let E::Call { .. } = &e.kind
+                && let Some(f) = g.facts.calls.get(&key(e.span))
+                && let Origin::Method(c, i) = f.origin
+                && std::ptr::eq(&g.prog.classes[c].methods[i], m)
+            {
+                *n += 1;
+            }
+            if let E::Lambda { .. } = &e.kind {
+                return;
+            }
+            if let E::Switch(sw) = &e.kind {
+                for r in &sw.rules {
+                    if let SwitchBody::Block(b) = &r.body {
+                        b.stmts.iter().for_each(|s| stmt(g, s, m, n));
+                    }
+                }
+            }
+            for x in crate::check::expr_children(e) {
+                expr(g, x, m, n);
+            }
+        }
+        fn stmt(g: &Gen, s: &Stmt, m: &MethodInfo, n: &mut usize) {
+            let (ss, es) = crate::check::stmt_children(s);
+            es.into_iter().for_each(|e| expr(g, e, m, n));
+            ss.into_iter().for_each(|s| stmt(g, s, m, n));
+        }
+        let mut n = 0;
+        stmts.iter().for_each(|s| stmt(self, s, m, &mut n));
+        n
+    }
+
+    /// Whether a declaration declares only numbers, enums and references, each from an
+    /// expression that calls nothing: copied to a call, it costs a few loads.
+    fn cheap_locals(&self, d: &ast::LocalDecl, size: &mut usize) -> bool {
+        d.decls.iter().all(|v| {
+            let cheap = match self.facts.locals.get(&key(v.name.span)) {
+                Some(Ty::Prim(_) | Ty::Ref(_) | Ty::Nullable(_) | Ty::Slice(_) | Ty::View(_)) => {
+                    true
+                }
+                Some(Ty::Class(c, _)) => self.prog.classes[*c].kind == ClassKind::Enum,
+                _ => false,
+            };
+            cheap && v.capture.is_none() && v.init.as_ref().is_some_and(|e| pure_expr(e, size))
+        })
+    }
+
+    /// The copy of a function's base case, `name_base`, that its calls to itself call:
+    /// the statements `base` counts, then a call to the whole function. Inlined always,
+    /// so a call whose test holds computes its result where it is, and only the others
+    /// make a call. The function computes its first statements again, which only read.
+    #[allow(clippy::too_many_arguments)]
+    fn base_copy(
+        &mut self,
+        id: ClassId,
+        m: &MethodInfo,
+        name: &str,
+        ret: &str,
+        params: &[String],
+        c_params: &str,
+        ptys: &[Ty],
+        stmts: &[Stmt],
+        base: BaseCase,
+    ) {
+        let m_ret = self.sb(&m.ret);
+        self.begin_fn(id, m_ret, false, !m.is_static, false);
+        let _ = self.params_c(&m.decl.params, ptys);
+        self.label_fn(&m.name);
+        let args: Vec<&str> = params
+            .iter()
+            .map(|p| p.rsplit([' ', '*']).next().unwrap_or(""))
+            .collect();
+        let call = format!("{}({})", name, args.join(", "));
+        let (copied, last) = match base.switch {
+            Some(_) => (&stmts[..base.len - 1], Some(&stmts[base.len - 1])),
+            None => (&stmts[..base.len], None),
+        };
+        for s in copied {
+            self.stmt(s);
+        }
+        match (last, base.switch) {
+            (Some(s), Some(sw)) => {
+                self.base_switch = Some((key(sw), call));
+                self.stmt(s);
+                self.base_switch = None;
+            }
+            _ if ret == "void" => self.line(&format!("{}; return;", call)),
+            _ => self.line(&format!("return {};", call)),
+        }
+        let out = self.take_body();
+        let sig = format!(
+            "static inline __attribute__((always_inline)) {} {}_base({})",
+            ret, name, c_params
+        );
+        let _ = writeln!(self.protos, "{};", sig);
+        let _ = write!(self.bodies, "{} {{\n{}}}\n\n", sig, out);
     }
 
     fn ctor(&mut self, id: ClassId, idx: usize, k: &crate::program::CtorInfo) {
@@ -1261,6 +1455,10 @@ impl<'p, 'a> Gen<'p, 'a> {
                         let v = self.expr(init, ty);
                         self.link_store(&place, &kind, nullable, &v, init.span)
                     }
+                    None if self.has_link_array(id, fname) => {
+                        let v = self.expr(init, ty);
+                        self.link_array_store(id, fname, &place, &v, init.span)
+                    }
                     None => self.store_into(&place, ty, init),
                 };
                 self.line(&format!("{};", code));
@@ -1283,6 +1481,9 @@ impl<'p, 'a> Gen<'p, 'a> {
                         let code = match self.field_link(id, fname) {
                             Some((kind, nullable)) => {
                                 self.link_store(&place, &kind, nullable, &arg, span)
+                            }
+                            None if self.has_link_array(id, fname) => {
+                                self.link_array_store(id, fname, &place, &arg, span)
                             }
                             None => format!("{} = {}", place, arg),
                         };
@@ -1989,17 +2190,37 @@ impl<'p, 'a> Gen<'p, 'a> {
 
     /// Calls the constructor a `new` chose on storage `place`; gives its status, or 0.
     fn construct(&mut self, place: &str, args: &[ast::Arg], span: Span) -> String {
-        let Some(fact) = self.facts.calls.get(&key(span)) else {
+        let Some((cargs, call)) = self.ctor_args(args, span) else {
             return self.unsupported(span, "this constructor");
         };
+        call(self, &format!("&{}", place), &cargs)
+    }
+
+    /// The C for a constructor's arguments, in order, and what makes the call from them
+    /// and the address of the object to build.
+    #[allow(clippy::type_complexity)]
+    fn ctor_args(
+        &mut self,
+        args: &[ast::Arg],
+        span: Span,
+    ) -> Option<(Vec<String>, Box<dyn Fn(&mut Self, &str, &[String]) -> String>)> {
+        let fact = self.facts.calls.get(&key(span))?;
         let Origin::Ctor(c, i) = fact.origin else {
-            return self.unsupported(span, "this constructor");
+            return None;
         };
         let params: Vec<Ty> = fact.params.iter().map(|t| self.sb(t)).collect();
-        let mut cargs = vec![format!("&{}", place)];
+        let mut cargs = Vec::new();
         for (a, p) in args.iter().zip(&params) {
             cargs.push(self.arg_code(&a.expr, p));
         }
+        let call = move |me: &mut Self, at: &str, cargs: &[String]| me.ctor_call(c, i, at, cargs, span);
+        Some((cargs, Box::new(call)))
+    }
+
+    /// A call to constructor `i` of class `c`, building at the address `at`.
+    fn ctor_call(&mut self, c: ClassId, i: usize, at: &str, args: &[String], span: Span) -> String {
+        let mut cargs = vec![at.to_string()];
+        cargs.extend(args.iter().cloned());
         let fails = self.prog.classes[c].ctors[i].can_fail;
         let fname = if self.prog.classes[c].type_params.is_empty() {
             self.want_lib(c, i, true);
@@ -2380,6 +2601,10 @@ impl<'p, 'a> Gen<'p, 'a> {
         };
         let ec = self.cty(&elem, iter.span);
         let arr = self.tmp("a");
+        let link = self.link_array(iter);
+        if link.is_some() {
+            self.link_ok.insert(key(strip_paren(iter).span));
+        }
         // What is looped over is found once; its length is read on every step (DESIGN §9.4).
         let lay = layout(&it).unwrap_or(Layout::Vec);
         let ap = self.tmp("ap");
@@ -2419,7 +2644,11 @@ impl<'p, 'a> Gen<'p, 'a> {
             ),
         };
         let vc = self.cty(&vty, iter.span);
-        let at = looped.at(&i);
+        let mut at = looped.at(&i);
+        // An array of links gives the references its offsets hold.
+        if let Some((_, nullable, target)) = &link {
+            at = self.link_follow(&at, *nullable, target, iter.span);
+        }
         // A reference to an element that is itself a reference is that reference.
         let bind = if by_ref && !is_ref(&elem) {
             format!("{} {} = &{};", vc, vname, at)
@@ -3416,6 +3645,11 @@ impl<'p, 'a> Gen<'p, 'a> {
     }
 
     fn member(&mut self, base: &Expr, name: &ast::Ident, span: Span, t: Ty) -> (String, Ty) {
+        // The length of an array of links, whose offsets aren't read.
+        if name.name == "len" && self.link_array(base).is_some() {
+            let p = self.link_array_place(base);
+            return (format!("((int64_t)({}).n)", p), Ty::i64());
+        }
         let bt = self.ty(base);
         if let Ty::TypeName(inner) = &bt {
             // `T.MAX` in an instantiation where `T` is a number type: as `u8.MAX`.
@@ -3624,6 +3858,34 @@ impl<'p, 'a> Gen<'p, 'a> {
     }
 
     fn index(
+        &mut self,
+        base: &Expr,
+        mode: ast::IndexMode,
+        index: &Expr,
+        span: Span,
+    ) -> (String, Ty) {
+        // An element of an array of links is an offset from its slot, followed.
+        if let Some((_, nullable, target)) = self.link_array(base) {
+            self.link_ok.insert(key(strip_paren(base).span));
+            let (slot, _) = self.index_slot(base, mode, index, span);
+            let el = self.ty(base).unref().elem().cloned().unwrap_or(Ty::Unknown);
+            return (self.link_follow(&slot, nullable, &target, span), el);
+        }
+        self.index_slot(base, mode, index, span)
+    }
+
+    /// The slot of an element of an array of links, `n.kids[i]`, as a C lvalue.
+    fn link_slot(&mut self, e: &Expr) -> Option<(String, Ty)> {
+        let E::Index { expr, mode, index } = &strip_paren(e).kind else {
+            return None;
+        };
+        self.link_array(expr)?;
+        self.link_ok.insert(key(strip_paren(expr).span));
+        Some(self.index_slot(expr, *mode, index, e.span))
+    }
+
+    /// The element of `base` at `index`, as a C lvalue.
+    fn index_slot(
         &mut self,
         base: &Expr,
         mode: ast::IndexMode,
@@ -4313,6 +4575,19 @@ impl<'p, 'a> Gen<'p, 'a> {
         let t = self.tmp("sw");
         let sct = self.cty(&st, sw.span);
         self.line(&format!("{} {} = {};", sct, t, v));
+        // In the copy of a function's base case that ends with this switch, a case that
+        // calls something calls the whole function instead (DESIGN §14.2).
+        let whole = match &self.base_switch {
+            Some((s, _)) if *s == key(sw.span) => self.base_switch.take().map(|(_, call)| call),
+            _ => None,
+        };
+        let arm = |me: &mut Self, body: &SwitchBody| match (&whole, body) {
+            (Some(_), SwitchBody::Expr(x)) if pure_expr(x, &mut 0) => {
+                me.switch_arm(body, &r, &end, want)
+            }
+            (Some(call), _) => me.line(&format!("{} = {}; goto {};", r, call, end)),
+            (None, _) => me.switch_arm(body, &r, &end, want),
+        };
         let mut default = None;
         for rule in &sw.rules {
             let Some(labels) = &rule.labels else {
@@ -4321,11 +4596,11 @@ impl<'p, 'a> Gen<'p, 'a> {
             };
             let conds: Vec<String> = labels.iter().map(|l| self.case_test(&t, &st, l)).collect();
             self.line(&format!("if ({}) {{", conds.join(" || ")));
-            self.switch_arm(&rule.body, &r, &end, want);
+            arm(self, &rule.body);
             self.line("}");
         }
         if let Some(d) = default {
-            self.switch_arm(&d.body, &r, &end, want);
+            arm(self, &d.body);
         } else {
             let loc = self.loc(sw.span);
             let none = self.on_fail(
@@ -4762,7 +5037,12 @@ impl<'p, 'a> Gen<'p, 'a> {
                     _ => None,
                 };
                 let targs = fact.targs.clone();
-                let (fname, map) = self.method_ref(c, i, recv.as_ref(), &targs, e.span);
+                let (mut fname, map) = self.method_ref(c, i, recv.as_ref(), &targs, e.span);
+                // A call to itself copies its base case first (DESIGN §14.2).
+                if self.base_name.as_deref() == Some(fname.as_str()) {
+                    self.base_used = true;
+                    fname.push_str("_base");
+                }
                 let mut cargs = Vec::new();
                 let mut rest: &[Ty] = &params;
                 if let E::Member { expr: base, .. } = &callee.kind {
@@ -5400,6 +5680,10 @@ impl<'p, 'a> Gen<'p, 'a> {
             _ => 0,
         };
         let a = self.tmp("a");
+        // Emptying an array of links reads none of its offsets.
+        if m == "clear" && self.link_array(base).is_some() {
+            self.link_ok.insert(key(strip_paren(base).span));
+        }
         let ptr = if is_ref(&bt) || self.is_place(base) {
             let (p, _) = self.place(base);
             format!("__typeof__({}) *{} = &({});", p, a, p)
@@ -5949,9 +6233,24 @@ impl<'p, 'a> Gen<'p, 'a> {
         {
             self.insert_chain(lhs, stmts, fails);
         } else {
-            let (p, _) = self.place(lhs);
+            let p = if self.link_array(lhs).is_some() {
+                self.link_array_place(lhs)
+            } else {
+                self.place(lhs).0
+            };
             stmts.push_str(&format!("__typeof__({}) *_arr = &({}); ", p, p));
         }
+        // The array the chain inserts into, which may hold links.
+        let mut root = lhs.as_ref();
+        while let E::Binary {
+            op: BinOp::InsertEnd | BinOp::InsertFront | BinOp::InsertCursor,
+            lhs,
+            ..
+        } = &strip_paren(root).kind
+        {
+            root = lhs;
+        }
+        let link = self.link_array(root);
         let arr_t = self.ty(lhs).unref().clone();
         if let Ty::Array(el, _) = &arr_t
             && self.vs(el)
@@ -5982,6 +6281,21 @@ impl<'p, 'a> Gen<'p, 'a> {
         };
         if let Some(build) = self.build_linked(&arr, &el, rhs, at, e.span) {
             stmts.push_str(&format!("{{ {} *_e; {} (void)_e; }} ", ec, build));
+            return;
+        }
+        // A link is stored as its offset from the slot it goes in (REFERENCES §7.2).
+        if let Some((w, nullable, _)) = link {
+            if lay != Layout::Capped || at != Where::End {
+                let u = self.unsupported(e.span, "this insertion into an array of links");
+                stmts.push_str(&format!("(void){}; ", u));
+                return;
+            }
+            let x = self.expr(rhs, &el);
+            let set = self.link_store("_arr->e[_arr->n]", &LinkKind::Rel(w), nullable, "_x", rhs.span);
+            stmts.push_str(&format!(
+                "{{ {} _x = {}; if (_arr->n < {}) {{ {}; _arr->n++; }} else if (!_st) _st = 193; }} ",
+                ec, x, cap, set
+            ));
             return;
         }
         let x = self.expr(rhs, &el);
@@ -6016,6 +6330,16 @@ impl<'p, 'a> Gen<'p, 'a> {
     /// Following field `i` of class `c`, the C lvalue `raw`, when it is a link: the
     /// reference it holds.
     fn link_read(&mut self, c: ClassId, i: usize, raw: &str, span: Span) -> Option<String> {
+        // An array of links is offsets, which only the operations that convert them read.
+        if self.prog.classes[c].fields[i].elem_link.is_some() {
+            if self.link_ok.remove(&key(span)) {
+                return Some(raw.to_string());
+            }
+            return Some(self.unsupported(
+                span,
+                "this use of an array of links (so far it takes `+>`, `[i]`, `for`, `.len` and `clear`)",
+            ));
+        }
         let kind = self.link_kind(c, i)?;
         let f = &self.prog.classes[c].fields[i];
         let (target, nullable) = match &f.ty {
@@ -6033,11 +6357,105 @@ impl<'p, 'a> Gen<'p, 'a> {
         })
     }
 
+    /// When `e` is a field holding an array of self-relative links (REFERENCES §7.2):
+    /// the width of their offsets, whether they are nullable, and what they refer to.
+    fn link_array(&self, e: &Expr) -> Option<(Prim, bool, Ty)> {
+        let e = strip_paren(e);
+        let (c, i) = match &e.kind {
+            E::Member { expr: base, name } => {
+                let Ty::Class(c, _) = settle(self.ty(base).unref()) else {
+                    return None;
+                };
+                let i = self.prog.classes[c]
+                    .fields
+                    .iter()
+                    .position(|f| f.name == name.name)?;
+                (c, i)
+            }
+            E::Ident(_) => match self.facts.names.get(&key(e.span)) {
+                Some(NameRes::Field(c, i)) => (*c, *i),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let f = &self.prog.classes[c].fields[i];
+        let w = f.elem_link?;
+        let Ty::Array(el, _) = &f.ty else {
+            return None;
+        };
+        Some(match &**el {
+            Ty::Nullable(x) => (w, true, x.unref().clone()),
+            t => (w, false, t.unref().clone()),
+        })
+    }
+
+    /// The C lvalue of an array of links, for an operation that converts its offsets.
+    fn link_array_place(&mut self, e: &Expr) -> String {
+        self.link_ok.insert(key(strip_paren(e).span));
+        let (p, _) = self.place(e);
+        p
+    }
+
+    /// Whether field `name` of class `c` is an array of links.
+    fn has_link_array(&self, c: ClassId, name: &str) -> bool {
+        self.prog.classes[c]
+            .fields
+            .iter()
+            .any(|f| f.name == name && f.elem_link.is_some())
+    }
+
+    /// Stores `v`, a C array of references, in field `name` of class `c`, an array of
+    /// links at the C lvalue `place`: each as its offset from the slot it goes in, so
+    /// in the value's own slot in its array (REFERENCES §7.2).
+    fn link_array_store(&mut self, c: ClassId, name: &str, place: &str, v: &str, span: Span) -> String {
+        let f = self.prog.classes[c]
+            .fields
+            .iter()
+            .find(|f| f.name == name)
+            .expect("the field");
+        let w = f.elem_link.expect("an array of links");
+        let nullable = matches!(&f.ty, Ty::Array(el, _) if matches!(**el, Ty::Nullable(_)));
+        let set = self.link_store(
+            &format!("{}.e[_li]", place),
+            &LinkKind::Rel(w),
+            nullable,
+            "_lv.e[_li]",
+            span,
+        );
+        format!(
+            "({{ __typeof__({v}) _lv = {v}; for (int64_t _li = 0; _li < _lv.n; _li++) {set}; {p}.n = _lv.n; }})",
+            v = v,
+            set = set,
+            p = place
+        )
+    }
+
+    /// Following the offset at the C lvalue `slot` of an array of links.
+    fn link_follow(&mut self, slot: &str, nullable: bool, target: &Ty, span: Span) -> String {
+        let tc = self.cty(target, span);
+        if nullable {
+            format!("ZR_LINK_OR_NULL({}, {})", tc, slot)
+        } else {
+            format!("ZR_LINK({}, {})", tc, slot)
+        }
+    }
+
     /// When `e` is a field holding a link: the field as a C lvalue, what kind of link,
     /// whether it's nullable, and its type.
     fn link_place(&mut self, e: &Expr) -> Option<(String, LinkKind, bool, Ty)> {
         let e = strip_paren(e);
         match &e.kind {
+            // An element of an array of links: its slot.
+            E::Index { expr: base, .. } => {
+                let (w, nullable, target) = self.link_array(base)?;
+                let (slot, _) = self.link_slot(e)?;
+                let ty = if nullable {
+                    Ty::Nullable(Box::new(Ty::Ref(Box::new(target))))
+                } else {
+                    Ty::Ref(Box::new(target))
+                };
+                Some((slot, LinkKind::Rel(w), nullable, ty))
+            }
             E::Member { expr: base, name } => {
                 let bt = self.ty(base);
                 let Ty::Class(c, cargs) = settle(bt.unref()) else {
@@ -6153,9 +6571,22 @@ impl<'p, 'a> Gen<'p, 'a> {
                     + ";",
             );
         }
-        let st = self.construct("(*_e)", args, v.span);
+        // The arguments come first, as for any call, and then the slot: an argument
+        // that reads the array's length, or pushes into it, sees it as it was.
+        let Some((cargs, call)) = self.ctor_args(args, v.span) else {
+            return Some(self.unsupported(span, "this constructor") + ";");
+        };
+        let mut pre = String::new();
+        let mut names = Vec::new();
+        for a in cargs {
+            let t = self.tmp("ca");
+            let _ = write!(pre, "__auto_type {} = {}; ", t, a);
+            names.push(t);
+        }
+        let st = call(self, "&(*_e)", &names);
         Some(format!(
-            "_e = &(({ec}*){a}->p)[{a}->n++]; (void){st};",
+            "{pre}_e = &(({ec}*){a}->p)[{a}->n++]; (void){st};",
+            pre = pre,
             ec = arr.ec,
             a = arr.a,
             st = st
@@ -6760,6 +7191,67 @@ fn stmt_idents(s: &Stmt, out: &mut Vec<Span>) {
         }
         S::Destructure { value, .. } => expr(value, out),
         _ => {}
+    }
+}
+
+/// A function's base case, which its calls to itself copy: its first `len` statements,
+/// the last of them a `return switch` when `switch` gives that switch's span.
+struct BaseCase {
+    len: usize,
+    switch: Option<Span>,
+}
+
+/// Whether evaluating `e` only reads and computes: no call, assignment, insertion,
+/// removal, allocation or status, so computing it again where the function is called
+/// changes nothing a program can see. It may still stop the program, as an index out
+/// of range does, at the same place with the same message. Adds its size to `size`
+/// when it is.
+fn pure_expr(e: &Expr, size: &mut usize) -> bool {
+    fn walk(e: &Expr, n: &mut usize) -> bool {
+        *n += 1;
+        let ok = match &e.kind {
+            E::Int { .. }
+            | E::Float { .. }
+            | E::Char(_)
+            | E::Bool(_)
+            | E::Null
+            | E::Ident(_)
+            | E::This
+            | E::PrimMember { .. } => true,
+            E::Str(parts) => parts.iter().all(|p| matches!(p, StrPart::Text(_))),
+            E::Binary { op, .. } => !matches!(
+                op,
+                ast::BinOp::InsertEnd | ast::BinOp::InsertFront | ast::BinOp::InsertCursor
+            ),
+            E::Unary { op, .. } => !matches!(op, ast::UnaryOp::PreInc | ast::UnaryOp::PreDec),
+            E::InstanceOf { bind, .. } => bind.is_none(),
+            E::Paren(_) | E::Cond { .. } | E::Cast { .. } | E::Member { .. } | E::Index { .. } => {
+                true
+            }
+            _ => false,
+        };
+        ok && crate::check::expr_children(e).into_iter().all(|x| walk(x, n))
+    }
+    let mut n = 0;
+    let ok = walk(e, &mut n);
+    if ok {
+        *size += n;
+    }
+    ok
+}
+
+/// Whether a statement only returns, a value computed as `pure_expr` allows or none.
+fn leaf_return(s: &Stmt, size: &mut usize) -> bool {
+    match &s.kind {
+        S::Return {
+            status: None,
+            value,
+        } => {
+            *size += 1;
+            value.as_ref().is_none_or(|v| pure_expr(v, size))
+        }
+        S::Block(b) => matches!(b.stmts.as_slice(), [one] if leaf_return(one, size)),
+        _ => false,
     }
 }
 

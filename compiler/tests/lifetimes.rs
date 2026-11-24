@@ -779,6 +779,26 @@ fn links_point_into_their_own_array() {
     );
 }
 
+/// Rule L1 for arrays of links: each link goes into the array of the value holding them,
+/// by `+>`, by binding an element, through a parameter, or as a constructor's argument.
+#[test]
+fn arrays_of_links_point_into_their_own_array() {
+    let defs = "class Node { i32 key; Node&<i32>[..~4] kids; }\nvoid adopt(Node& into, Node& kid) { into.kids +> kid; }\n";
+    let main = |body: &str| {
+        format!(
+            "{}void main() {{ Node[..>] a = []; Node[..>] b = []; Node& x = a.push(new Node(1, [])); Node& w = a.push(new Node(3, [])); Node& y = b.push(new Node(2, [])); {} }}\n",
+            defs, body
+        )
+    };
+    ok(&main("x.kids +> w +> x; x.kids[0] .= x; adopt(x, w); a +> new Node(4, [x, w]); x.kids +> a.push(new Node(5, []));"));
+    let wrong = "this link is in an element of `a`, and what it would refer to is in `b`";
+    rejects(&main("x.kids +> y;"), wrong);
+    rejects(&main("x.kids +> w +> y;"), wrong);
+    rejects(&main("x.kids +> w; x.kids[0] .= y;"), wrong);
+    rejects(&main("adopt(x, y);"), wrong);
+    rejects(&main("a +> new Node(4, [y]);"), wrong);
+}
+
 /// What a function stores into a static from its parameters is mapped to each caller's
 /// roots: the parameter means nothing in another function, so it isn't kept in the
 /// static's own roots, where it would be taken for that function's first parameter.

@@ -148,6 +148,17 @@ impl R {
         R::Root(Root::of(v))
     }
 
+    /// Where the array these roots name, a field's or its elements, is held: the value
+    /// whose field it is. An array of links points into the array that value is in.
+    fn container(r: &R) -> R {
+        match r {
+            R::Part(inner, _) => (**inner).clone(),
+            R::Elems(inner) => R::container(inner),
+            R::Union(v) => R::Union(v.iter().map(R::container).collect()),
+            r => r.clone(),
+        }
+    }
+
     fn stored(r: R) -> R {
         match r {
             R::Empty => R::Empty,
@@ -712,7 +723,8 @@ impl<'p, 'a> Analysis<'p, 'a> {
     /// index of the static array a pool link is measured from.
     fn link_of_field(&self, c: ClassId, i: usize) -> Option<Option<u32>> {
         let f = &self.prog.classes[c].fields[i];
-        if f.link.is_some() {
+        // An array of links: each element points into the array its value is in.
+        if f.link.is_some() || f.elem_link.is_some() {
             return Some(None);
         }
         f.pool_link.as_ref()?;
@@ -2587,6 +2599,16 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                     }
                     let elem = lt.elem().cloned().unwrap_or(Ty::Unknown);
                     let src = self.convert(&rv, &rt, &elem, rhs.span);
+                    // A link into an array of them: what it refers to must be in the
+                    // array the value holding them is in (L1).
+                    if self.link_array_of(lhs) {
+                        self.ev(Ev::Link {
+                            dst: R::container(&dst),
+                            src: src.clone(),
+                            pool: false,
+                            span: rhs.span,
+                        });
+                    }
                     self.ev(Ev::Store {
                         dst,
                         src,
@@ -2858,6 +2880,8 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             {
                 let link_dst = match pool {
                     Some(id) => R::root(Var::Static(id)),
+                    // An element of an array of links: the value holding the array.
+                    None if self.link_array_elem(target) => R::container(&dst),
                     None => dst.clone(),
                 };
                 self.ev(Ev::Link {
@@ -2891,6 +2915,12 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
     fn link_of(&self, t: &Expr) -> Option<Option<u32>> {
         let (c, i) = match &t.kind {
             E::Paren(x) => return self.link_of(x),
+            // An element of an array of links.
+            E::Index { expr, .. } => {
+                return self
+                    .link_array_of(expr)
+                    .then_some(None);
+            }
             E::Member { expr, name } => {
                 let Ty::Class(c, _) = self.ty(expr).unref().clone() else {
                     return None;
@@ -2908,6 +2938,47 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             _ => return None,
         };
         self.an.link_of_field(c, i)
+    }
+
+    /// Whether `t` is a field holding an array of self-relative links, or an insertion
+    /// chain into one: `n.kids`, `n.kids +> a` (REFERENCES §7.2).
+    fn link_array_of(&self, t: &Expr) -> bool {
+        let (c, i) = match &t.kind {
+            E::Paren(x) => return self.link_array_of(x),
+            E::Binary {
+                op: ast::BinOp::InsertEnd | ast::BinOp::InsertFront | ast::BinOp::InsertCursor,
+                lhs,
+                ..
+            } => return self.link_array_of(lhs),
+            E::Member { expr, name } => {
+                let Ty::Class(c, _) = self.ty(expr).unref().clone() else {
+                    return false;
+                };
+                match self.an.prog.classes[c]
+                    .fields
+                    .iter()
+                    .position(|f| f.name == name.name)
+                {
+                    Some(i) => (c, i),
+                    None => return false,
+                }
+            }
+            E::Ident(_) => match self.an.facts.names.get(&key(t.span)) {
+                Some(NameRes::Field(c, i)) => (*c, *i),
+                _ => return false,
+            },
+            _ => return false,
+        };
+        self.an.prog.classes[c].fields[i].elem_link.is_some()
+    }
+
+    /// Whether `t` is an element of an array of links: `n.kids[i]`.
+    fn link_array_elem(&self, t: &Expr) -> bool {
+        match &t.kind {
+            E::Paren(x) => self.link_array_elem(x),
+            E::Index { expr, .. } => self.link_array_of(expr),
+            _ => false,
+        }
     }
 
     /// Evaluates an assignment target, which is written rather than read.

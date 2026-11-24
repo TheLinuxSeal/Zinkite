@@ -53,7 +53,9 @@ Done:
   tuples, for-each over every kind of collection and iterator, and missing
   `return`s;
 - declarations: interfaces and `implements ordered`, overloads that differ only
-  in `&`, hashable keys, and the field rules for classes and roots;
+  in `&`, hashable keys, and the field rules for classes, roots and `packed`
+  classes, which are packed C structs whose fields no reference may point at
+  (DESIGN §6.1);
 - visibility (DESIGN §6.1): private members, package-private ones (nothing
   written), and a default constructor as visible as the fields it sets;
 - definite assignment (DESIGN §6.2): every field assigned on every path through
@@ -92,8 +94,11 @@ Done:
 - rule L (links, `REFERENCES.md` §7): a self-relative or pool link points into its own
   array, checked with the inferred roots through calls and constructors (L1); a value
   with self-relative links is built in its array by `push(new ...)` and never copied
-  (L2); and an offset that doesn't fit its width stops the program (L4). A link field
-  is its 1-, 2- or 4-byte offset.
+  (L2), after its constructor's arguments are evaluated; and an offset that doesn't
+  fit its width stops the program (L4). A link field is its 1-, 2- or 4-byte offset,
+  and an array of links (`T&<i32>[..~k]`) a capped array of them, each from its own
+  slot, which takes `+>`, `[i]`, `for`, `.len` and `clear` so far. A link written
+  anywhere else is an error.
 
 Not yet:
 - rule G's check that nothing grows an array while text is built in it;
@@ -361,10 +366,10 @@ stops the program, as a cast that doesn't fit does (DESIGN §9.1).
 | `src/check.rs` | the type checker |
 | `src/flow.rs` | the state definite assignment tracks: what is assigned on every path, and on some |
 | `src/lifetimes.rs` | roots and lifetimes: rules S and R, function summaries, recursion |
-| `src/codegen.rs` | the C backend |
+| `src/codegen.rs` | the C backend, with the copy of a function's base case that its calls to itself make (DESIGN §14.2) |
 | `src/codegen/` | its parts for lambdas, hash maps, sorting, generics and interfaces, and `versions.rs`, which runs counted loops without their index checks when a test before them shows every index in range (DESIGN §14.2) |
 | `src/cheader.rs` | reading C headers with clang, and caching what it finds |
-| `src/driver.rs` | compiling the C, the cache, and running the result |
+| `src/driver.rs` | compiling the C, with jumps kept off 32-byte boundaries on x86-64 (DESIGN §12.5), the cache, and running the result |
 | `src/stdlib.rs` | the standard library's files, built into `zink`, and which a program needs |
 | `lib/zink/` | the standard library, in Zinkite: `io/`, `cli/` and `lang/` so far |
 | `runtime/zink_rt.h` | the runtime: data stacks, output, failures, checked arithmetic, text, and the choice of a `simd` function's version (DESIGN §12.8) |

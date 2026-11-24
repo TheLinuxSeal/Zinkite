@@ -5,12 +5,10 @@
 // children per node whose payload is mutated in place every frame.
 //
 // As in scene.goose, a node carries its children inline as a capped array of
-// up to four references (`SNode&[..~4]`), so the whole scene is one array of
-// fixed-size records on a data stack, and the update composes straight into
-// each node's world transform through references, with no copy. Goose's child
-// links are 4-byte relative references; Zinkite's code generator doesn't have
-// links yet (DESIGN §5.4), so these are 8-byte references, which an
-// append-only array keeps valid as it grows.
+// up to four 4-byte self-relative links (`SNode&<i32>[..~4]`, DESIGN §5.4), so
+// the whole scene is one array of fixed-size records on a data stack, and the
+// update composes straight into each node's world transform through references,
+// with no copy.
 //
 // Every transform is an axis-aligned 90-degree rotation with an integer
 // translation, so all the float math is exact and every implementation
@@ -46,7 +44,7 @@ class SNode {
     i32 id;
     Xf local;
     Xf world;
-    SNode&[..~4] kids;
+    SNode&<i32>[..~4] kids;
 }
 
 SNode[..>] pool = [];

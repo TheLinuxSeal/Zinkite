@@ -165,6 +165,8 @@ pub enum TypeDeclKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClassDecl {
     pub name: Ident,
+    /// Declared `packed` rather than `class`: laid out with no padding (DESIGN §6.1, §11).
+    pub packed: bool,
     pub type_params: Vec<TypeParam>,
     pub implements: Vec<Type>,
     pub members: Vec<Member>,

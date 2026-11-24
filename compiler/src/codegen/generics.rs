@@ -127,6 +127,8 @@ impl<'p, 'a> Gen<'p, 'a> {
                 Ty::Class(c, _) if prog.classes[*c].kind == ClassKind::Enum => {
                     enum_bytes(prog.classes[*c].constants.len())
                 }
+                // A packed value's alignment is 1, so it goes after every wider field.
+                Ty::Class(c, _) if prog.classes[*c].packed => 1,
                 _ => 16,
             }
         };
@@ -138,6 +140,12 @@ impl<'p, 'a> Gen<'p, 'a> {
             // needn't be defined first.
             if let Some(w) = link(*i) {
                 let _ = write!(body, "{} f_{}; ", prim_c(w), name);
+                continue;
+            }
+            // An array of them is a capped array of offsets, each from its own slot.
+            if let (Some(w), Ty::Array(_, k)) = (c.fields[*i].elem_link, ty) {
+                let ct = self.cty(&Ty::Array(Box::new(Ty::Prim(w)), *k), *span);
+                let _ = write!(body, "{} f_{}; ", ct, name);
                 continue;
             }
             let ct = self.cty(ty, *span);

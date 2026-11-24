@@ -1,7 +1,8 @@
-// The expression trees of interp.zn with tag dispatch: one class with an enum tag
-// and two i32 fields, 12 bytes, in one grow-only array, linked by index, and `eval`
-// is a `switch` on the tag. This is the shape of the C++ tagged-union row. Goose's
-// variable-size variants (5-byte leaves, 9-byte binary nodes) aren't in Zinkite yet.
+// The expression trees of interp.zn with tag dispatch: one `packed` class with an
+// enum tag and two i32 fields, 9 bytes with no padding (DESIGN §6.1), in one
+// grow-only array, linked by index, and `eval` is a `switch` on the tag. This is the
+// shape of the C++ tagged-union row. Goose's nodes are 9 bytes too, but its leaves
+// are 5: its variable-size variants aren't in Zinkite yet.
 
 i64 DEPTH = 20;                          // BENCH_N
 i64 PASSES = 8;
@@ -9,8 +10,8 @@ i64 M = 1000003;                         // Keeps every value in range: no overf
 
 enum Kind { NUM, ADD, MUL, NEG }
 
-// 12 bytes: a leaf's value or a node's children, by index into `pool`.
-class Node {
+// 9 bytes: a leaf's value or a node's children, by index into `pool`.
+packed Node {
     Kind kind;
     i32 a;      // NUM: the value; NEG: the operand; ADD, MUL: the left operand
     i32 b;      // ADD, MUL: the right operand

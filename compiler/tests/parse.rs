@@ -193,6 +193,35 @@ fn root_is_a_keyword_only_before_a_declaration() {
     assert_eq!(stmt("root.left .= x;"), "(.= root.left x)");
 }
 
+/// `packed Node { ... }` declares a class laid out with no padding (DESIGN §6.1), after
+/// the same modifiers as `class`; like `root`, `packed` is a keyword only there.
+#[test]
+fn packed_declares_a_class_and_is_a_keyword_only_there() {
+    let ast = parse_ok(
+        "packed.zn",
+        "public packed Node implements Valued { u8 tag; i32 a; i64 value() { return a; } }\n\
+         class Plain { i32 a; }",
+    );
+    let TopItem::Type(t) = &ast.items[0] else {
+        panic!()
+    };
+    let TypeDeclKind::Class(c) = &t.kind else {
+        panic!("not a class")
+    };
+    assert!(c.packed);
+    assert_eq!(c.name.name, "Node");
+    assert_eq!(c.implements.len(), 1);
+    let TopItem::Type(t) = &ast.items[1] else {
+        panic!()
+    };
+    let TypeDeclKind::Class(c) = &t.kind else {
+        panic!("not a class")
+    };
+    assert!(!c.packed);
+    assert_eq!(stmt("i32 packed = 3;"), "(local i32 packed = 3)");
+    assert_eq!(stmt("packed.left .= x;"), "(.= packed.left x)");
+}
+
 #[test]
 fn directives() {
     let ast = parse_ok(

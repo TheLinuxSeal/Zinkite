@@ -40,8 +40,8 @@ Left out to stay light: inheritance, exceptions, destructors, reflection, dynami
 | Assignment | `=` copies a value; references are written `T&`; `.=` rebinds a reference | Decided | 5.1 |
 | Binding references | `var& x = e` binds a reference; arguments are never marked, and `&x` at a call draws a warning | Decided | 5.1 |
 | Reference safety | Every reference has an inferred root and can't outlive it; removing from an array while a reference into it may still be used is a compile error; follows Goose, with no annotations and no aliasing rules (`REFERENCES.md`) | Decided | 5.2 |
-| Links inside data | `T&` fields, rooted like any reference; relative links `T&<i32>` for compact structures, copied only with their whole array; saving them as bytes is Open | Decided | 5.4 |
-| Classes | Methods in the body, constructors `new(...)`, `mut` methods, `private`; no header, so a class is exactly as large as its fields | Decided | 6.1 |
+| Links inside data | `T&` fields, rooted like any reference; relative links `T&<i32>` for compact structures, as fields or the elements of a capped array field, copied only with their whole array; saving them as bytes is Open | Decided | 5.4 |
+| Classes | Methods in the body, constructors `new(...)`, `mut` methods, `private`; no header, so a class is exactly as large as its fields; `packed Node { ... }` drops the padding too | Decided | 6.1 |
 | Default constructors | A class with no constructor gets one taking each field without an initializer, in declaration order | Decided | 6.2 |
 | Constructors | Every field assigned on every path, checked for the worst case; `this.new(...)` delegates; a failing `return #code;` gives the zero value | Decided | 6.2 |
 | Roots | `root Parser { ... }` is a class whose growable fields each get their own data stack; it can't be copied or stored by value | Decided | 6.6 |
@@ -531,7 +531,9 @@ string w = outer;
 ### 5.4 Links inside data (Decided)
 The notes said "no pointers inside records", but also that `push` returns a reference "so elements can be linked while building". Three kinds of link are allowed, for different jobs (`REFERENCES.md` §7):
 1. **References in fields**: `T&`, `T&?`, interface references and slices, rooted like any other reference. An array can hold references rooted at itself, so they also link elements of one array. Each takes 8 bytes, and a copy still points at the original.
-2. **Self-relative links**: `T&<i32>` (or `<i16>`, `<i8>`) stores a signed byte offset from the field to its target in the same array, as Goose's relative references do. They are compact, and mean the same thing wherever the whole array is copied. Saving them as bytes needs a check that is Open (`REFERENCES.md` §12). A value with these links can't be copied out of its array, only referenced in place: it is built in its slot by `push(new ...)` (`REFERENCES.md` §7.5). The benchmark tree's 12-byte nodes with them ran in 2.1 s and 386 MB, against 3.4 s and 770 MB with 8-byte references (measured on 2026-11-22).
+2. **Self-relative links**: `T&<i32>` (or `<i16>`, `<i8>`) stores a signed byte offset from the field to its target in the same array, as Goose's relative references do. They are compact, and mean the same thing wherever the whole array is copied. Saving them as bytes needs a check that is Open (`REFERENCES.md` §12). A value with these links can't be copied out of its array, only referenced in place: it is built in its slot by `push(new ...)` (`REFERENCES.md` §7.5).
+   - **Measured**: the benchmark tree's 12-byte nodes with them ran in 2.1 s and 386 MB, against 3.4 s and 770 MB with 8-byte references (2026-11-22).
+   - **They can also be the elements of a capped array field**, `T&<i32>[..~4]`, each an offset from its own slot (Decided 2026-11-23). The benchmark scene's nodes hold their children this way, as Goose's do: they shrank from 144 bytes to 120, and the scene ran in 939 ms and 188 MB, against 1045 ms and 225 MB with 8-byte references and Goose's 935 ms and 184 MB.
 3. **Pool links**: `T&<u32 in arr>` stores an offset from the start of `arr`, a static grow-only array, so values holding them can be copied anywhere (Goose's pool-relative references). The built-in `pool<T>` (§3.5) isn't such an array. A link of either kind points only into its own array, which the compiler checks with the roots it infers (`REFERENCES.md` §7.5).
 
 Links and references in fields can point only into arrays whose elements stay in their slots: grow-only and frozen arrays, capped ones included, except a capped ring that grows at both ends (`T[>.>k]`), which can wrap. References in fields may also point into pools (`REFERENCES.md` §7.4). A field may also refer to a whole array, as the library's writers do (`REFERENCES.md` §7.1).
@@ -560,7 +562,11 @@ Item& first = items.push(new Item(1, 0.0));
 first.heavier(2.5);
 ```
 
-- **No header and no hidden fields**: a class is exactly as large as its fields (§11).
+- **No header and no hidden fields**: a class is exactly as large as its fields, plus the padding that aligns them (§11).
+- **`packed`** (Decided 2026-11-24): `packed Node { ... }`, after the same modifiers as `class` (`public packed Node`), declares a class with no padding at all. An enum and two `i32`s take 9 bytes instead of 12.
+  - **Its fields can sit at any address**, so a reference can't point at one: `i32& r = n.a`, passing `n.a` to an `i32&` parameter, returning it as a reference and binding a reference field to it are errors. A reference to the whole value, `Node& n = nodes[i]`, is fine, and so is one to a field that is `packed` itself. Fields are read, written and copied as in any class.
+  - **Its fields** are numbers, `bool`, enums, references, links, slices, functions and other `packed` classes. Arrays and other classes inside one, and type parameters, aren't supported yet.
+  - **It is opt-in**, unlike Goose's structs, which are all packed. In the benchmarks it paid only where a class with tail padding is the bulk of the data: interp's nodes took 17% less time and 24% less memory, and words' open-addressed table 6% less memory. Elsewhere packing every class changed nothing (§15).
 - **Methods live inside the class body.** Fields, constructors, methods and static functions appear in any order. There's no adding methods from outside; a free function can be called as `x.helper()`.
 - **Constructors are named `new`** inside the body. Call sites write `new Item(1, 0.0)`.
 - **`new` means "construct in place at the destination"**, never heap allocation (§3.3). It is only for classes: arrays, primitives and other values come from literals and declarations. Where the target type is known, the class name can be dropped: `items.push(new(1, 0.0))` (Decided).
@@ -1430,7 +1436,7 @@ A generic body can use only what its bounds allow (§10). Seven bounds for the b
 - **Class values have no header.** Fixed-size fields come first, sorted by size (largest first), then by name, so they pack with almost no padding and always sit at fixed offsets. Variable-size fields follow, in declaration order.
 - **Arrays** are `[metadata][elements]`, inline and packed, never a pointer to a separate block. The width of the metadata comes from the cap, or from a varint (§4.6).
 - **A root is the one exception**: its record holds where each growable part lives, on that part's own data stack (§6.6).
-- **Alignment**: a fixed-size value is aligned to its largest field. Variable-size records are packed; reads use unaligned loads, which x86-64 and AArch64 support.
+- **Alignment**: a fixed-size value is aligned to its largest field. Variable-size records and `packed` classes (§6.1) are packed; reads use unaligned loads, which x86-64 and AArch64 support. A `packed` value's alignment is 1, so as a field it is sorted after every wider one.
 - **Data stacks**: each is an address-space reservation (`#data_stack_gb`, 64 GB by default) ending in an unmapped guard page. The compiler assigns stacks statically, and a scope saves and restores the tops of the stacks it uses.
 - **Static data** holds literals, statics, enum constants and interface method tables.
 - **An enum value is its constant's index**, in the narrowest unsigned integer that holds every index: one byte for up to 256 constants, two for up to 65,536, four beyond. A field of an enum type is sorted among the fixed-size fields by that width, so it goes after the wider fields and doesn't make them pad. In a variable-size record, which is packed, a one-byte enum takes one byte.
@@ -1472,7 +1478,12 @@ There is no allocator, no counting and no collector. With dead-code elimination 
 - **A built-in TinyCC for `zink run` is a maybe-later** (§17), moved there from Decided on 2026-11-20. It would make the first run faster and need no installed compiler, but it lacks what the generated C relies on.
 - **Calling convention**: the platform's C ABI. The status rides in a small returned struct, `{value, status}`, which C compilers return in two registers on Linux x86-64 and AArch64. Large results are built in place through a destination pointer (§3.3).
 - **Small functions are emitted `static inline`**: a few straight-line statements and few operations, counted before checks are added. Each checked operation adds a branch and a call to the C, so without the hint the C compiler judges a one-line function too big to inline, and it stays a call in the loop that uses it: spectralnorm's `a(i, j)` ran three times as fast with it (7.4 s against 2.5 s, measured on 2026-11-22).
-- **Debug info** comes from the C compiler's `-g`, with `#line` directives pointing debuggers and messages at the `.zn` source.
+- **Jumps kept off 32-byte boundaries on x86-64** (Decided 2026-11-23). `zink build` passes `-mbranches-within-32B-boundaries` to clang, or `-Wa,-mbranches-within-32B-boundaries` to gcc for its assembler, whichever the compiler takes.
+  - **Why**: on Skylake through Cascade Lake and Comet Lake, Intel's microcode for the JCC erratum keeps the decoded-instruction cache from holding a jump that crosses or ends on a 32-byte boundary. A hot loop that has one decodes every instruction again.
+  - **Measured** on the benchmark machine, a Xeon W-2195: graph's one-pass version ran 12% faster, calc 9%, and fannkuch, sexp and interp 4%. Half of fannkuch's instructions had gone through the slow decoder.
+  - **The cost** is padding: seven benchmarks took 1–2% longer.
+  - **Other CPUs don't need it**, but a binary doesn't know where it will run.
+  - Goose's C is compiled without it, so this part of the gap between the two was a flag, not a design.
 - **A direct machine-code backend** stays possible later, over the same typed IR, if depending on a C compiler ever becomes a problem.
 
 ### 12.6 Calling C (Decided)
@@ -1572,6 +1583,15 @@ Whichever is chosen, the host sets program settings through the API (precedence 
   - **What can't change**: a term is a literal, a `.len`, or a local the loop doesn't write and that no reference anywhere in the program could reach; a static only when the body calls nothing that could write it. An array's length can't change when it's fixed (`T[.k]`), when it's a view the loop doesn't rebind, or when it's a local's own array that only the loop's own code could resize, and doesn't. Anything else, and the loop is generated once, checked.
   - **Only innermost loops**, so a body is generated at most twice; and not a loop that only copies one element to another, which without its checks the C compiler turns into a call to `memmove`, slower on the short copies such loops make.
   - **Why**: levenshtein's inner loop indexes three views. With a check on each access it took 1.9 times as long as Goose's, which proves them away (`checkfree`); with the test before the loop, 1.1 times (`bench/compare`). The C compiler doesn't do this itself, since each check's stop belongs to its own iteration.
+- **A function's base case copied to its calls to itself** (Decided 2026-11-23), as Goose's compiler does (its `optimize_basecase.h`). This applies to a function that calls itself at least twice and whose body starts with its base case: locals of numbers, enums and references, then a test that returns a value computed without calling anything (`if (n < 2) { return n; }`), or a `return switch` some of whose cases call nothing. That start gets a copy, always inlined, which the function's calls to itself call. A call whose test holds computes its result where it is, and only the others make a call, so a tree walk makes half as many calls.
+  - **Only what can be computed twice**: the copy reads and computes, and calls, assigns and allocates nothing. The function computing it again changes nothing a program can see, and an index out of range in it stops the program where it always did, with the same message.
+  - **Not a function that calls itself once**, as a walk down a list does: the copy would save only the last call, and it keeps the C compiler from making the recursion a loop. sexp's walk took 3% longer with it.
+  - **Not a function that can fail, or one that builds its result in its caller's storage.**
+  - **Measured**:
+    - interp's `eval`, a `return switch`, took 19% fewer cycles;
+    - bintrees' `check` took 4% fewer;
+    - fib took 5% fewer with the jump padding above, 2% fewer than Goose's;
+    - calc's `eval` was unchanged.
 
 ### 14.3 Build order (Decided)
 1. **Write the reference rules** as a specification before any compiler code. They decide what is safe, and Goose's author credits this kind of spec work for much of that language's quality. Drafted: `REFERENCES.md`.
@@ -1674,6 +1694,30 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 
 **Not measured yet**: long-running programs that keep adding and removing data, where memory only comes back to the data stack at scope exit (§3.4).
 
+**What would close the rest of the gap to Goose** (measured on 2026-11-23, `bench/compare`). The jump padding (§12.5), the base-case copy (§14.2), arrays of links (§5.4) and `packed` classes (§6.1) are done. Two gaps are left whose causes need a decision (both Open, §17).
+
+**`packed` classes** (2026-11-24) were the third.
+- **Why**: Goose packs every struct (its spec §3.2), so a class of a one-byte enum and two `i32`s is 9 bytes there and 12 here, where §11 aligns a fixed-size value to its largest field.
+- **Every class packed**: in the generated C of all 36 Zinkite benchmarks, packing every class and every capped array's header changed nothing measurable except in four, whose outputs stayed the same:
+  - interp's nodes, 12 to 9 bytes: 15% fewer cycles;
+  - words' open-addressed slots, 24 to 20 bytes: 6% less memory;
+  - scene's nodes, 120 to 117 bytes: Goose's 184 MB instead of 188;
+  - calc's expressions, 12 to 10 bytes: no change.
+- **The choice**: opt-in, with no references into the fields, which then never point at an unaligned address.
+- **With it**, interp's port took 139 ms and 29 MB against 168 ms and 38 MB, and Goose's 127 ms and 23 MB; its leaves are 5 bytes there.
+
+1. **Variants with payloads** (§6.3, §17).
+   - **The gap**: records' events are one variable-size class with every variant's fields, so a Tick costs 11 bytes where Goose's variable-mode enum costs 1. records took 734 ms and 205 MB against Goose's 594 ms and 143 MB, 1.24×, the largest gap left.
+   - **What it would also do**: give interp Goose's layout, 5-byte leaves and 9-byte binary nodes.
+   - **To decide**:
+     - how variants are declared, built and matched in `switch`;
+     - whether each is padded to the largest or stored at its own size (Goose has both);
+     - for the variable-size form, that an array of them is walked rather than indexed, as arrays of variable-size records are (§3.2), with links into it.
+2. **A fast hash for text**, `hash.xxh3` (`STDLIB.md` §8.3), which waits for a reference implementation to test against.
+   - **The gap**: words takes 1.07× Goose's time, and about 5% of it is the hash. The port hashes with FNV-1a a byte at a time, where Goose's port calls its library's hash, which reads 4 or 8 bytes at a time.
+   - **What exists**: the runtime's hash for `hashmap` keys (`zr_hash_bytes`) reads 8 bytes at a time, but a program can't call it.
+   - **Not this**: the built-in `hashmap` row's 1.6× comes from its layout. A second map type with Goose's direct layout is already Open (§17).
+
 ---
 
 ## 16. Prior art
@@ -1721,7 +1765,7 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 **Classes**
 - **Tuples as values**: tuple variables, fields and array elements, and `t.0` (§9.5).
 - Default and static methods in interfaces; variants stored inline (§6.3).
-- Enums with fields and methods; pattern matching in `switch`.
+- Enums with fields and methods; pattern matching in `switch`. Variants with payloads would close the largest gap left to Goose, records' 1.24× (§15).
 - **Ordering by fields**: whether a class that says `implements ordered` without writing `compareTo` gets field-by-field order, like Rust's `derive(PartialOrd)` (§10.1).
 
 **Errors**
@@ -1737,7 +1781,7 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 - **A built-in TinyCC for `zink run`** (maybe later; Decided until 2026-11-20, §12.5). It would cut the first run after an edit from about a quarter of a second to tens of milliseconds, and let `zink run` work with no C compiler installed. Against it: it has no `__int128` for `i128` and `u128` (§9.1), and its last release (0.9.27) lacks the `__builtin_add_overflow` family that every overflow check uses, so both would need slower fallbacks; it doesn't optimize; it's LGPL-2.1, so `zink` would link it as a shared library to keep its own code under Apache-2.0; and generated programs would be tested against another compiler. Caching a compiled runtime, so a first run compiles only the program's own code, is cheaper to try first.
 - **Embedding model** (§13): TinyCC inside the host, precompiled `.so` plugins, a bytecode VM, or none; the host C ABI's shape.
 - Smaller syntax items not in the grammar yet (map literals, `?.`, `assert`, `#elif` and others): `GRAMMAR.md` §8.
-- **Standard library**: the open questions in `STDLIB.md` §11.
+- **Standard library**: the open questions in `STDLIB.md` §11. `hash.xxh3` is about 5% of words' time against Goose (§15).
 
 **Graphics** (needed by the `vendor.*` packages, `STDLIB.md` §10.6)
 - **Calling C** is decided (§12.6). Still open: passing function pointers (callbacks) and structs by value, C strings C returns, and C's global variables.

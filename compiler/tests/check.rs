@@ -112,6 +112,63 @@ fn self_relative_links() {
     rejects("class N { i32 v; N&<u32 in ints>? next; }\ni32[..>] ints = [];\nvoid main() {}\n", "a pool link to N must be measured from an array of N, and `ints` holds i32");
 }
 
+/// A `packed` class has no padding, so its fields may sit at any address (DESIGN §6.1):
+/// a reference can point at the whole value, or at a field that is `packed` itself, but
+/// not at any other field, by a local, `var&`, an argument, a result, or rebinding a
+/// reference field. Its fields are numbers, enums, references, links, slices,
+/// functions and `packed` values, and it has no type parameters.
+#[test]
+fn packed_classes() {
+    let defs = "packed Node {\n    u8 tag;\n    i32 a;\n    mut void m() { i32 c = a; a += 1; }\n}\npacked Outer { Node node; Node&<i32>? link; string label; Node&? ref; func(i32 => i32)? f; }\nclass Holder { i32&? r; }\nNode[..>] nodes = [];\nOuter[..>] outers = [];\nvoid bump(i32& x) { x += 10; }\n";
+    let with = |body: &str| format!("{}void main() {{ Node& n = nodes.push(new Node(1, 2)); {} }}\n", defs, body);
+    ok(&with("i32 c = n.a; n.a += 1; bump(c); Node& same = nodes[0]; Outer& o = outers.push(new Outer(n, null, \"x\", n, null)); Node& inner = o.node; string l = o.label; i32 packed = 2;"));
+    let referred = "`a` is a field of `Node`, which is `packed`, so it may sit at any address and a reference can't point at it";
+    rejects(&with("i32& r = n.a;"), referred);
+    rejects(&with("var& r = nodes[0].a;"), referred);
+    rejects(&with("bump(n.a);"), referred);
+    rejects(&with("Holder h = new Holder(null); h.r .= n.a;"), referred);
+    rejects(&format!("{}i32& pick(Node& n) {{ return n.a; }}\nvoid main() {{}}\n", defs), referred);
+    rejects("packed N { u8 tag; i32 a; mut void m() { i32& r = a; r += 1; } }\nvoid main() {}\n", "`a` is a field of `N`, which is `packed`");
+    let field = |decl: &str| format!("class Plain {{ i32 v; }}\npacked P {{ {} }}\nvoid main() {{}}\n", decl);
+    let kinds = "`P` is `packed`, so a field of it is a number, `bool`, an enum, a reference, a link, a slice, a function or another `packed` type";
+    rejects(&field("i32[..~4] xs;"), kinds);
+    rejects(&field("i32[.4] xs;"), kinds);
+    rejects(&field("Plain p;"), kinds);
+    rejects(&field("u8[.*] sku;"), kinds);
+    rejects("packed P<T> { T x; }\nvoid main() {}\n", "`P` is `packed`, and a `packed` type can't have type parameters yet");
+}
+
+/// An array of self-relative links is a capped array that grows at its end, in a field
+/// of an instance; a value holding one is never copied (L2), like one holding a link;
+/// and a link written anywhere else is an error, where it was taken for a reference.
+#[test]
+fn arrays_of_links() {
+    let node = "class Node { i32 key; Node&<i32>[..~4] kids; Node&<i32>?[..~2] maybe; }\n";
+    let with = |main: &str| format!("{}void main() {{ Node[..>] tree = []; Node& root = tree.push(new Node(5, [], [])); {} }}\n", node, main);
+    ok(&with("root.kids +> tree.push(new Node(3, [], [])); for (Node& k : root.kids) { } Node& first = root.kids[0]; i64 n = root.kids.len;"));
+    rejects(&with("Node copy = tree[0];"), "`Node` holds self-relative links, so it can't be kept in a local by value");
+    rejects(&with("tree.reverse();"), "`reverse` moves or copies elements");
+    let kind = "an array of links is a capped array that grows at its end, `T&<i32>[..~k]`";
+    rejects("class N { N&<i32>[..>] all; }\nvoid main() {}\n", kind);
+    rejects("class N { N&<i32>[>.~4] ring; }\nvoid main() {}\n", kind);
+    rejects("class N { N&<i32>[.4] fixed; }\nvoid main() {}\n", kind);
+    rejects(
+        "class N { i32 v; static N&<i32>[..~4] top; }\nvoid main() {}\n",
+        "an array of links is a field of a value that is in an array",
+    );
+    rejects(
+        "interface Shape { f64 area(); }\nclass Bad { Shape&<i32>[..~2] s; }\nvoid main() {}\n",
+        "a link can't refer to an interface",
+    );
+    let elsewhere = "a link is stored only in a field, `T&<i32>` or `T&<u32 in arr>`, or as the elements of a capped array field, `T&<i32>[..~k]`";
+    rejects(&with("Node&<i32> r = root;"), elsewhere);
+    rejects(&with("Node&<i32>[..>] rs = [];"), elsewhere);
+    rejects(&format!("{}void f(Node&<i32> p) {{}}\nvoid main() {{}}\n", node), elsewhere);
+    rejects(&format!("{}Node&<i32>? g() {{ return null; }}\nvoid main() {{}}\n", node), elsewhere);
+    rejects("class N { N&<i32>[..~4][..~2] nested; }\nvoid main() {}\n", elsewhere);
+    rejects("class N { i32 v; N&<u32 in ns>[..~4] pooled; }\nN[..>] ns = [];\nvoid main() {}\n", elsewhere);
+}
+
 #[test]
 fn example_programs_check() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples");

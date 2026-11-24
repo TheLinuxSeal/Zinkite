@@ -216,7 +216,7 @@ BENCHMARKS = [
         what='Build a scene graph of the given depth, then animate it and recompute world transforms for 16 frames.',
         param='depth',
         sizes=[12, 14, 16],
-        zinkite=[dict(label='zinkite references in capped child arrays', file='scene.zn')],
+        zinkite=[dict(label='zinkite links in capped child arrays', file='scene.zn')],
         goose=[
             dict(label='goose pool + inline child refs', file='scene.goose'),
         ],

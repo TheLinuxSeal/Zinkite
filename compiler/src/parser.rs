@@ -698,7 +698,18 @@ impl Parser {
     }
 
     fn is_root_decl(&self) -> bool {
-        matches!(self.tok(), Tok::Ident(n) if n == "root")
+        self.is_contextual_decl("root")
+    }
+
+    /// `packed Node { ... }`: a class laid out with no padding (DESIGN §6.1). `packed` is
+    /// a keyword only there, as `root` is, so a variable may still be named `packed`.
+    fn is_packed_decl(&self) -> bool {
+        self.is_contextual_decl("packed")
+    }
+
+    /// A type declaration that starts with the contextual keyword `word`.
+    fn is_contextual_decl(&self, word: &str) -> bool {
+        matches!(self.tok(), Tok::Ident(n) if n == word)
             && matches!(self.tok_at(1), Tok::Ident(_))
             && matches!(
                 self.tok_at(2),
@@ -719,6 +730,7 @@ impl Parser {
         let mods = self.modifiers();
         if matches!(self.tok(), Tok::Kw(Kw::Class | Kw::Interface | Kw::Enum))
             || self.is_root_decl()
+            || self.is_packed_decl()
         {
             return Ok(TopItem::Type(self.type_decl(mods, start)?));
         }
@@ -779,7 +791,8 @@ impl Parser {
                 TypeDeclKind::Enum(EnumDecl { name, constants })
             }
             _ => {
-                let is_root = keyword.tok != Tok::Kw(Kw::Class);
+                let is_root = matches!(&keyword.tok, Tok::Ident(n) if n == "root");
+                let packed = matches!(&keyword.tok, Tok::Ident(n) if n == "packed");
                 let name = self.ident(if is_root {
                     "a root name"
                 } else {
@@ -807,6 +820,7 @@ impl Parser {
                 let members = self.class_body()?;
                 let decl = ClassDecl {
                     name,
+                    packed,
                     type_params,
                     implements,
                     members,
@@ -891,6 +905,7 @@ impl Parser {
         let modifiers = self.modifiers();
         if matches!(self.tok(), Tok::Kw(Kw::Class | Kw::Interface | Kw::Enum))
             || self.is_root_decl()
+            || self.is_packed_decl()
         {
             let span = self.span();
             self.error(span, "nested type declarations are undecided (GRAMMAR §8)");

@@ -255,6 +255,270 @@ void main(string[.] args) {
     }
 }
 
+/// A function that calls itself at least twice, and starts with a base case, has its
+/// calls to itself test that case first and compute its result in place (DESIGN
+/// §14.2): a test and a return, locals before tests, a `return switch` whose cases
+/// that call nothing are the base case, a `void` function, a method, and a generic
+/// function in each instantiation. A function that calls itself once, `sumTo`, is left
+/// alone. An index out of range in the copied part fails where it always did.
+#[test]
+fn calls_to_itself_copy_a_functions_base_case() {
+    let text = r##"enum Kind { NUM, ADD, NEG }
+
+class Node {
+    Kind kind;
+    i32 a;
+    i32 b;
+}
+
+Node[..>] pool = [];
+i64 visits = 0;
+
+i32 fib(i32 n) {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+i64 eval(i32 i) {
+    Node& n = pool[i];
+    return switch (n.kind) {
+        case NUM => n.a;
+        case ADD => eval(n.a) + eval(n.b);
+        case NEG => 0 - eval(n.a);
+    };
+}
+
+i64 depth(i32 i) {
+    Node& n = pool[i];
+    if (n.kind == Kind.NUM) { return 1; }
+    i32 l = n.a;
+    if (n.kind == Kind.NEG) { return 1 + depth(l); }
+    return 1 + max(depth(l), depth(n.b));
+}
+
+void visit(i64 d) {
+    if (d == 0) { return; }
+    visits++;
+    visit(d - 1);
+    visit(d - 1);
+}
+
+class Stairs {
+    i64 calls;
+    mut i64 ways(i64 n) {
+        if (n < 3) { return n == 0 ? 1 : n; }
+        calls++;
+        return ways(n - 1) + ways(n - 2) + ways(n - 3);
+    }
+}
+
+i64 sumTo(i64 n) {
+    if (n == 0) { return 0; }
+    return n + sumTo(n - 1);
+}
+
+<T implements int> T fibT(T n) {
+    if (n < 2) { return n; }
+    return fibT(n - 1) + fibT(n - 2);
+}
+
+void main(string[.] args) {
+    pool +> new Node(Kind.NUM, 5, 0);
+    pool +> new Node(Kind.NUM, 7, 0);
+    pool +> new Node(Kind.ADD, 0, 1);
+    pool +> new Node(Kind.NEG, 2, 0);
+    pool +> new Node(Kind.ADD, 3, 0);
+    if (args.len > 0) {
+        pool +> new Node(Kind.ADD, 0, 99);
+        println("${eval(5)}");
+    }
+    visit(10);
+    Stairs s = new Stairs(0);
+    println("${fib(20)} ${eval(4)} ${depth(4)} ${visits} ${s.ways(10)} ${s.calls} ${sumTo(100)} ${fibT((i64) 30)} ${fibT((u8) 13)}");
+}
+"##;
+    let c = c_of(text);
+    let copies: Vec<&str> = c
+        .lines()
+        .filter(|l| l.contains("_base(") && l.ends_with(" {"))
+        .collect();
+    // fib, eval, depth, visit, ways, and fibT for i64 and u8.
+    assert_eq!(copies.len(), 7, "{:#?}", copies);
+    assert!(!c.contains("sumTo_base"));
+    prints(text, "6765 -7 4 1023 274 96 5050 832040 233\n");
+    let r = run(text, &["bad"]);
+    assert_eq!(r.stdout, "");
+    assert!(
+        r.stderr.contains("prog.zn:18: index 99 is out of range for length 6"),
+        "{}",
+        r.stderr
+    );
+    assert_eq!(r.code, 1);
+}
+
+/// An array of self-relative links holds offsets, each from its own slot (REFERENCES
+/// §7.2): appended to by `+>` and its chains, read by index and by `for`, an element
+/// rebound or written through, nullable ones, `clear`, and a constructor given
+/// references. A full array fails as any capped one does, and a 1-byte link whose
+/// target is too far away stops the program.
+#[test]
+fn arrays_of_links_hold_offsets() {
+    let text = r##"class N {
+    i32 v;
+    N&<i32>[..~3] kids;
+    N&<i32>?[..~2] opt;
+    N&<i8>[..~2] near;
+}
+
+N[..>] pool = [];
+
+i64 sum(N& n) {
+    i64 t = n.v;
+    for (N& k : n.kids) { t += sum(k); }
+    return t;
+}
+
+void main(string[.] args) {
+    N& root = pool.push(new N(1, [], [], []));
+    N& a = pool.push(new N(2, [], [], []));
+    N& b = pool.push(new N(3, [], [], []));
+    root.kids +> a +> b;
+    a.kids +> b;
+    root.opt +> null;
+    root.opt +> a;
+    println("${root.kids.len} ${sum(root)} ${root.kids[1].v} ${a.kids[0].v}");
+    root.kids[0] .= b;
+    root.kids[1].v = 30;
+    println("${sum(root)} ${b.v}");
+    i64 nulls = 0;
+    for (N&? o : root.opt) {
+        if (o == null) { nulls++; } else { print("${o.v} "); }
+    }
+    println("${nulls}");
+    root.kids.clear();
+    println("${root.kids.len}");
+    N& c = pool.push(new N(4, [a, b], [], []));
+    println("${sum(c)}");
+    if (args.len > 0 && args[0] == "full") {
+        root.kids +> a +> a +> a +> a;
+    }
+    if (args.len > 0 && args[0] == "far") {
+        for (i64 i = 0; i < 10; i++) { pool +> new N(0, [], [], []); }
+        N& z = pool[pool.len - 1];
+        root.near +> z;
+    }
+}
+"##;
+    let c = c_of(text);
+    assert!(c.contains("int32_t e[3];"), "the kids are 4-byte offsets");
+    assert!(c.contains("int8_t e[2];"), "the near ones are 1-byte offsets");
+    let out = "2 9 3 3\n61 30\n2 1\n0\n66\n";
+    prints(text, out);
+    let exe = build(text);
+    for (mode, err) in [
+        ("full", "prog.zn:38: `+>` failed with FULL, and nothing read its status"),
+        ("far", "prog.zn:43: this link's target is too far away for its 1-byte offset"),
+    ] {
+        let r = exec(&exe, &[mode]);
+        assert_eq!(r.stdout, out, "{}", mode);
+        assert!(r.stderr.contains(err), "{}: {}", mode, r.stderr);
+        assert_eq!(r.code, 1, "{}", mode);
+    }
+}
+
+/// A `packed` class is laid out with no padding (DESIGN §6.1): an enum and two `i32`s
+/// take 9 bytes, not 12. It has methods, implements interfaces, is referred to whole,
+/// holds other `packed` values, slices and references, and its fields are read,
+/// written and copied as any class's are.
+#[test]
+fn packed_classes_have_no_padding() {
+    let text = r##"enum Kind { NUM, ADD, NEG }
+
+interface Valued { i64 value(); }
+
+packed Node implements Valued {
+    Kind kind;
+    i32 a;
+    i32 b;
+    i64 value() { return a + b; }
+    mut void bump() { a += 1; }
+}
+
+public packed Tagged {
+    u8 tag;
+    Node node;
+    string label;
+    Tagged&? next;
+}
+
+class Plain { u8 tag; i32 v; }
+
+Node[..>] nodes = [];
+Tagged[..>] tags = [];
+
+void bumpRef(i32& x) { x += 10; }
+
+void main() {
+    i32 packed = 3;
+    for (i32 i = 0; i < 5; i++) { nodes +> new Node(Kind.ADD, i, i * packed); }
+    nodes[1].a += 100;
+    nodes[2].bump();
+    Node& n = nodes[3];
+    n.b = -1;
+    i64 t = 0;
+    for (Node& x : nodes) { t += x.value(); }
+    Valued& v = nodes[4];
+    Tagged& first = tags.push(new Tagged(1, nodes[0], "first", null));
+    tags +> new Tagged(2, nodes[1], "second", first);
+    Tagged&? nx = tags[1].next;
+    Node& inner = tags[1].node;
+    i32 copied = nodes[0].a;
+    bumpRef(copied);
+    Plain p = new Plain(1, 2);
+    if (nx != null) {
+        println("${t} ${v.value()} ${nx.label} ${tags[1].label.len} ${inner.a} ${copied} ${p.v}");
+    }
+}
+"##;
+    let c = c_of(text);
+    let line = |name: &str| {
+        c.lines()
+            .find(|l| l.starts_with("struct ") && l.contains(&format!("_{} {{", name)))
+            .unwrap_or_else(|| panic!("no struct for {}", name))
+            .to_string()
+    };
+    assert!(line("Node").starts_with("struct __attribute__((packed)) "), "{}", line("Node"));
+    assert!(line("Tagged").starts_with("struct __attribute__((packed)) "), "{}", line("Tagged"));
+    assert!(!line("Plain").contains("packed"), "{}", line("Plain"));
+    // A packed value's alignment is 1, so it goes after the pointer.
+    assert!(line("Tagged").contains("f_next; zc"), "{}", line("Tagged"));
+    prints(text, "131 16 first 6 101 10 2\n");
+}
+
+/// A value with links is built in its slot, but its constructor's arguments are
+/// evaluated first, in order, as for any call: one that reads the array's length sees
+/// it before the value is added, and one that pushes into the array takes the slot
+/// before it. The slot used to be taken first, so `ls.len` read one more.
+#[test]
+fn a_value_with_links_is_built_after_its_arguments() {
+    prints(
+        r##"class L {
+    i64 n;
+    L&<i32>? next;
+}
+L[..>] ls = [];
+void main() {
+    L& a = ls.push(new L(ls.len, null));
+    ls +> new L(ls.len, a);
+    ls +> new L(ls.len, ls.push(new L(100, null)));
+    L&? nx = ls[3].next;
+    if (nx != null) { println("${ls[0].n} ${ls[1].n} ${ls[2].n} ${ls[3].n} ${nx.n}"); }
+}
+"##,
+        "0 1 100 2 100\n",
+    );
+}
+
 /// A `simd` function is compiled for AVX2 and AVX-512 too, and runs the version for the
 /// widest vector unit the CPU has (DESIGN §12.8). Every version gives the baseline's
 /// results: a multiply and an add round twice, where one FMA would round once, so

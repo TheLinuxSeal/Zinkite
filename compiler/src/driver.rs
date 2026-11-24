@@ -41,7 +41,7 @@ pub fn c_compiler() -> Result<String, String> {
 }
 
 /// The flags for an optimized build, or a quick one for `zink run`.
-fn flags(optimize: bool) -> Vec<&'static str> {
+fn flags(cc: &str, optimize: bool) -> Vec<&'static str> {
     // No contraction: a multiply and an add round twice wherever the code runs, in a
     // `simd` function's versions with FMA too (DESIGN §12.8).
     let mut f = vec![
@@ -52,7 +52,45 @@ fn flags(optimize: bool) -> Vec<&'static str> {
         "-ffp-contract=off",
     ];
     f.push(if optimize { "-O2" } else { "-O0" });
+    if optimize && let Some(j) = jcc_flag(cc) {
+        f.push(j);
+    }
     f
+}
+
+/// How this C compiler keeps jumps off 32-byte boundaries on x86-64, if it can (DESIGN
+/// §12.5): clang takes the flag itself, gcc passes it to the assembler (binutils 2.34
+/// and later). Intel's microcode for the JCC erratum, on Skylake through Cascade Lake
+/// and Comet Lake, stops the decoded-instruction cache from holding a jump that
+/// crosses or ends on such a boundary, so a hot loop that has one decodes every
+/// instruction again. Tested once per run of `zink`, by compiling an empty file with
+/// it.
+fn jcc_flag(cc: &str) -> Option<&'static str> {
+    if !cfg!(target_arch = "x86_64") {
+        return None;
+    }
+    static FLAG: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        [
+            "-mbranches-within-32B-boundaries",
+            "-Wa,-mbranches-within-32B-boundaries",
+        ]
+        .into_iter()
+        .find(|flag| {
+            Command::new(cc)
+                .args(["-x", "c", "-c", "-o", "/dev/null", "-", flag])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .and_then(|mut child| {
+                    // An empty file: closing stdin is the whole input.
+                    drop(child.stdin.take());
+                    child.wait()
+                })
+                .is_ok_and(|s| s.success())
+        })
+    })
 }
 
 /// Compiles C source to an executable at `out`.
@@ -64,7 +102,7 @@ pub fn compile(c: &str, out: &Path, optimize: bool) -> Result<(), String> {
     let src = dir.join(format!(".zink-{}-{}.c", std::process::id(), n));
     std::fs::write(&src, c).map_err(|e| format!("can't write {}: {}", src.display(), e))?;
     let result = Command::new(&cc)
-        .args(flags(optimize))
+        .args(flags(&cc, optimize))
         .arg("-o")
         .arg(out)
         .arg(&src)
@@ -126,7 +164,7 @@ pub fn cached(c: &str, optimize: bool) -> Result<PathBuf, String> {
     let cc = c_compiler()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     c.hash(&mut h);
-    flags(optimize).hash(&mut h);
+    flags(&cc, optimize).hash(&mut h);
     cc.hash(&mut h);
     env!("CARGO_PKG_VERSION").hash(&mut h);
     let dir = cache_dir()?;

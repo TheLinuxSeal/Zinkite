@@ -33,6 +33,10 @@ pub struct FieldInfo<'a> {
     /// its offset, and the static array it is measured from, by name, which the checker
     /// resolves. Its type is the reference it holds, as for a self-relative link.
     pub pool_link: Option<(crate::token::Prim, Vec<String>, Span)>,
+    /// An array of self-relative links, `T&<i32>[..~k]` or `T&<i32>?[..~k]`
+    /// (REFERENCES §7.2): the width of the offset each element stores, measured from
+    /// that element. Its type is the array of the references they hold.
+    pub elem_link: Option<crate::token::Prim>,
     pub is_static: bool,
     pub is_private: bool,
     /// Neither: package-private (DESIGN §6.1).
@@ -77,6 +81,9 @@ pub struct ClassInfo<'a> {
     pub implements: Vec<Ty>,
     /// `implements ordered`
     pub ordered: bool,
+    /// Declared `packed`: its value has no padding, so its fields may sit at any address
+    /// (DESIGN §6.1, §11).
+    pub packed: bool,
     pub fields: Vec<FieldInfo<'a>>,
     pub methods: Vec<MethodInfo<'a>>,
     pub ctors: Vec<CtorInfo<'a>>,
@@ -323,6 +330,7 @@ impl<'a> Program<'a> {
             for item in items {
                 match item {
                     TopItem::Type(t) => {
+                        let packed = matches!(&t.kind, TypeDeclKind::Class(c) if c.packed);
                         let (name, kind, span, tps) = match &t.kind {
                             TypeDeclKind::Class(c) => {
                                 (&c.name, ClassKind::Class, t.span, &c.type_params[..])
@@ -374,6 +382,7 @@ impl<'a> Program<'a> {
                             type_params,
                             implements: Vec::new(),
                             ordered: false,
+                            packed,
                             fields: Vec::new(),
                             methods: Vec::new(),
                             ctors: Vec::new(),
@@ -392,6 +401,7 @@ impl<'a> Program<'a> {
                                 type_params: Vec::new(),
                                 implements: Vec::new(),
                                 ordered: false,
+                                packed: false,
                                 fields: Vec::new(),
                                 methods: Vec::new(),
                                 ctors: Vec::new(),
@@ -632,8 +642,9 @@ impl<'a> Program<'a> {
     fn add_field(&mut self, id: ClassId, f: &'a ast::FieldDecl, script: bool) {
         let file = self.classes[id].file;
         let tps = self.classes[id].type_params.clone();
+        // A link is written only in a field's type, so the type is resolved without it.
         let ty = self.resolve(
-            &f.ty,
+            &without_links(&f.ty),
             &Scope {
                 file,
                 tparams: &tps,
@@ -670,6 +681,7 @@ impl<'a> Program<'a> {
                 ty: ty.clone(),
                 link: self_link(&f.ty),
                 pool_link: pool_link(&f.ty),
+                elem_link: elem_link(&f.ty),
                 is_static,
                 is_private,
                 is_public,
@@ -913,7 +925,10 @@ impl<'a> Program<'a> {
                 Ty::Array(Box::new(e), kind)
             }
             K::Slice(e) => Ty::Slice(Box::new(self.resolve_quiet(e, scope, diags))),
-            K::Ref { inner, .. } => {
+            K::Ref { inner, link } => {
+                if link.is_some() {
+                    diags.push(Diagnostic::error(t.span, "a link is stored only in a field, `T&<i32>` or `T&<u32 in arr>`, or as the elements of a capped array field, `T&<i32>[..~k]`; anywhere else a reference is `T&` (REFERENCES §7.5)"));
+                }
                 let i = if let K::Named { .. } = &inner.kind {
                     self.resolve_named(inner, scope, diags, true)
                 } else {
@@ -1109,7 +1124,9 @@ impl<'a> Program<'a> {
             .map(|(p, a)| (p.name.clone(), a.clone()))
             .collect();
         c.fields.iter().filter(|f| !f.is_static).any(|f| {
-            f.link.is_some() || self.link_bearing_in(&f.ty.subst(&map), depth + 1)
+            f.link.is_some()
+                || f.elem_link.is_some()
+                || self.link_bearing_in(&f.ty.subst(&map), depth + 1)
         })
     }
 
@@ -1232,6 +1249,57 @@ fn self_link(t: &ast::Type) -> Option<crate::token::Prim> {
         ast::TypeKind::Nullable(inner) => self_link(inner),
         _ => None,
     }
+}
+
+/// The width of the offsets an array of self-relative links stores, from a field's
+/// declared type: `T&<i32>[..~k]`. Which arrays can hold them is the checker's to say.
+fn elem_link(t: &ast::Type) -> Option<crate::token::Prim> {
+    match &t.kind {
+        ast::TypeKind::Array { elem, .. } => self_link(elem),
+        _ => None,
+    }
+}
+
+/// A field's declared type without the links it may be written with: a link field,
+/// `T&<i32>`, `T&<u32 in arr>` and their nullable forms, and the elements of an array of
+/// self-relative links. What a link holds is a reference, and anywhere else a link is
+/// an error (`resolve_quiet`).
+fn without_links(t: &ast::Type) -> std::borrow::Cow<'_, ast::Type> {
+    use std::borrow::Cow;
+    fn bare(t: &ast::Type, pools: bool) -> Option<ast::Type> {
+        match &t.kind {
+            ast::TypeKind::Ref {
+                inner,
+                link: Some(l),
+            } if pools || l.pool.is_none() => Some(ast::Type {
+                kind: ast::TypeKind::Ref {
+                    inner: inner.clone(),
+                    link: None,
+                },
+                span: t.span,
+            }),
+            ast::TypeKind::Nullable(inner) => bare(inner, pools).map(|i| ast::Type {
+                kind: ast::TypeKind::Nullable(Box::new(i)),
+                span: t.span,
+            }),
+            _ => None,
+        }
+    }
+    if let Some(b) = bare(t, true) {
+        return Cow::Owned(b);
+    }
+    if let ast::TypeKind::Array { elem, slots } = &t.kind
+        && let Some(e) = bare(elem, false)
+    {
+        return Cow::Owned(ast::Type {
+            kind: ast::TypeKind::Array {
+                elem: Box::new(e),
+                slots: slots.clone(),
+            },
+            span: t.span,
+        });
+    }
+    Cow::Borrowed(t)
 }
 
 /// A pool link field's width and array, from its declared type: `T&<u32 in arr>`.
