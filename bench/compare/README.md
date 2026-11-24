@@ -78,10 +78,10 @@ export GOOSE=$PWD/build/goose
 - **mandelbrot** and **spectralnorm** are the plain row-by-row loops in all four
   languages, not the Benchmarks Game's vectorized versions.
 
-## What the latest run found (2026-11-22)
+## What the latest run found (2026-11-23)
 
 Geometric means over the 26 benchmarks, at the large size, of each language's fastest
-implementation's time over Zinkite's (above 1 means Zinkite is faster), over five runs
+implementation's time over Zinkite's (above 1 means Zinkite is faster), over six runs
 on 2026-11-22 and 23:
 1. the first run;
 2. after the compiler changes in the table below;
@@ -90,21 +90,25 @@ on 2026-11-22 and 23:
 4. after `+`, `-` and `*` began to wrap (DESIGN §9.2), every benchmark re-run;
 5. after loop versioning (DESIGN §14.2) and `simd` functions (§12.8), every benchmark
    re-run. Every implementation, in all four languages, took 2 to 5% longer in this run
-   than in the one before, so its ratios are what compare.
+   than in the one before, so its ratios are what compare;
+6. after the runtime fixes that profiling found (the last row of the table below), every
+   benchmark re-run. The other three languages took 3 to 4% less time than in run 5 (the
+   geometric mean of each implementation's time over its time then), so again the ratios
+   are what compare.
 
-| | 1 | 2 | 3 | 4 | 5 |
-|---|---:|---:|---:|---:|---:|
-| Goose | 0.69 | 0.81 | 0.83 | 0.92 | 0.94 |
-| idiomatic C++ | 1.30 | 1.53 | 1.56 | 1.73 | 1.77 |
-| expert C++ (the sixteen with an expert row) | 1.02 | 1.05 | 1.08 | 1.15 | 1.16 |
-| Rust | 0.82 | 0.97 | 0.99 | 1.10 | 1.12 |
-| peak memory: Goose / C++ / Rust | 0.92 / 1.32 / 1.05 | 0.97 / 1.39 / 1.11 | 0.97 / 1.39 / 1.11 | 0.97 / 1.38 / 1.10 | 0.97 / 1.39 / 1.11 |
+| | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---:|---:|---:|---:|---:|---:|
+| Goose | 0.69 | 0.81 | 0.83 | 0.92 | 0.94 | 0.96 |
+| idiomatic C++ | 1.30 | 1.53 | 1.56 | 1.73 | 1.77 | 1.81 |
+| expert C++ (the sixteen with an expert row) | 1.02 | 1.05 | 1.08 | 1.15 | 1.16 | 1.17 |
+| Rust | 0.82 | 0.97 | 0.99 | 1.10 | 1.12 | 1.14 |
+| peak memory: Goose / C++ / Rust | 0.92 / 1.32 / 1.05 | 0.97 / 1.39 / 1.11 | 0.97 / 1.39 / 1.11 | 0.97 / 1.38 / 1.10 | 0.97 / 1.39 / 1.11 | 0.97 / 1.38 / 1.10 |
 
-Zinkite is now faster than Goose on 5 benchmarks (push, lru, calc, nbody, nqueen), within
-10% on 16 more, and slower on 5. Nine of the 16 (sum, tree, particles, bintrees,
-respond, fib, spectralnorm, nsieve, matmul) are within 2%, less than these runs vary;
-tree, respond and nsieve were faster than Goose's in run 4. What changed between the
-runs:
+Zinkite is now faster than Goose on 7 benchmarks (strlist, tree, lru, calc, respond, nbody,
+nqueen), within 10% on 16 more, and slower on 3. Eight of the 16 (sum, particles, blur,
+mandelbrot, spectralnorm, nsieve, matmul, base64) are within 2%, less than these runs
+vary; push was faster than Goose's in run 5, and timed side by side its binaries before
+and after the runtime fixes take the same time. What changed between the runs:
 
 | change | where it showed |
 |---|---|
@@ -118,20 +122,22 @@ runs:
 | run 5: a counted loop runs without its index checks when a test before it shows every index in range | levenshtein 2325 → 1385 ms, against Goose's 1318 |
 | run 5: matmul's kernel is a `simd` function, as Goose's is, so it runs with AVX-512 here | matmul 1253 → 1184 ms, against Goose's 1182 |
 | run 4: `+`, `-` and `*` wrap, and `+#`, `-#` and `*#` check, where `+` checked | fib 1793 → 1170 ms; spectralnorm 2421 → 1318; tree 2071 → 1507; bintrees 586 → 430; sum 1014 → 818; levenshtein 3146 → 2325; fannkuch 2898 → 2086; nqueen 3319 → 2935. One got slower: mandelbrot 1691 → 1745, though its inner loop compiles to the same instructions, because the check on `inside++` had kept clang from setting each pixel's bit without a branch, and with a branch it was faster. matmul's 1173 → 1253 and base64's 300 → 325 are noise: timed side by side, the binaries before and after the change take the same time (1165 and 1163 ms, 301 and 301) |
+| run 6: strings of up to 16 bytes compared and appended inline, where glibc's `memcmp` and `memcpy` cost more than the work; `find` (and `count` and `split`) looks for the needle's first byte with `memchr`, where it called `memcmp` at every byte; the string hash reads a key's last bytes with overlapping loads, where a `memcpy` of variable length made a hashmap of words a third slower; a varint length under 128 read with a load and a test, where a loop read each; base64's decode adds to the byte its range test computed, `(uint8_t)(c - 'a') + 26`, where with `c - 'a' + 26` the loop clang vectorizes took 1.5 times as long | words: open addressing 2570 → 2256 ms, against Goose's 2110, the built-in hashmap 4768 → 3483; base64 314 → 270, against Goose's 264; strlist 543 → 455, against 489; records 866 → 734, against 594 |
 
 The gaps that remain, largest first:
 
 | benchmark | Zinkite / Goose | cause |
 |---|---:|---|
-| interp | 1.6× | not yet explained: building the tree takes 1.8 times as long as Goose's, and the eight evaluations 1.5 times; its nodes are 12 bytes where Goose's are 5 or 9, and each is reached through a checked index |
-| records | 1.4× | no variants with payloads, so every event carries every variant's fields |
-| words | 1.2× | not yet explained for the open-addressed table; the built-in hashmap's row is 2.1× Goose's std dictionary, from its layout: a lookup reads its index, then its entry, then the key, three cache misses where Goose's table makes two, a trade DESIGN §4.14 made knowingly |
-| base64 | 1.1× | not yet explained |
-| fannkuch | 1.1× | its rotation loop keeps its checks, since without them clang makes it a call to `memmove`, slower on such short copies; the rest isn't yet explained |
+| interp | 1.5× | profiled: eval is 95% of its time, and two causes take about a fifth of it each. Its nodes are 12 bytes where Goose's are 5 or 9: packed to 9 in the generated C, 218 → 174 ms. And every node is a call, where Goose evaluates a leaf, half the nodes, at the call site: done by hand in the C, 177 ms. With both, 148 ms, Goose's 147. The checked index costs nothing measurable |
+| records | 1.2× | no variants with payloads, so every event carries every variant's fields: 205 MB to Goose's 143 |
+| fannkuch | 1.1× | its rotation loop keeps its checks, since without them clang makes it a call to `memmove`, slower on such short copies. Of the rest, half is the port: its arrays are `i32` where Goose's are `i64`, and with `i64` it takes 2.01 s where it took 2.11, against Goose's 1.90. The other half is clang laying out `main` differently: the same instructions and branch misses, and 11% more cycles |
 | scene | 1.1× | its children are 8-byte references in an array, since links are only fields |
+| words | 1.1× | the port's hash, byte-at-a-time FNV where Goose's std hash reads 4 or 8 bytes at a time: about 5%, and Zinkite has no fast hash for text yet. The built-in hashmap's row is 1.6× Goose's std dictionary, from its layout: a lookup reads its index, then its entry, then the key, three cache misses where Goose's table makes two, a trade DESIGN §4.14 made knowingly |
 
-Most of what's left would come from variants with payloads (DESIGN §17), and from what
-profiling finds in interp, words, base64 and fannkuch.
+Most of what's left would come from variants with payloads (DESIGN §17), from interp's
+node size and its call for every leaf, and from the hashmap's layout. base64 is within 2%
+of Goose's now; each allocation site has its own data stack, so its buffers in sibling
+scopes don't share pages, 12,000 more page faults than Goose's, about 5% of its time.
 
 Compiler bugs the first ports worked around, all fixed, with the ports changed to use what
 they had worked around before the third run:
