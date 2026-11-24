@@ -5163,6 +5163,135 @@ bo [0, 0, 0] 3
     assert!(r.stderr.contains("the value isn't the 4 elements the array holds"), "{}", r.stderr);
 }
 
+/// The runtime's short compares and copies, its search, its string hash and its varint
+/// lengths, each a faster form of a simple loop: they agree with the simple loop at every
+/// length to 40 and some beyond, at every place a difference can be, for needles of each
+/// length found from each start, for map keys of each length that differ in one byte, for
+/// lengths that take one varint byte and two, and for every byte base64 must reject.
+#[test]
+fn short_compares_copies_and_searches_agree_with_simple_loops() {
+    prints(
+        r##"import zink.encoding.*;
+
+// The simple loops the runtime's faster forms must agree with.
+bool same(string a, string b) {
+    if (a.len != b.len) { return false; }
+    for (i64 i = 0; i < a.len; i++) { if (a[i] != b[i]) { return false; } }
+    return true;
+}
+
+i64 slowFind(string s, string x, i64 from) {
+    for (i64 i = from; i + x.len <= s.len; i++) {
+        if (same(s[i:i + x.len], x)) { return i; }
+    }
+    return -1;
+}
+
+void main() {
+    // Equality at every length to 40, equal and differing at each place.
+    u8[..>] base = [];
+    for (i64 i = 0; i < 300; i++) { base +> (u8) ('a' + i * 7 % 26); }
+    i64 bad = 0;
+    i64 checks = 0;
+    for (i64 n = 0; n <= 300; n = n < 40 ? n + 1 : n + 37) {
+        u8[..>] a = [];
+        a.append(base[0:n]);
+        u8[..>] b = [];
+        b.append(base[0:n]);
+        checks++;
+        if (!(a == b) || a != b) { bad++; }
+        for (i64 k = 0; k < n; k++) {
+            b[k] = (u8) (b[k] + 1);
+            checks++;
+            if (a == b || same(a, b)) { bad++; }
+            b[k] = (u8) (b[k] - 1);
+        }
+        // A copy of each length appended after a prefix lands whole.
+        u8[..>] c = [];
+        c.append("xyz");
+        c.append(a);
+        c.append("!");
+        checks++;
+        if (c.len != n + 4 || !same(c[3:3 + n], a) || c[n + 3] != '!') { bad++; }
+        checks++;
+        if (!a.startsWith(base[0:n / 2]) || !a.endsWith(a[n / 3:n]) || (n > 0 && a.startsWith(c))) { bad++; }
+    }
+    println("equal and copy: ${checks} checks, ${bad} wrong");
+
+    // find, count and split against the simple loop, for needles of each length.
+    string hay = "abcabcabd aaab ab, a,b,,c abcabcabcabd zzz abcabd";
+    bad = 0;
+    checks = 0;
+    for (i64 at = 0; at < hay.len; at++) {
+        for (i64 m = 1; m <= 6 && at + m <= hay.len; m++) {
+            string x = hay[at:at + m];
+            for (i64 from = 0; from <= hay.len; from += 5) {
+                i64 got @missing = hay.find(x, from);
+                if (missing) { got = -1; }
+                checks++;
+                if (got != slowFind(hay, x, from)) { bad++; }
+            }
+        }
+    }
+    i64 n @missing = hay.find("abd!");
+    println("find: ${checks} checks, ${bad} wrong, ${missing} ${hay.count("ab")} ${hay.count("abc")} ${hay.count("a")} ${hay.count("zzzz")}");
+    i64 parts = 0;
+    for (string p : "a,b,,c,".splitBy(",")) { print("[${p}]"); parts++; }
+    for (string p : "x--y----z".splitBy("--")) { print("<${p}>"); }
+    println(" ${parts}");
+
+    // A map with keys of every length to 20, each differing from the others in one byte.
+    u8[.*][..>] keys = [];
+    for (i64 len = 0; len <= 20; len++) {
+        for (i64 k = 0; k <= len; k++) {
+            u8[..>] key = [];
+            key.append(base[0:len]);
+            if (k < len) { key[k] = 'Z'; }
+            keys +> key;
+        }
+    }
+    hashmap<string, i64> m = [];
+    i64 added = 0;
+    for (string key : keys) {
+        m.getOrAdd(key, 0)++;
+        added++;
+    }
+    for (string key : keys) { m.getOrAdd(key, 0)++; }
+    i64 twos = 0;
+    for (var& e : m) { if (e.value == 2) { twos++; } }
+    println("map: ${added} keys, ${m.len} held, ${twos} seen twice");
+
+    // Records whose lengths take one varint byte and two.
+    u8[.*][..>] words = [];
+    for (i64 len = 0; len < 400; len += 9) { words +> base[0:len % 300]; }
+    i64 total = 0;
+    for (string w : words) { total += w.len * 1000 + (w.len > 0 ? w[w.len - 1] : 0); }
+    println("records: ${words.len} ${total}");
+
+    // Every byte outside the alphabet makes decoding fail, in either alphabet.
+    i64 rejected = 0;
+    i64 urlRejected = 0;
+    for (i64 b = 0; b < 256; b++) {
+        u8[..>] text = [];
+        text.append("QUJDRA");
+        text +> (u8) b;
+        text.append("B");
+        u8[..>] out = [];
+        if (@base64.decode(text, out) != 0) { rejected++; }
+        if (@base64.decodeUrl(text, out) != 0) { urlRejected++; }
+    }
+    println("base64: ${rejected} ${urlRejected}");
+}
+"##,
+        "equal and copy: 2280 checks, 0 wrong\n\
+         find: 2790 checks, 0 wrong, 195 11 6 14 0\n\
+         [a][b][][c][]<x><y><><z> 5\n\
+         map: 231 keys, 231 held, 231 seen twice\n\
+         records: 45 5614802\n\
+         base64: 192 192\n",
+    );
+}
+
 /// base64 (STDLIB §8.4) at every length a group loop can end on, through whichever of the
 /// runtime's loops this CPU runs, against Python's base64: and invalid text, which leaves
 /// `out` as it was.

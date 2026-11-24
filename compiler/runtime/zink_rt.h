@@ -54,7 +54,7 @@ static ZR_UNUSED int zr_uv_put(uint8_t *p, uint64_t v) {
     return n;
 }
 
-static ZR_UNUSED int zr_uv_get(const uint8_t *p, uint64_t *v) {
+static __attribute__((noinline)) int zr_uv_get_long(const uint8_t *p, uint64_t *v) {
     uint64_t r = 0;
     int n = 0, sh = 0;
     uint8_t b;
@@ -63,11 +63,70 @@ static ZR_UNUSED int zr_uv_get(const uint8_t *p, uint64_t *v) {
     return n;
 }
 
+/* Most lengths are under 128, one byte: that case is a load and a test where the length is
+ * read, as when stepping over each record of an array, and the rest is a call. */
+static ZR_UNUSED inline int zr_uv_get(const uint8_t *p, uint64_t *v) {
+    if (!(p[0] & 0x80)) { *v = p[0]; return 1; }
+    return zr_uv_get_long(p, v);
+}
+
 /* The bytes of c variable-size values starting at e, each measured by sz. */
 static ZR_UNUSED int64_t zr_walk(const uint8_t *e, uint64_t c, int64_t (*sz)(const uint8_t *)) {
     const uint8_t *q = e;
     for (uint64_t i = 0; i < c; i++) q += sz(q);
     return q - e;
+}
+
+/* ------------------------------------------------------------ short copies and compares */
+
+/* Keys, words and names are mostly 16 bytes or fewer. For those, a call to the C library's
+ * memcpy or memcmp, and its dispatch on the length, costs more than the work: these do it
+ * with two overlapping loads a side, and call the library only for longer runs. */
+static inline uint64_t zr_ld64(const void *p) { uint64_t v; memcpy(&v, p, 8); return v; }
+static inline uint32_t zr_ld32(const void *p) { uint32_t v; memcpy(&v, p, 4); return v; }
+
+/* Up to 256 bytes, 16 at a time with the last 16 overlapping; the library beyond. Out of
+ * line, so that zr_memeq stays small enough to inline everywhere. */
+static __attribute__((noinline)) bool zr_memeq_long(const uint8_t *p, const uint8_t *q, size_t n) {
+    if (n > 256) return memcmp(p, q, n) == 0;
+    for (size_t i = 0; i + 16 < n; i += 16)
+        if ((zr_ld64(p + i) ^ zr_ld64(q + i)) | (zr_ld64(p + i + 8) ^ zr_ld64(q + i + 8))) return false;
+    return ((zr_ld64(p + n - 16) ^ zr_ld64(q + n - 16)) | (zr_ld64(p + n - 8) ^ zr_ld64(q + n - 8))) == 0;
+}
+
+/* Whether n bytes at a and b are equal. Either may be NULL when n is 0. */
+static inline bool zr_memeq(const void *a, const void *b, size_t n) {
+    const uint8_t *p = (const uint8_t *)a, *q = (const uint8_t *)b;
+    if (n >= 8 && n <= 16)
+        return ((zr_ld64(p) ^ zr_ld64(q)) | (zr_ld64(p + n - 8) ^ zr_ld64(q + n - 8))) == 0;
+    if (n >= 4 && n < 8)
+        return ((zr_ld32(p) ^ zr_ld32(q)) | (zr_ld32(p + n - 4) ^ zr_ld32(q + n - 4))) == 0;
+    if (n < 4)
+        return n == 0 || ((p[0] ^ q[0]) | (p[n >> 1] ^ q[n >> 1]) | (p[n - 1] ^ q[n - 1])) == 0;
+    return zr_memeq_long(p, q, n);
+}
+
+/* memcpy: runs that don't overlap. Up to 16 bytes, both ends are loaded before either is
+ * stored. Either pointer may be NULL when n is 0. */
+static inline void zr_copy(void *dst, const void *src, size_t n) {
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    if (n > 16) {
+        memcpy(d, s, n);
+    } else if (n >= 8) {
+        uint64_t a = zr_ld64(s), b = zr_ld64(s + n - 8);
+        memcpy(d, &a, 8);
+        memcpy(d + n - 8, &b, 8);
+    } else if (n >= 4) {
+        uint32_t a = zr_ld32(s), b = zr_ld32(s + n - 4);
+        memcpy(d, &a, 4);
+        memcpy(d + n - 4, &b, 4);
+    } else if (n) {
+        uint8_t a = s[0], b = s[n >> 1], c = s[n - 1];
+        d[0] = a;
+        d[n >> 1] = b;
+        d[n - 1] = c;
+    }
 }
 
 /* ------------------------------------------------------------ failures (DESIGN §7.6) */
@@ -708,7 +767,7 @@ static ZR_UNUSED zr_sink zr_into(zr_vec *v) { zr_sink s = {-1, v}; return s; }
 
 static void zr_put(zr_sink s, const void *p, size_t n) {
     if (s.v) {
-        memcpy((char *)s.v->p + s.v->n, p, n);
+        zr_copy((char *)s.v->p + s.v->n, p, n);
         s.v->n += (int64_t)n;
     } else {
         zr_out(s.fd, p, n);
@@ -870,7 +929,7 @@ static ZR_UNUSED zr_slice zr_lit(const char *p, int64_t n) { zr_slice s = {(void
 static ZR_UNUSED zr_slice zr_view(zr_vec v) { zr_slice s = {v.p, v.n}; return s; }
 
 static ZR_UNUSED bool zr_eq(zr_slice a, zr_slice b, size_t elem) {
-    return a.n == b.n && memcmp(a.p, b.p, (size_t)a.n * elem) == 0;
+    return a.n == b.n && zr_memeq(a.p, b.p, (size_t)a.n * elem);
 }
 
 static ZR_UNUSED int32_t zr_cmp(zr_slice a, zr_slice b) {
@@ -891,13 +950,21 @@ static ZR_UNUSED zr_slice zr_trim(zr_slice s, int start, int end) {
     return r;
 }
 
-static ZR_UNUSED bool zr_starts(zr_slice s, zr_slice x) { return s.n >= x.n && memcmp(s.p, x.p, (size_t)x.n) == 0; }
-static ZR_UNUSED bool zr_ends(zr_slice s, zr_slice x) { return s.n >= x.n && memcmp((char *)s.p + s.n - x.n, x.p, (size_t)x.n) == 0; }
+static ZR_UNUSED bool zr_starts(zr_slice s, zr_slice x) { return s.n >= x.n && zr_memeq(s.p, x.p, (size_t)x.n); }
+static ZR_UNUSED bool zr_ends(zr_slice s, zr_slice x) { return s.n >= x.n && zr_memeq((char *)s.p + s.n - x.n, x.p, (size_t)x.n); }
 
+/* The first x at or after `from`, or -1. memchr finds each place x's first byte occurs,
+ * many bytes a step, and only there is the rest compared. */
 static int64_t zr_find_from(zr_slice s, zr_slice x, int64_t from) {
     if (x.n == 0) return from;
-    for (int64_t i = from; i + x.n <= s.n; i++)
-        if (memcmp((char *)s.p + i, x.p, (size_t)x.n) == 0) return i;
+    const uint8_t *p = (const uint8_t *)s.p, *q = (const uint8_t *)x.p;
+    int64_t last = s.n - x.n; /* the last place x could start */
+    for (int64_t i = from; i <= last; i++) {
+        const uint8_t *f = (const uint8_t *)memchr(p + i, q[0], (size_t)(last - i + 1));
+        if (!f) return -1;
+        i = f - p;
+        if (zr_memeq(f + 1, q + 1, (size_t)x.n - 1)) return i;
+    }
     return -1;
 }
 
@@ -1642,12 +1709,14 @@ static inline __attribute__((always_inline)) uint8_t zr_b64_sym(uint8_t b, int u
     if (b == 63) d = (uint8_t)((url ? '_' : '/') - 63);
     return (uint8_t)(b + d);
 }
-/* The 6-bit value of a character, or 255: each range test is a subtraction and a compare. */
+/* The 6-bit value of a character, or 255: each range test is a subtraction and a compare.
+ * The value adds to the byte the test computed, (uint8_t)(c - 'a') + 26: written as
+ * c - 'a' + 26 instead, the decode loop clang vectorizes took about 1.5 times as long. */
 static inline __attribute__((always_inline)) uint8_t zr_b64_value(uint8_t c, int url) {
     uint8_t v = 255;
     if ((uint8_t)(c - 'A') < 26) v = (uint8_t)(c - 'A');
-    if ((uint8_t)(c - 'a') < 26) v = (uint8_t)(c - 'a' + 26);
-    if ((uint8_t)(c - '0') < 10) v = (uint8_t)(c - '0' + 52);
+    if ((uint8_t)(c - 'a') < 26) v = (uint8_t)((uint8_t)(c - 'a') + 26);
+    if ((uint8_t)(c - '0') < 10) v = (uint8_t)((uint8_t)(c - '0') + 52);
     if (c == (url ? '-' : '+')) v = 62;
     if (c == (url ? '_' : '/')) v = 63;
     return v;
@@ -2757,8 +2826,12 @@ static ZR_UNUSED uint64_t zr_hash_bytes(const void *p, int64_t n) {
         b += 8;
         n -= 8;
     }
+    /* The last 0 to 7 bytes in two overlapping loads, or three single bytes, which cover
+     * them all (the length was mixed in above). A memcpy of a variable n bytes into t
+     * made a program counting words a third slower. */
     uint64_t t = 0;
-    memcpy(&t, b, (size_t)n);
+    if (n >= 4) t = (uint64_t)zr_ld32(b) | (uint64_t)zr_ld32(b + n - 4) << 32;
+    else if (n > 0) t = (uint64_t)b[0] | (uint64_t)b[n >> 1] << 8 | (uint64_t)b[n - 1] << 16;
     return zr_mum(h ^ t, 0x8ebc6af09c88c6e3ull);
 }
 
