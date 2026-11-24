@@ -1244,9 +1244,11 @@ impl<'p, 'a> Gen<'p, 'a> {
 
     /// The base case of a function that calls itself, which those calls copy (DESIGN
     /// §14.2): how many statements its body starts with that only declare locals and
-    /// return a value computed without calling anything when a test holds, ending at
-    /// the last such test; or ending with a `return switch` some of whose cases call
-    /// nothing. `None` when the body doesn't start that way.
+    /// then return a value computed without calling anything when a test holds, ending
+    /// at the first such test; or ending with a `return switch` some of whose cases
+    /// call nothing. `None` when the body doesn't start that way. Only one test: each
+    /// further one costs every call that isn't a leaf, and the function computes the
+    /// locals before it again.
     fn base_case(&self, stmts: &[Stmt]) -> Option<BaseCase> {
         // The size of what's copied so far, as `small_fn` counts, and of the copy found.
         let mut size = 0;
@@ -1268,6 +1270,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                             switch: None,
                         },
                     ));
+                    break;
                 }
                 S::Return {
                     status: None,

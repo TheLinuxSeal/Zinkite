@@ -259,8 +259,9 @@ void main(string[.] args) {
 /// calls to itself test that case first and compute its result in place (DESIGN
 /// §14.2): a test and a return, locals before tests, a `return switch` whose cases
 /// that call nothing are the base case, a `void` function, a method, and a generic
-/// function in each instantiation. A function that calls itself once, `sumTo`, is left
-/// alone. An index out of range in the copied part fails where it always did.
+/// function in each instantiation. Only the first test is copied: `weight` has two. A
+/// function that calls itself once, `sumTo`, is left alone. An index out of range in
+/// the copied part fails where it always did.
 #[test]
 fn calls_to_itself_copy_a_functions_base_case() {
     let text = r##"enum Kind { NUM, ADD, NEG }
@@ -294,6 +295,13 @@ i64 depth(i32 i) {
     i32 l = n.a;
     if (n.kind == Kind.NEG) { return 1 + depth(l); }
     return 1 + max(depth(l), depth(n.b));
+}
+
+i64 weight(i32 i) {
+    Node& n = pool[i];
+    if (n.kind == Kind.NUM) { return 1; }
+    if (n.b < 0) { return 0; }
+    return weight(n.a) + weight(n.b);
 }
 
 void visit(i64 d) {
@@ -334,18 +342,25 @@ void main(string[.] args) {
     }
     visit(10);
     Stairs s = new Stairs(0);
-    println("${fib(20)} ${eval(4)} ${depth(4)} ${visits} ${s.ways(10)} ${s.calls} ${sumTo(100)} ${fibT((i64) 30)} ${fibT((u8) 13)}");
+    println("${fib(20)} ${eval(4)} ${depth(4)} ${weight(4)} ${visits} ${s.ways(10)} ${s.calls} ${sumTo(100)} ${fibT((i64) 30)} ${fibT((u8) 13)}");
 }
 "##;
     let c = c_of(text);
+    let weight_copy: String = c
+        .split("_weight_base(int32_t p_i_0) {")
+        .nth(1)
+        .and_then(|b| b.split("\n}\n").next())
+        .expect("weight's copy")
+        .to_string();
+    assert_eq!(weight_copy.matches("if (").count(), 1, "{}", weight_copy);
     let copies: Vec<&str> = c
         .lines()
         .filter(|l| l.contains("_base(") && l.ends_with(" {"))
         .collect();
-    // fib, eval, depth, visit, ways, and fibT for i64 and u8.
-    assert_eq!(copies.len(), 7, "{:#?}", copies);
+    // fib, eval, depth, weight, visit, ways, and fibT for i64 and u8.
+    assert_eq!(copies.len(), 8, "{:#?}", copies);
     assert!(!c.contains("sumTo_base"));
-    prints(text, "6765 -7 4 1023 274 96 5050 832040 233\n");
+    prints(text, "6765 -7 4 4 1023 274 96 5050 832040 233\n");
     let r = run(text, &["bad"]);
     assert_eq!(r.stdout, "");
     assert!(
