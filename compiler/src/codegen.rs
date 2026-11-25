@@ -2798,7 +2798,7 @@ impl<'p, 'a> Gen<'p, 'a> {
     }
 
     fn switch_stmt(&mut self, sw: &ast::Switch) {
-        let st = settle(&self.ty(&sw.scrutinee));
+        let st = settle(self.ty(&sw.scrutinee).unref());
         let v = self.expr(&sw.scrutinee, &st);
         let t = self.tmp("sw");
         let ct = self.cty(&st, sw.span);
@@ -3952,7 +3952,8 @@ impl<'p, 'a> Gen<'p, 'a> {
         index: &Expr,
         span: Span,
     ) -> (String, Ty) {
-        let it = settle(&self.ty(index));
+        // An index held in a reference, as `src[pos]` with an `i64& pos`, is its value.
+        let it = settle(self.ty(index).unref());
         let i = self.expr(index, &it);
         let i = format!("(int64_t)({})", i);
         let oob = self.on_fail(34, "zr_ix_fail(LOC, _zxi, _zxn)".to_string());
@@ -3976,7 +3977,7 @@ impl<'p, 'a> Gen<'p, 'a> {
         match b {
             None => dflt.to_string(),
             Some(b) => {
-                let t = settle(&self.ty(&b.expr));
+                let t = settle(self.ty(&b.expr).unref());
                 let v = self.expr(&b.expr, &t);
                 if b.from_end {
                     format!("({} - (int64_t)({}))", len, v)
@@ -4294,13 +4295,13 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
             _ => {
                 let rt = if t.is_unknown() {
-                    settle(&self.ty(l))
+                    settle(self.ty(l).unref())
                 } else {
                     t.clone()
                 };
                 let a = self.expr(l, &rt);
                 let bt = if matches!(op, Shl | Shr) {
-                    settle(&self.ty(r))
+                    settle(self.ty(r).unref())
                 } else {
                     rt.clone()
                 };
@@ -4630,7 +4631,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             end: end.clone(),
             ty: want.clone(),
         });
-        let st = settle(&self.ty(&sw.scrutinee));
+        let st = settle(self.ty(&sw.scrutinee).unref());
         let v = self.expr(&sw.scrutinee, &st);
         let t = self.tmp("sw");
         let sct = self.cty(&st, sw.span);
@@ -4758,7 +4759,9 @@ impl<'p, 'a> Gen<'p, 'a> {
                     ("pad" | "zeroPad", Some(p)) => {
                         let w = arg(self, pre);
                         let fill = if name.name == "pad" { "' '" } else { "'0'" };
-                        let (f, cast) = if p.is_float() {
+                        let (f, cast) = if p == Prim::F32 {
+                            ("zr_w_f32_pad", "float")
+                        } else if p.is_float() {
                             ("zr_w_f64_pad", "double")
                         } else if bits(p) == 128 {
                             if signed(p) {
@@ -4854,6 +4857,9 @@ impl<'p, 'a> Gen<'p, 'a> {
             Ty::Prim(Prim::Bool) => {
                 let _ = write!(writes, "zr_w_bool({}, {}); ", k, v);
             }
+            Ty::Prim(Prim::F32) => {
+                let _ = write!(writes, "zr_w_f32({}, {}); ", k, v);
+            }
             Ty::Prim(p) if p.is_float() => {
                 let _ = write!(writes, "zr_w_f64({}, (double){}); ", k, v);
             }
@@ -4891,6 +4897,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                 }
                 // Any other array prints as a list: [104, 105].
                 let one = match &el {
+                    Ty::Prim(Prim::F32) => format!("zr_w_f32({}, _e)", k),
                     Ty::Prim(p) if p.is_float() => format!("zr_w_f64({}, (double)_e)", k),
                     Ty::Prim(Prim::Bool) => format!("zr_w_bool({}, _e)", k),
                     Ty::Prim(Prim::I128) => format!("zr_w_i128({}, _e)", k),

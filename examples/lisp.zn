@@ -1,0 +1,831 @@
+#!/usr/bin/env zink
+// lisp: a small Scheme-like Lisp.
+// usage: lisp [-i] [file]
+//
+// Runs the file, or stdin when there's none. At a terminal, or with -i, it prints each
+// form's value and goes on after an error; otherwise the first error ends the program.
+//
+//   > (define (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
+//   > (fib 20)
+//   6765
+//
+// The language: integers, strings, symbols, lists, and closures with lexical scope.
+//   special forms   quote 'x  if  cond  define  set!  lambda  let  begin  and  or
+//   built-ins       + - * / mod = < > <= >= cons car cdr list length append reverse
+//                   null? pair? number? symbol? procedure? eq? equal? not apply
+//                   display write newline
+//
+// A call in tail position replaces the one it's in, so a loop written as recursion runs
+// in constant native stack. Other calls nest up to 10,000 deep.
+//
+// Errors are statuses (DESIGN §7). `eval` reads none: a name that isn't bound, or the
+// car of a number, fails where it's found, nothing reads that failure, so it leaves
+// every call in progress up to the `@@` that evaluates the form, which reports it
+// (DESIGN §7.6). Integer overflow is the same, through `+#`, `-#` and `*#`, and so is
+// dividing by zero.
+//
+// Every value is an i64: an integer shifted left with its low bit set, or the index of
+// a cell in the heap, shifted left. Cells no value reaches are collected, by marking
+// and sweeping, and reused, so such a loop runs in constant memory too. What the
+// interpreter itself holds while it works, in the locals of eval and the functions it
+// calls, is on a stack of roots, which the collector marks from.
+
+import zink.cli.*;
+import zink.io.*;
+
+enum Tag { EMPTY, FALSE, TRUE, PAIR, SYMBOL, TEXT, BUILTIN, CLOSURE, FREE }
+
+class Cell {
+    Tag tag;
+    i64 a;          // a pair's car; a symbol's or text's start in `text`; a closure's
+                    // parameters; a free cell's next free cell
+    i64 b;          // a pair's cdr; a symbol's or text's end; a closure's body
+    i64 c;          // a closure's environment
+    bool marked = false;
+}
+
+i64 NIL = 0;        // the empty list, cell 0
+i64 FALSE = 2;      // #f, cell 1: the only value that counts as false
+i64 TRUE = 4;       // #t, cell 2
+i64 MAX_DEPTH = 10000;
+i64 MIN_HEAP = 65536;       // cells before the first collection
+
+bool isInt(i64 v) { return (v & 1) != 0; }
+i64 unbox(i64 v) { return v >> 1; }
+
+string[.] BUILTINS = ["+", "-", "*", "/", "mod", "=", "<", ">", "<=", ">=", "cons", "car",
+    "cdr", "list", "length", "append", "reverse", "null?", "pair?", "number?", "symbol?",
+    "procedure?", "eq?", "equal?", "not", "apply", "display", "write", "newline"];
+
+root Lisp {
+    Cell[..>] heap;                 // every pair, symbol, text and closure
+    u8[..>] text;                   // the bytes of symbols and strings
+    hashmap<string, i64> symbols;   // a name to its symbol, so each name has one
+    hashmap<i64, i64> globals;      // a symbol to its value at the top level
+    u8[..>] error;                  // why the last failure happened
+    u8[..>] out;                    // what display and write print
+    i64[..~] roots;                 // values the interpreter is holding, for the collector
+    i64[..~] gray;                  // cells marked whose fields aren't yet
+    i64 free = NIL;                 // the first free cell, each pointing at the next
+    i64 collectAt = MIN_HEAP;       // the heap's size that brings the next collection
+    i64 depth = 0;                  // calls to eval in progress
+    i64 sQuote = 0;                 // the symbols of the special forms
+    i64 sIf = 0;
+    i64 sCond = 0;
+    i64 sElse = 0;
+    i64 sDefine = 0;
+    i64 sSet = 0;
+    i64 sLambda = 0;
+    i64 sLet = 0;
+    i64 sBegin = 0;
+    i64 sAnd = 0;
+    i64 sOr = 0;
+
+    new() {
+        heap +> new Cell(Tag.EMPTY, 0, 0, 0);
+        heap +> new Cell(Tag.FALSE, 0, 0, 0);
+        heap +> new Cell(Tag.TRUE, 0, 0, 0);
+        sQuote = intern("quote");
+        sIf = intern("if");
+        sCond = intern("cond");
+        sElse = intern("else");
+        sDefine = intern("define");
+        sSet = intern("set!");
+        sLambda = intern("lambda");
+        sLet = intern("let");
+        sBegin = intern("begin");
+        sAnd = intern("and");
+        sOr = intern("or");
+        for (i64 i = 0; i < BUILTINS.len; i++) {
+            globals.put(intern(BUILTINS[i]), alloc(Tag.BUILTIN, i, 0, 0));
+        }
+    }
+
+    // ------------------------------------------------------------ cells
+
+    // A cell: a free one, or a new one at the end of the heap. Once the free ones are
+    // used up and the heap has reached collectAt, a collection comes first. A pair's or
+    // a closure's fields are values, which are rooted for it, so `cons(x, cons(y, z))`
+    // can't lose the inner pair; other cells' fields are numbers.
+    mut i64 alloc(Tag tag, i64 a, i64 b, i64 c) {
+        if (free == NIL && heap.len >= collectAt) {
+            i64 held = roots.len;
+            if (tag == Tag.PAIR || tag == Tag.CLOSURE) { roots +> a +> b +> c; }
+            collect();
+            roots.truncate(held);
+        }
+        if (free != NIL) {
+            i64 v = free;
+            free = heap[v >> 1].a;
+            heap[v >> 1] = new Cell(tag, a, b, c);
+            return v;
+        }
+        heap +> new Cell(tag, a, b, c);
+        return (heap.len - 1) << 1;
+    }
+
+    // Marks every cell the roots reach, then puts every other one on the free list.
+    // The next collection comes when the heap is twice what was live.
+    mut void collect() {
+        for (i64 v : roots) { mark(v); }
+        for (var& e : symbols) { mark(e.value); }
+        for (var& e : globals) {
+            mark(e.key);
+            mark(e.value);
+        }
+        while (i64 v : gray ->) {           // a stack, not recursion: lists nest deeply
+            Cell& c = heap[v >> 1];
+            if (c.tag == Tag.PAIR || c.tag == Tag.CLOSURE) {
+                mark(c.a);
+                mark(c.b);
+                mark(c.c);
+            }
+        }
+        free = NIL;
+        i64 live = 3;
+        for (i64 i = heap.len - 1; i >= 3; i--) {
+            if (heap[i].marked) {
+                heap[i].marked = false;
+                live++;
+            } else {
+                heap[i] = new Cell(Tag.FREE, free, 0, 0);
+                free = i << 1;
+            }
+        }
+        collectAt = max(MIN_HEAP, live * 2);
+    }
+
+    // Marks a cell, to have its fields marked in turn. Numbers and the first three
+    // cells, which are never freed, need nothing.
+    mut void mark(i64 v) {
+        if (isInt(v) || v <= TRUE || heap[v >> 1].marked) { return; }
+        heap[v >> 1].marked = true;
+        gray +> v;
+    }
+
+    // Holds v for the collector until the roots are cut back below it.
+    mut i64 hold(i64 v) {
+        roots +> v;
+        return v;
+    }
+
+    mut i64 cons(i64 a, i64 b) { return alloc(Tag.PAIR, a, b, 0); }
+
+    Tag tag(i64 v) { return isInt(v) ? Tag.EMPTY : heap[v >> 1].tag; }
+
+    bool isPair(i64 v) { return !isInt(v) && heap[v >> 1].tag == Tag.PAIR; }
+
+    bool isSymbol(i64 v) { return !isInt(v) && heap[v >> 1].tag == Tag.SYMBOL; }
+
+    mut i64 car(i64 v) {
+        if (!isPair(v)) { return wrong("car of something that isn't a pair", v); }
+        return heap[v >> 1].a;
+    }
+
+    mut i64 cdr(i64 v) {
+        if (!isPair(v)) { return wrong("cdr of something that isn't a pair", v); }
+        return heap[v >> 1].b;
+    }
+
+    mut i64 second(i64 list) { return car(cdr(list)); }
+
+    // The integer n as a value: INVALID beyond 62 bits.
+    mut i64 box(i64 n) {
+        if (n >= 1 << 62 || n < -(1 << 62)) { return fail("an integer beyond 62 bits"); }
+        return (n << 1) | 1;
+    }
+
+    mut i64 number(i64 v) {
+        if (!isInt(v)) { return wrong("not a number", v); }
+        return unbox(v);
+    }
+
+    // The symbol with this name, made the first time it's asked for.
+    mut i64 intern(string name) {
+        i64 known @missing = symbols.get(name);
+        if (!missing) { return known; }
+        i64 start = text.len;
+        text.append(name);
+        i64 s = alloc(Tag.SYMBOL, start, text.len, 0);
+        symbols.put(text[start:], s);       // a view into text, which only grows
+        return s;
+    }
+
+    // Records why, then fails. Nothing up to main reads the status (see the top).
+    mut i64 fail(string why) {
+        error.clear();
+        error.append(why);
+        return #status.INVALID NIL;
+    }
+
+    // The same, naming the value that was wrong.
+    mut i64 wrong(string why, i64 v) {
+        error.clear();
+        error.append(why);
+        error.append(": ");
+        write(v, error, true);
+        return #status.INVALID NIL;
+    }
+
+    // ------------------------------------------------------------ reading
+
+    // Reads one form of the source from pos on: END when only space and comments are left.
+    mut i64 read(string src, i64& pos) {
+        skip(src, pos);
+        if (pos >= src.len) { return #status.END NIL; }
+        u8 c = src[pos];
+        if (c == '(') {
+            pos++;
+            return readList(src, pos);
+        }
+        if (c == ')') {
+            pos++;
+            return fail("a ) that closes nothing");
+        }
+        if (c == '\'') {
+            pos++;
+            i64 quoted = read(src, pos);
+            return cons(sQuote, cons(quoted, NIL));
+        }
+        if (c == '"') { return readText(src, pos); }
+        i64 start = pos;
+        while (pos < src.len && !delimits(src[pos])) { pos++; }
+        string word = src[start:pos];
+        if (word == "#t") { return TRUE; }
+        if (word == "#f") { return FALSE; }
+        i64 n @notNumber = i64.parse(word);
+        if (!notNumber) { return box(n); }
+        return intern(word);
+    }
+
+    mut i64 readList(string src, i64& pos) {
+        i64 head = NIL;
+        i64 last = NIL;
+        i64 held = roots.len;
+        roots +> NIL;                       // the list, once it has a first cell
+        while (true) {
+            skip(src, pos);
+            if (pos >= src.len) { return fail("a list that isn't closed"); }
+            if (src[pos] == ')') {
+                pos++;
+                return head;
+            }
+            if (src[pos] == '.' && pos + 1 < src.len && delimits(src[pos + 1]) && head != NIL) {
+                // (a b . rest): the form after the dot is the last cdr.
+                pos++;
+                heap[last >> 1].b = read(src, pos);
+                skip(src, pos);
+                if (pos >= src.len || src[pos] != ')') {
+                    return fail("a dotted list with more than one form after the dot");
+                }
+                pos++;
+                return head;
+            }
+            i64 cell = cons(read(src, pos), NIL);
+            if (head == NIL) {
+                head = cell;
+                roots[held] = head;
+            } else {
+                heap[last >> 1].b = cell;
+            }
+            last = cell;
+        }
+        return head;
+    }
+
+    mut i64 readText(string src, i64& pos) {
+        i64 start = text.len;
+        pos++;
+        while (pos < src.len && src[pos] != '"') {
+            u8 c = src[pos];
+            if (c == '\\' && pos + 1 < src.len) {
+                pos++;
+                c = src[pos] == 'n' ? '\n' : src[pos] == 't' ? '\t' : src[pos];
+            }
+            text +> c;
+            pos++;
+        }
+        if (pos >= src.len) { return fail("a string that isn't closed"); }
+        pos++;
+        return alloc(Tag.TEXT, start, text.len, 0);
+    }
+
+    // ------------------------------------------------------------ evaluating
+
+    mut i64 eval(i64 x, i64 env) {
+        depth++;
+        if (depth > MAX_DEPTH) {
+            return fail("more than 10000 calls nested: is a recursion missing its base case?");
+        }
+        i64 base = roots.len;
+        roots +> x +> env;
+        i64 v = step(base);
+        roots.truncate(base);
+        depth--;
+        return v;
+    }
+
+    // An environment is NIL at the top level, where `globals` holds the names, or a pair
+    // of a frame and the environment around it. A frame is a list of (name . value) pairs.
+    mut i64 lookup(i64 name, i64 env) {
+        i64 binding = find(name, env);
+        if (binding != NIL) { return heap[binding >> 1].b; }
+        i64 v @missing = globals.get(name);
+        if (missing) { return wrong("not defined", name); }
+        return v;
+    }
+
+    // The (name . value) pair for a name in env's frames, or NIL.
+    i64 find(i64 name, i64 env) {
+        for (i64 e = env; e != NIL; e = heap[e >> 1].b) {
+            for (i64 f = heap[e >> 1].a; f != NIL; f = heap[f >> 1].b) {
+                i64 binding = heap[f >> 1].a;
+                if (heap[binding >> 1].a == name) { return binding; }
+            }
+        }
+        return NIL;
+    }
+
+    mut void define(i64 name, i64 value, i64 env) {
+        if (!isSymbol(name)) {
+            wrong("define of something that isn't a name", name);
+            return;
+        }
+        if (env == NIL) {
+            globals.put(name, value);
+        } else {
+            heap[env >> 1].a = cons(cons(name, value), heap[env >> 1].a);
+        }
+    }
+
+    // Evaluates the form in roots[base] in the environment in roots[base + 1], looping
+    // instead of calling for a form in tail position: the branch an `if` takes, the last
+    // form of a body, and a closure's body. Each pass starts by dropping the roots the
+    // last one held, so a loop holds no more than one pass does.
+    mut i64 step(i64 base) {
+        while (true) {
+            roots.truncate(base + 2);
+            i64 x = roots[base];
+            i64 env = roots[base + 1];
+            if (isInt(x)) { return x; }
+            Tag t = heap[x >> 1].tag;
+            if (t == Tag.SYMBOL) { return lookup(x, env); }
+            if (t != Tag.PAIR) { return x; }
+            i64 head = heap[x >> 1].a;
+            i64 args = heap[x >> 1].b;
+
+            if (head == sQuote) { return car(args); }
+            if (head == sIf) {
+                i64 rest = cdr(args);
+                if (eval(car(args), env) != FALSE) {
+                    roots[base] = car(rest);
+                } else {
+                    i64 otherwise = cdr(rest);
+                    if (otherwise == NIL) { return NIL; }
+                    roots[base] = car(otherwise);
+                }
+                continue;
+            }
+            if (head == sCond) {
+                i64 body = NIL;
+                bool matched = false;
+                for (i64 c = args; c != NIL && !matched; c = cdr(c)) {
+                    i64 clause = car(c);
+                    if (car(clause) == sElse || eval(car(clause), env) != FALSE) {
+                        body = cdr(clause);
+                        matched = true;
+                    }
+                }
+                if (body == NIL) { return NIL; }
+                roots[base] = evalAllButLast(body, env);
+                continue;
+            }
+            if (head == sDefine) {
+                i64 target = car(args);
+                if (isPair(target)) {       // (define (name params...) body...)
+                    define(car(target), alloc(Tag.CLOSURE, cdr(target), cdr(args), env), env);
+                } else {
+                    define(target, eval(second(args), env), env);
+                }
+                return NIL;
+            }
+            if (head == sSet) {
+                i64 name = car(args);
+                i64 value = eval(second(args), env);
+                i64 binding = find(name, env);
+                if (binding != NIL) {
+                    heap[binding >> 1].b = value;
+                } else if (globals.has(name)) {
+                    globals.put(name, value);
+                } else {
+                    return wrong("set! of a name that isn't defined", name);
+                }
+                return NIL;
+            }
+            if (head == sLambda) { return alloc(Tag.CLOSURE, car(args), cdr(args), env); }
+            if (head == sBegin) {
+                if (args == NIL) { return NIL; }
+                roots[base] = evalAllButLast(args, env);
+                continue;
+            }
+            if (head == sLet) {                 // (let ((name value)...) body...)
+                i64 held = roots.len;
+                roots +> NIL;
+                for (i64 b = car(args); b != NIL; b = cdr(b)) {
+                    roots[held] = cons(cons(car(car(b)), eval(second(car(b)), env)), roots[held]);
+                }
+                roots[base + 1] = cons(roots[held], env);
+                roots[base] = evalAllButLast(cdr(args), roots[base + 1]);
+                continue;
+            }
+            if (head == sAnd || head == sOr) {
+                if (args == NIL) { return head == sAnd ? TRUE : FALSE; }
+                i64 a = args;
+                while (cdr(a) != NIL) {
+                    i64 v = eval(car(a), env);
+                    if ((v == FALSE) == (head == sAnd)) { return v; }
+                    a = cdr(a);
+                }
+                roots[base] = car(a);
+                continue;
+            }
+
+            // A call: the function, then its arguments, left to right.
+            i64 f = hold(eval(head, env));
+            i64 values = hold(evalList(args, env));
+            if (tag(f) == Tag.CLOSURE) {
+                roots[base + 1] = bind(f, values);
+                roots[base] = evalAllButLast(heap[f >> 1].b, roots[base + 1]);
+                continue;
+            }
+            if (tag(f) == Tag.BUILTIN) { return builtin(heap[f >> 1].a, values); }
+            return wrong("a call of something that isn't a function", f);
+        }
+        return NIL;
+    }
+
+    // Evaluates each form of a body but the last, and gives the last, for the caller to
+    // evaluate in tail position.
+    mut i64 evalAllButLast(i64 body, i64 env) {
+        i64 b = body;
+        while (cdr(b) != NIL) {
+            eval(car(b), env);
+            b = cdr(b);
+        }
+        return car(b);
+    }
+
+    mut i64 evalList(i64 forms, i64 env) {
+        i64 head = NIL;
+        i64 last = NIL;
+        i64 held = roots.len;
+        roots +> NIL;
+        for (i64 f = forms; f != NIL; f = cdr(f)) {
+            i64 cell = cons(eval(car(f), env), NIL);
+            if (head == NIL) {
+                head = cell;
+                roots[held] = head;
+            } else {
+                heap[last >> 1].b = cell;
+            }
+            last = cell;
+        }
+        return head;
+    }
+
+    // A closure's environment with a new frame: each parameter bound to its argument. A
+    // parameter list that is one name, as in (lambda args ...), takes them all.
+    mut i64 bind(i64 f, i64 values) {
+        i64 held = roots.len;
+        roots +> NIL;                       // the frame
+        i64 p = heap[f >> 1].a;
+        i64 v = values;
+        while (p != NIL) {
+            if (isSymbol(p)) {
+                roots[held] = cons(cons(p, v), roots[held]);
+                v = NIL;
+                break;
+            }
+            if (v == NIL) { return wrong("too few arguments for", f); }
+            roots[held] = cons(cons(car(p), car(v)), roots[held]);
+            p = cdr(p);
+            v = cdr(v);
+        }
+        if (v != NIL) { return wrong("too many arguments for", f); }
+        return cons(roots[held], heap[f >> 1].c);
+    }
+
+    // Calls a function on a list of values, as `apply` does.
+    mut i64 call(i64 f, i64 values) {
+        if (tag(f) == Tag.BUILTIN) { return builtin(heap[f >> 1].a, values); }
+        if (tag(f) != Tag.CLOSURE) { return wrong("apply of something that isn't a function", f); }
+        i64 env = hold(bind(f, values));
+        return eval(evalAllButLast(heap[f >> 1].b, env), env);
+    }
+
+    mut i64 builtin(i64 which, i64 args) {
+        string name = BUILTINS[which];
+        switch (name) {
+            case "+", "*" => {
+                i64 acc = name == "+" ? 0 : 1;
+                for (i64 a = args; a != NIL; a = cdr(a)) {
+                    i64 n = number(car(a));
+                    acc = name == "+" ? acc +# n : acc *# n;
+                }
+                return box(acc);
+            }
+            case "-", "/" => {
+                i64 acc = number(car(args));
+                if (cdr(args) == NIL) { return box(name == "-" ? 0 -# acc : 1 / acc); }
+                for (i64 a = cdr(args); a != NIL; a = cdr(a)) {
+                    i64 n = number(car(a));
+                    acc = name == "-" ? acc -# n : acc / n;
+                }
+                return box(acc);
+            }
+            case "mod" => {
+                i64 d = number(second(args));
+                i64 r = number(car(args)) % d;
+                return box(r != 0 && (r < 0) != (d < 0) ? r + d : r);
+            }
+            case "=", "<", ">", "<=", ">=" => {
+                for (i64 a = args; a != NIL && cdr(a) != NIL; a = cdr(a)) {
+                    i64 x = number(car(a));
+                    i64 y = number(second(a));
+                    bool holds = switch (name) {
+                        case "=" => x == y;
+                        case "<" => x < y;
+                        case ">" => x > y;
+                        case "<=" => x <= y;
+                        default => x >= y;
+                    };
+                    if (!holds) { return FALSE; }
+                }
+                return TRUE;
+            }
+            case "cons" => { return cons(car(args), second(args)); }
+            case "car" => { return car(car(args)); }
+            case "cdr" => { return cdr(car(args)); }
+            case "list" => { return args; }
+            case "length" => {
+                i64 n = 0;
+                for (i64 a = car(args); a != NIL; a = cdr(a)) { n++; }
+                return box(n);
+            }
+            case "append" => {
+                // Copies every list but the last, which the result shares.
+                if (args == NIL) { return NIL; }
+                i64 head = NIL;
+                i64 last = NIL;
+                i64 held = roots.len;
+                roots +> NIL;
+                i64 a = args;
+                while (cdr(a) != NIL) {
+                    for (i64 l = car(a); l != NIL; l = cdr(l)) {
+                        i64 cell = cons(car(l), NIL);
+                        if (head == NIL) {
+                            head = cell;
+                            roots[held] = head;
+                        } else {
+                            heap[last >> 1].b = cell;
+                        }
+                        last = cell;
+                    }
+                    a = cdr(a);
+                }
+                if (head == NIL) { return car(a); }
+                heap[last >> 1].b = car(a);
+                return head;
+            }
+            case "reverse" => {
+                i64 held = roots.len;
+                roots +> NIL;
+                for (i64 l = car(args); l != NIL; l = cdr(l)) { roots[held] = cons(car(l), roots[held]); }
+                return roots[held];
+            }
+            case "null?" => { return truth(car(args) == NIL); }
+            case "pair?" => { return truth(isPair(car(args))); }
+            case "number?" => { return truth(isInt(car(args))); }
+            case "symbol?" => { return truth(isSymbol(car(args))); }
+            case "procedure?" => {
+                Tag t = tag(car(args));
+                return truth(t == Tag.CLOSURE || t == Tag.BUILTIN);
+            }
+            case "eq?" => { return truth(car(args) == second(args)); }
+            case "equal?" => { return truth(equal(car(args), second(args))); }
+            case "not" => { return truth(car(args) == FALSE); }
+            case "apply" => { return call(car(args), second(args)); }
+            case "display", "write" => {
+                out.clear();
+                write(car(args), out, name == "write");
+                print(out);
+                return NIL;
+            }
+            case "newline" => {
+                println("");
+                return NIL;
+            }
+            default => { return fail("a built-in this interpreter doesn't have"); }
+        }
+    }
+
+    i64 truth(bool b) { return b ? TRUE : FALSE; }
+
+    // The same structure: numbers, symbols, texts with the same bytes, and lists of
+    // equal elements. The cdrs are walked in a loop, so a long list nests no deeper.
+    bool equal(i64 x, i64 y) {
+        i64 a = x;
+        i64 b = y;
+        while (true) {
+            if (a == b) { return true; }
+            if (isInt(a) || isInt(b) || tag(a) != tag(b)) { return false; }
+            if (tag(a) == Tag.TEXT) { return chars(a) == chars(b); }
+            if (tag(a) != Tag.PAIR || !equal(heap[a >> 1].a, heap[b >> 1].a)) { return false; }
+            a = heap[a >> 1].b;
+            b = heap[b >> 1].b;
+        }
+        return false;
+    }
+
+    // ------------------------------------------------------------ printing
+
+    // A symbol's name or a text's bytes.
+    string chars(i64 v) { return text[heap[v >> 1].a:heap[v >> 1].b]; }
+
+    // A value as text: as `write` shows it, with strings quoted, when `quoted`, and as
+    // `display` does otherwise.
+    void write(i64 v, u8[..>]& to, bool quoted) {
+        if (isInt(v)) {
+            to.append("${unbox(v)}");
+            return;
+        }
+        switch (heap[v >> 1].tag) {
+            case EMPTY => to.append("()");
+            case FALSE => to.append("#f");
+            case TRUE => to.append("#t");
+            case SYMBOL => to.append(chars(v));
+            case TEXT => {
+                if (!quoted) {
+                    to.append(chars(v));
+                    return;
+                }
+                to +> '"';
+                for (u8 c : chars(v)) {
+                    if (c == '"' || c == '\\') { to +> '\\'; }
+                    if (c == '\n') { to.append("\\n"); } else { to +> c; }
+                }
+                to +> '"';
+            }
+            case BUILTIN => to.append("#<built-in ${BUILTINS[heap[v >> 1].a]}>");
+            case CLOSURE => to.append("#<closure>");
+            case PAIR => {
+                to +> '(';
+                i64 p = v;
+                while (true) {
+                    write(heap[p >> 1].a, to, quoted);
+                    p = heap[p >> 1].b;
+                    if (p == NIL) { break; }
+                    if (isInt(p) || heap[p >> 1].tag != Tag.PAIR) {
+                        to.append(" . ");
+                        write(p, to, quoted);
+                        break;
+                    }
+                    to +> ' ';
+                }
+                to +> ')';
+            }
+        }
+    }
+}
+
+// Space and ; comments.
+void skip(string src, i64& pos) {
+    while (pos < src.len) {
+        u8 c = src[pos];
+        if (c == ';') {
+            while (pos < src.len && src[pos] != '\n') { pos++; }
+        } else if (c.isSpace()) {
+            pos++;
+        } else {
+            return;
+        }
+    }
+}
+
+bool delimits(u8 c) { return c.isSpace() || c == '(' || c == ')' || c == '"' || c == ';'; }
+
+// Why a form failed: what the interpreter recorded, or the status of a failure in the
+// arithmetic, which records nothing.
+void report(Lisp& lisp, u8 why, string where) {
+    if (lisp.error.len > 0) {
+        errprintln("${where}${lisp.error}");
+    } else if (why == status.RANGE) {
+        errprintln("${where}integer overflow");
+    } else if (why == status.DOMAIN) {
+        errprintln("${where}division by zero");
+    } else {
+        errprintln("${where}${status.message(why)}");
+    }
+}
+
+// Reads and evaluates every form in src. Interactively, it prints each value and goes
+// on after an error; otherwise the first error ends it. False if any form failed.
+bool run(Lisp& lisp, string src, string name, bool interactive) {
+    i64 pos = 0;
+    bool ok = true;
+    while (true) {
+        i64 start = pos;
+        lisp.error.clear();
+        lisp.depth = 0;
+        lisp.roots.clear();                 // what a failed form held, it holds no more
+        u8 failed = 0;
+        i64 form @end @@bad = lisp.read(src, pos);
+        if (end == status.END) { return ok; }
+        i64 value = NIL;
+        if (bad == 0) {
+            lisp.roots +> form;
+            value @@failed = lisp.eval(form, NIL);
+        } else {
+            failed = bad;
+        }
+        if (failed != 0) {
+            skip(src, start);
+            i64 line = 1;
+            for (i64 i = 0; i < start; i++) {
+                if (src[i] == '\n') { line++; }
+            }
+            report(lisp, failed, interactive ? "error: " : "${name}:${line}: ");
+            if (!interactive || bad != 0) { return false; }
+            ok = false;
+        } else if (interactive && value != NIL) {
+            lisp.out.clear();
+            lisp.write(value, lisp.out, true);
+            println(lisp.out);
+        }
+    }
+    return ok;
+}
+
+// Whether the parentheses outside strings and comments are all closed.
+bool closed(string src) {
+    i64 open = 0;
+    bool inText = false;
+    for (i64 i = 0; i < src.len; i++) {
+        u8 c = src[i];
+        if (inText) {
+            if (c == '\\') { i++; } else if (c == '"') { inText = false; }
+        } else if (c == '"') {
+            inText = true;
+        } else if (c == ';') {
+            while (i < src.len && src[i] != '\n') { i++; }
+        } else if (c == '(') {
+            open++;
+        } else if (c == ')') {
+            open--;
+        }
+    }
+    return open <= 0 && !inText;
+}
+
+u8 main(string[.] args) {
+    Args cli = new Args("lisp", "A small Scheme-like Lisp.");
+    cli.flag('i', "interactive", "print each value, and go on after an error");
+    cli.positional("file", "the program; stdin when left out");
+    u8 code @stop = cli.parseOrStop(args);
+    if (stop) { return code; }
+    string file = cli.get("file", "");
+    Lisp lisp = new Lisp();
+
+    if (file != "") {
+        u8[.] src @err = File.readAll(file);
+        if (err != 0) {
+            errprintln("lisp: ${file}: ${status.message(err)}");
+            return 1;
+        }
+        return run(lisp, src, file, cli.has("interactive")) ? 0 : 1;
+    }
+    if (!stdin.isTerminal()) {
+        u8[..>] src = [];
+        u8 err = @stdin.readAll(src);
+        if (err != 0) {
+            errprintln("lisp: stdin: ${status.message(err)}");
+            return 1;
+        }
+        return run(lisp, src, "stdin", cli.has("interactive")) ? 0 : 1;
+    }
+
+    // At a terminal: a form at a time, which may take several lines.
+    u8[..>] pending = [];
+    while (true) {
+        print(pending.len == 0 ? "> " : "  ");
+        stdout.flush();
+        if (@stdin.readLine(pending)) { break; }
+        pending +> '\n';
+        if (closed(pending)) {
+            run(lisp, pending, "", true);
+            pending.clear();
+        }
+    }
+    println("");
+    return 0;
+}

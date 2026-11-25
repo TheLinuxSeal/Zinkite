@@ -124,7 +124,8 @@ fn cache_file(headers: &[String], cc: &Path) -> Option<PathBuf> {
     let dir = crate::driver::cache_dir().ok()?;
     let meta = std::fs::metadata(cc).ok()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    "zink-cheader 1".hash(&mut h);
+    // The reader's version: what it makes of a header changes with it.
+    "zink-cheader 2".hash(&mut h);
     env!("CARGO_PKG_VERSION").hash(&mut h);
     headers.hash(&mut h);
     cc.hash(&mut h);
@@ -398,7 +399,9 @@ fn read_with(cc: &Path, headers: &[String], deps: Option<&Path>) -> Result<CScop
 }
 
 /// The name and the quoted type of an AST dump line: `... col:12 puts 'int (const char *)'`,
-/// preferring the desugared type after `:` when clang gives one.
+/// preferring the desugared type after `:` when clang gives one. A typedef of an unnamed
+/// enum or struct, as `typedef enum { ... } SDL_bool;`, desugars to its own name
+/// (`SDL_bool 'enum SDL_bool':'SDL_bool'`), so the written type is kept for it.
 fn name_and_type(body: &str) -> Option<(String, String)> {
     let q = body.find(" '")?;
     let name = body[..q].split_whitespace().last()?.to_string();
@@ -407,6 +410,7 @@ fn name_and_type(body: &str) -> Option<(String, String)> {
     let mut ty = rest[..end].to_string();
     if let Some(d) = rest[end + 1..].strip_prefix(":'")
         && let Some(e) = d.find('\'')
+        && d[..e] != name
     {
         ty = d[..e].to_string();
     }
@@ -654,6 +658,32 @@ mod tests {
                 PathBuf::from("/usr/include/math.h"),
             ]
         );
+    }
+
+    /// A typedef of an unnamed enum, as SDL writes most of its types, is an enum: its
+    /// desugared type is only its own name.
+    #[test]
+    fn typedefs_of_unnamed_enums() {
+        let line = "TypedefDecl 0x5741 <line:180:1, line:184:3> col:3 referenced SDL_bool 'enum SDL_bool':'SDL_bool'";
+        assert_eq!(
+            name_and_type(line),
+            Some(("SDL_bool".to_string(), "enum SDL_bool".to_string()))
+        );
+        let f = "FunctionDecl 0x57 <a.h:1:1, col:70> col:29 f 'size_t (const char *)':'unsigned long (const char *)'";
+        assert_eq!(
+            name_and_type(f),
+            Some(("f".to_string(), "unsigned long (const char *)".to_string()))
+        );
+        let mut typedefs = HashMap::new();
+        typedefs.insert("SDL_bool".to_string(), "enum SDL_bool".to_string());
+        let records = HashSet::new();
+        let types = Types {
+            typedefs: &typedefs,
+            records: &records,
+        };
+        let f = types.func("int (SDL_bool)", &mut HashSet::new());
+        assert_eq!(f.why_not, None);
+        assert_eq!(f.params, vec![Ty::Prim(Prim::I32)]);
     }
 
     /// What `store` writes, `load` reads back, while the files it depends on are unchanged.

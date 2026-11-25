@@ -14,13 +14,13 @@ cargo clippy --all-targets
 
 The parser tests parse every program in `../examples` and the complete example
 in `GRAMMAR.md` §7, check each disambiguation rule of GRAMMAR §6, and parse
-every prefix of the examples to make sure broken input gives errors rather than
-a crash.
+prefixes of the examples, cut every few bytes, to make sure broken input gives errors
+rather than a crash.
 
 The checker tests type-check the same programs, which must give no errors, and
 then check each rule with a program that breaks it and the message it gives. A
-last test deletes or repeats each line of each example and checks the result,
-to make sure the checker never crashes.
+last test deletes or repeats each line of each example, or 200 lines spread through
+a long one, and checks the result, to make sure the checker never crashes.
 
 ## Using it
 
@@ -138,9 +138,10 @@ failed and its trail through the program's own functions, with exit status 1. Th
 check is one predictable branch after a call that can fail. `@@` and `@@@` catch such a
 failure deep inside too: a `setjmp` at the `@@`, which the stop jumps back to instead,
 through a catch record for each `defer` on the way; the trail is a fixed buffer of 32
-entries that each failing `return` writes to. All eight
-examples run: `cachesim`, `csvsort`, `dirwalk`, `jsonfmt`, `linebuf`, `sortlines`,
-`stats` and `wordfreq`.
+entries that each failing `return` writes to. All nine
+examples run: `cachesim`, `csvsort`, `dirwalk`, `jsonfmt`, `linebuf`, `lisp`,
+`sortlines`, `stats` and `wordfreq`. So does `quarry/quarry.zn`, a voxel sandbox drawn
+with OpenGL through SDL2, which the tests build where their headers are installed.
 
 Variable-size records (DESIGN §3.2, §11): a class with a `T[.*]` or `T[.]` field, or
 a field that is such a class, is one run of bytes. Its fixed-size fields come first,
@@ -247,13 +248,14 @@ arrays. A for-each over an iterator is a repeat loop on a hidden local (DESIGN
 Calling C (DESIGN §12.6): `extern import stdio.h;` runs clang over the header
 (`src/cheader.rs`), which lists its functions, typedefs, enum constants and macros.
 Functions whose signatures have one clear meaning are called directly: numbers,
+enums (a typedef of an unnamed one, as SDL writes its types, included),
 `const char *` as text copied with a NUL onto the scratch stack, and pointers to C
 structs as handles. The generated C includes the header, so the C compiler checks
 every call. An explicit `extern` declaration gets a prototype bound to the C symbol
 by an asm label, so it can't clash with the header's own. `extern link m;` reaches
 the driver through a comment at the top of the C. What clang finds is cached in the
-cache directory, keyed by the headers' names and the clang binary, and kept while
-every file clang read is unchanged; a cached read checks those files' sizes and times
+cache directory, keyed by the headers' names, the clang binary and the version of the
+reader, and kept while every file clang read is unchanged; a cached read checks those files' sizes and times
 and starts no process.
 
 The standard library (DESIGN §12.7) is Zinkite in `lib/zink/`, built into the
@@ -314,7 +316,9 @@ and `zink.cli`'s `ArgIterator`. `text.lines()` calls the package-private
 `next()`, given to generic code or passed as an `Iterator<string>&`. A for-each over
 `lines()`, `words()`, `splitBy()` and `codePoints()` on 26 MB of text takes 0.20 s,
 against 0.25 s for the C functions they replace, since each `next()` is a direct
-call the C compiler inlines.
+call the C compiler inlines. `repeat` and `split` are Zinkite too, in `TextMethods`:
+`split` builds its array with `splitBy`, where the caller keeps it, of views into the
+text.
 
 Where they differ from STDLIB: `fs.move` of a directory across file systems still
 fails with `CROSS_DEVICE`; `hash.xxh3`, JSON5 and `TreeBuilder` aren't written.

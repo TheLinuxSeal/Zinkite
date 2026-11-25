@@ -681,13 +681,15 @@ fn truncated_input_never_panics() {
             continue;
         }
         let text = std::fs::read_to_string(&path).unwrap();
+        // Every few bytes of a short example; about 2,000 cuts through a long one.
+        let step = (text.len() / 2000).max(3);
         let mut cut = 0;
         while cut < text.len() {
             if text.is_char_boundary(cut) {
                 let file = SourceFile::new("cut.zn", &text[..cut]);
                 let _ = zink::parse(&file);
             }
-            cut += 3;
+            cut += step;
         }
     }
 }

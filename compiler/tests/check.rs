@@ -1182,7 +1182,10 @@ fn edited_examples_never_panic() {
         }
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = text.lines().collect();
-        for i in 0..lines.len() {
+        // Every line of a short example; about 200 spread through a long one, since each
+        // edit checks the whole file again.
+        let stride = lines.len().div_ceil(200);
+        for i in (0..lines.len()).step_by(stride) {
             for dup in [false, true] {
                 let mut edited: Vec<&str> = lines.clone();
                 if dup {

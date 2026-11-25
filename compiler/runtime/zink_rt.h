@@ -798,15 +798,17 @@ static int zr_fmt_i64(char *buf, int64_t x) {
 }
 
 /* The shortest text that parses back to the same double (STDLIB §2.4): plain digits
- * for exponents from -6 to 20, as in Java and JavaScript, and scientific beyond. */
-static int zr_fmt_f64(char *buf, double x) {
+ * for exponents from -6 to 20, as in Java and JavaScript, and scientific beyond. With
+ * `single`, the same for a float, which x holds exactly: 0.1f prints as 0.1, not as
+ * the double it widens to, 0.10000000149011612. */
+static int zr_fmt_float(char *buf, double x, int single) {
     if (isnan(x)) { memcpy(buf, "NaN", 3); return 3; }
     if (isinf(x)) { if (x < 0) { memcpy(buf, "-Infinity", 9); return 9; } memcpy(buf, "Infinity", 8); return 8; }
     if (x == 0) { if (signbit(x)) { memcpy(buf, "-0.0", 4); return 4; } memcpy(buf, "0.0", 3); return 3; }
     int prec = 1;
-    for (; prec < 17; prec++) {
+    for (; prec < (single ? 9 : 17); prec++) {
         snprintf(buf, 40, "%.*e", prec - 1, x);
-        if (strtod(buf, NULL) == x) break;
+        if (single ? strtof(buf, NULL) == (float)x : strtod(buf, NULL) == x) break;
     }
     snprintf(buf, 40, "%.*e", prec - 1, x);
     int exp = atoi(strchr(buf, 'e') + 1);
@@ -841,10 +843,13 @@ static void zr_pad(zr_sink s, const char *p, int n, int64_t w, char fill) {
 
 static ZR_UNUSED void zr_w_i64(zr_sink s, int64_t x) { char b[24]; zr_put(s, b, (size_t)zr_fmt_i64(b, x)); }
 static ZR_UNUSED void zr_w_u64(zr_sink s, uint64_t x) { char b[24]; zr_put(s, b, (size_t)zr_fmt_u64(b, x)); }
+static int zr_fmt_f64(char *buf, double x) { return zr_fmt_float(buf, x, 0); }
 static ZR_UNUSED void zr_w_f64(zr_sink s, double x) { char b[400]; zr_put(s, b, (size_t)zr_fmt_f64(b, x)); }
+static ZR_UNUSED void zr_w_f32(zr_sink s, float x) { char b[400]; zr_put(s, b, (size_t)zr_fmt_float(b, x, 1)); }
 static ZR_UNUSED void zr_w_i64_pad(zr_sink s, int64_t x, int64_t w, char fill) { char b[24]; zr_pad(s, b, zr_fmt_i64(b, x), w, fill); }
 static ZR_UNUSED void zr_w_u64_pad(zr_sink s, uint64_t x, int64_t w, char fill) { char b[24]; zr_pad(s, b, zr_fmt_u64(b, x), w, fill); }
 static ZR_UNUSED void zr_w_f64_pad(zr_sink s, double x, int64_t w, char fill) { char b[400]; zr_pad(s, b, zr_fmt_f64(b, x), w, fill); }
+static ZR_UNUSED void zr_w_f32_pad(zr_sink s, float x, int64_t w, char fill) { char b[400]; zr_pad(s, b, zr_fmt_float(b, x, 1), w, fill); }
 
 /* 128-bit numbers as text: at most 39 digits and a sign. */
 static int zr_fmt_u128(char *buf, zr_u128 x) {

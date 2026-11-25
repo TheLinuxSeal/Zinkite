@@ -8,7 +8,8 @@
 >
 > There is no compiler yet, so they are checked by hand against the grammar and the rules, not compiled.
 >
-> Section 5 covers a second batch of four, written on 2026-11-19.
+> Section 5 covers a second batch of four, written on 2026-11-19. Sections 6 and 7 cover
+> two larger programs, written and run on 2026-11-24 with the compiler.
 
 ---
 
@@ -134,3 +135,119 @@ Also clarified: generic code may cast a `T` to any number type (DESIGN §10.1), 
 - **`stats` computes everything in `f64`**, so integers beyond 2^53 print rounded. Exact integer statistics would need `i128` or `zink.bigint`.
 - **An interpolated quantile** needs `selectNth` and then the minimum of what follows it. A library `quantile` would save every program from writing that.
 
+
+---
+
+## 6. quarry: a game through C's headers
+
+> `quarry/quarry.zn`, about 1,800 lines: a voxel sandbox drawn with OpenGL through SDL2,
+> both reached by `extern import` (DESIGN §12.6). It was written against the compiler,
+> and checked by running it: frames drawn with SDL's offscreen driver and looked at, with
+> clicks injected into a copy.
+
+### 6.1 What worked
+- **Calling C as it is.** 41 SDL and OpenGL functions, and constants such as
+  `GL_DEPTH_TEST` and `SDL_SCANCODE_W`, needed nothing written for them.
+- **Explicit declarations for pointers.** 11 functions needed an explicit `extern`
+  declaration, each one line saying what its pointer means:
+  - vertex data, pixels and fog colors are slices of numbers;
+  - buffer ids, screenshots and the event are writable views C fills.
+
+  An `SDL_Event` is an array of 16 `u32`s whose fields are read by their offsets.
+- **Wrapping arithmetic** made the noise's hash plain code: `h * 0x94D049BB133111EB`,
+  with `(u64%) x` to reinterpret a coordinate.
+- **Statuses.** `aim` fails with `MISSING` when nothing is in reach, which `Hit aimed
+  @nothing = aim(...)` reads. Loading a world checks nothing step by step: a short file
+  fails where it reads past the end, and `@@` in `main` catches it.
+- **Roots.** The world, with its blocks and its column heights, and the mesh builder,
+  with a vertex array for cubes and one for water, are roots with two growable parts.
+  Each is passed by reference everywhere, with nothing to annotate.
+- **It runs as fast as C would.**
+  - At `-O2`, generating 5 million blocks and building 256 chunk meshes take about 0.3 s.
+  - A frame costs about 0.1 ms of the CPU.
+  - At `-O0`, as `zink run` builds by default, it starts in about a second.
+
+### 6.2 Fixed in the compiler while writing it
+- **A typedef of an unnamed enum**, as `typedef enum { ... } SDL_bool;`, wasn't read as an
+  enum, so `SDL_GL_SetAttribute` and `SDL_SetRelativeMouseMode` couldn't be called. SDL
+  declares most of its types this way. clang gives such a typedef's type as its own
+  name, and the reader now keeps the written type, `enum SDL_bool`, for it.
+- **The cache of what clang found in a header** was kept across versions of the reader.
+  Its key now includes the reader's version, so a fixed reader isn't hidden by an old
+  entry.
+- **`split`** type-checked but had no code generated for it. It's now written in Zinkite,
+  in `zink.lang`'s `TextMethods`, over `splitBy`.
+- **An `f32` printed as the double it widens to**, `0.10000000149011612`. It now prints
+  as the shortest text that reads back as the same `f32`, `0.1`.
+
+### 6.3 What it ran into
+- **No constants.** Block ids are `u8` statics, `u8 GRASS = 1;`, which are variables, so
+  they can't be `case` labels.
+- **No integer for an enum constant.** An enum can't index an array or be written to a
+  file as a byte. So a block's id is a `u8`, and how it's drawn is an enum, `Kind`, in a
+  table indexed by the id.
+- **A `char **` can't cross into C**, so shaders can't be compiled, and the drawing is
+  OpenGL's fixed pipeline. A `void *` result, as `SDL_GLContext`, can only be declared
+  as an integer.
+- **`extern import` takes no defines.** GL 1.5's functions, such as `glBindBuffer`, are
+  in `gl.h` only under `GL_GLEXT_PROTOTYPES`, so each needs an explicit declaration.
+- **A function-like macro is not a name.** `SDL_WINDOWPOS_CENTERED` is written as its
+  value, `0x2FFF0000`.
+- **A C struct read by offsets** is fragile. `SDL_Event`'s fields were checked against
+  `offsetof` in C, by hand.
+- **No array of n copies of a value.** Five million blocks, and the pixels of each
+  texture, start as a loop of pushes.
+- **A for-each over a temporary array** is refused as a reference into a temporary:
+  `for (string p : s.split(","))` needs the array in a variable first.
+- **Casts between `i64` and `f64`** are needed wherever a block coordinate meets a
+  position, by the rule that `f64` holds only integers up to 32 bits (DESIGN §9.1).
+  `floorI` and `(f64)` appear 124 times.
+
+---
+
+## 7. lisp: an interpreter with a collector
+
+> `lisp.zn`, about 830 lines: a Scheme-like Lisp with closures, calls in tail position
+> that don't nest, a REPL, and a mark-and-sweep collector. It was written against the
+> compiler, and checked with programs fed on stdin, among them one that churns ten
+> million cells. A copy that collects every few allocations prints the same output as
+> the real build.
+
+### 7.1 What worked
+- **Statuses as the interpreter's errors.** `eval` checks nothing it calls. An unbound
+  name, the car of a number, `+#` overflowing or a division by zero fails where it
+  happens, and nothing reads the failure, so it leaves every call in progress.
+  `i64 value @@failed = lisp.eval(form, NIL);` in the REPL catches it, reports it, and
+  the session goes on (DESIGN §7.6). It needed no error type, no checks after calls,
+  and no unwinding code.
+- **A heap of handles.** Values are `i64`s: tagged integers, or indexes into a
+  `Cell[..>]` that only grows. A freed cell goes on a free list and is reused, so
+  indexes never move and no reference into the heap outlives anything.
+- **The collector in ordinary code.** The mark stack is popped with a repeat loop,
+  `while (i64 v : gray ->)`. The roots are an `i64[..~]` that `truncate` cuts back as
+  calls return. The ten-million-step loop runs in 4 MB, where it took 4 GB with no
+  collector.
+- **A switch on strings** picks the built-in, `case "=", "<", ">", "<=", ">=" =>`, and
+  a `switch` expression inside an arm gives the comparison.
+
+### 7.2 Fixed in the compiler while writing it
+- **A number held in a reference was used as its pointer** in five places: as an
+  index, as a slice bound, as a shift count, and as a `switch`'s scrutinee, as a
+  statement and as an expression. `src[pos]` with an `i64& pos` stopped the program with
+  an index like 140735816223104, out of range. The bounds check kept it from reading
+  memory, but the code was wrong. Each place now takes the referenced value's type, as
+  string interpolation already did.
+
+### 7.3 What it ran into
+- **A `switch` arm can't be `return x;`**, since an arm is an expression or a block:
+  `case "car" => { return car(car(args)); }`.
+- **Parameters are read-only copies**, so `step`'s tail-call loop works on locals
+  copied from them, or here on its slots in the root stack.
+- **The roots are by hand.** Every value held in a local across something that may
+  allocate has to be on the root stack, and missing one is a bug that shows only when a
+  collection happens at that moment. Collecting every few allocations in a test copy
+  is what made such a bug show.
+- **No enum for a built-in's id.** A built-in cell holds its index in a table of names,
+  and dispatch is a switch on the name.
+- **A test that edits each line of each example** grows with the square of an
+  example's length, so for a long one it now edits about 200 lines spread through it.

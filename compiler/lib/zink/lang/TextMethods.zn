@@ -15,4 +15,15 @@ class TextMethods {
         }
         return out;
     }
+
+    // The parts of s between each sep, eagerly, as views into s (STDLIB §3.2): what
+    // splitBy gives, in an array. "a,,b".split(",") is ["a", "", "b"], and
+    // "".split(",") is [""].
+    static string[..>] split(string s, string sep) {
+        string[..>] parts = [];
+        for (string part : SplitIterator.splitBy(s, sep)) {
+            parts +> part;
+        }
+        return parts;
+    }
 }

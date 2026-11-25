@@ -119,7 +119,12 @@ random numbers, hashing, hex and base64, CSV, and JSON, read as events or into a
 and written back. Only `hash.xxh3` is missing from it. TOML and YAML come next, into
 the same tree.
 
-All eight programs in `examples/` run.
+All nine programs in `examples/` run. The two largest are:
+- [`examples/quarry`](examples/quarry), a voxel sandbox in a window, drawn with OpenGL
+  through SDL2's C headers;
+- [`examples/lisp.zn`](examples/lisp.zn), a Scheme-like interpreter with a garbage
+  collector.
+
 `compiler/README.md` lists what's done and what isn't, in detail.
 
 ## Building

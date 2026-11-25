@@ -980,6 +980,76 @@ fn examples_compile_or_say_what_is_missing() {
     }
 }
 
+/// A number held in a reference is its value wherever a number is used: as an index,
+/// in each index mode, as a slice's bounds, as a shift count and as a `switch`'s
+/// scrutinee, which once used the pointer itself.
+#[test]
+fn a_reference_to_a_number_is_its_value() {
+    prints(
+        r#"void probe(i64& n, string s) {
+    i64[..>] a = [10, 20, 30, 40];
+    println("${a[n]} ${s[n]} ${a[^n]} ${a[%n]} ${a[|n]}");
+    println("${s[n:]} ${s[:n]} ${s[n:^n]} ${a[n:]}");
+    i64 x = 6;
+    x = x << n;
+    println("${1 << n} ${256 >> n} ${x}");
+    string word = switch (n) { case 1 => "one"; default => "other"; };
+    switch (n) {
+        case 1 => println(word);
+        default => println("not one");
+    }
+    while (n < s.len && s[n] != 'd') { n++; }
+}
+
+void main() {
+    i64 n = 1;
+    probe(n, "abcdef");
+    println("${n}");
+}
+"#,
+        "20 98 40 20 20\nbcdef a bcde [20, 30, 40]\n2 128 12\none\n3\n",
+    );
+}
+
+/// An f32 prints as the shortest text that reads back as the same f32, not as the
+/// double it widens to.
+#[test]
+fn f32s_print_their_shortest_text() {
+    prints(
+        &body(
+            r#"f32 a = 0.1f32;
+    f32[..>] xs = [0.1, 1.5, 3.4028235e38, 1e-45];
+    println("${a} ${math.sin(1.0f32)} ${(f32) 1.0 / 3.0f32} ${xs} ${a.pad(5)}| ${(f64) a}");"#,
+        ),
+        "0.1 0.84147096 0.33333334 [0.1, 1.5, 3.4028235e38, 1e-45]   0.1| 0.10000000149011612\n",
+    );
+}
+
+/// `split` (STDLIB §3.2): every part, empty ones included, as a view into the text, so
+/// the parts can outlive the call along with the text.
+#[test]
+fn split_gives_views_into_the_text() {
+    prints(
+        r#"string[..>] fields(u8[..>]& buf) {
+    buf.append("x;y;");
+    return buf.split(";");
+}
+
+void main() {
+    string[..>] parts = "a,,b".split(",");
+    println("${parts.len}: [${parts[0]}] [${parts[1]}] [${parts[2]}]");
+    string[..>] one = "".split(",");
+    string[..>] whole = "abc".split("");
+    println("${one.len} [${one[0]}] ${whole.len} [${whole[0]}]");
+    u8[..>] buf = [];
+    string[..>] f = fields(buf);
+    println("${f.len} ${f[0]}${f[1]} [${f[2]}]");
+}
+"#,
+        "3: [a] [] [b]\n1 [] 1 [abc]\n3 xy []\n",
+    );
+}
+
 #[test]
 fn floats_print_their_shortest_text() {
     prints(
@@ -2295,6 +2365,64 @@ fn has_clang() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// Whether clang finds every one of these headers.
+fn has_headers(headers: &[&str]) -> bool {
+    let src: String = headers
+        .iter()
+        .map(|h| format!("#include <{}>\n", h))
+        .collect();
+    let Ok(mut child) = Command::new("clang")
+        .args(["-x", "c", "-fsyntax-only", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    use std::io::Write;
+    let _ = child.stdin.take().unwrap().write_all(src.as_bytes());
+    child.wait().is_ok_and(|s| s.success())
+}
+
+/// examples/quarry: a game in a window, through SDL2's and OpenGL's headers. It's built
+/// wherever they're installed, and `--help` needs no screen. Then a frame is drawn with
+/// SDL's offscreen driver, where that can make an OpenGL context (it needs a GPU or
+/// Mesa), and must come out as a PPM image of the size asked for.
+#[test]
+fn quarry_builds_where_sdl2_is_installed() {
+    if !has_clang() || !has_headers(&["SDL2/SDL.h", "GL/gl.h"]) {
+        eprintln!("skipped: no clang, or no SDL2 or OpenGL headers");
+        return;
+    }
+    let exe = example("quarry/quarry");
+    let help = Command::new(&exe).arg("--help").output().unwrap();
+    assert!(help.status.success());
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(text.contains("usage: quarry"), "{}", text);
+
+    let shot = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("quarry-shot.ppm");
+    let _ = std::fs::remove_file(&shot);
+    let out = Command::new(&exe)
+        .args(["--seed", "7", "--size", "160,100", "--shot"])
+        .arg(&shot)
+        .env("SDL_VIDEODRIVER", "offscreen")
+        .output()
+        .unwrap();
+    let said =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        assert!(said.contains("quarry: SDL can't"), "{}", said);
+        eprintln!("not drawn: {}", said.trim());
+        return;
+    }
+    assert!(said.contains("built 256 chunk meshes"), "{}", said);
+    let image = std::fs::read(&shot).unwrap();
+    let header = b"P6\n160 100\n255\n";
+    assert!(image.starts_with(header));
+    assert_eq!(image.len(), header.len() + 160 * 100 * 3);
+}
+
 /// Calling C (DESIGN §12.6): output from Zinkite and from C's `puts` in order, through one
 /// `stdout`; functions from six headers called as they are, `const char *` as text, macro
 /// constants, `FILE` handles compared with `null`, `extern.errno()`, an explicit `extern`
@@ -2713,7 +2841,7 @@ fn diagnostics_beside_the_library_point_into_the_program() {
     assert!(shown[0].contains("prog.zn:4:13"), "{}", shown[0]);
 }
 
-/// Builds one of the examples.
+/// Builds one of the examples, which may be in a directory of its own: `quarry/quarry`.
 fn example(name: &str) -> std::path::PathBuf {
     let path = format!("{}/../examples/{}.zn", env!("CARGO_MANIFEST_DIR"), name);
     let file = SourceFile::new(path.clone(), std::fs::read_to_string(&path).unwrap());
@@ -2728,9 +2856,87 @@ fn example(name: &str) -> std::path::PathBuf {
                 .collect::<Vec<_>>()
         )
     };
-    let exe = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("ex-{}", name));
+    let exe = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("ex-{}", name.replace('/', "-")));
     zink::driver::compile(&c, &exe, false).unwrap();
     exe
+}
+
+/// examples/lisp.zn, fed on stdin. With -i it prints each value and reports each error
+/// on stderr, going on to the next form: an unbound name, a car of a number, division
+/// by zero and integer overflow, each a status nothing read until the `@@` that
+/// evaluates the form. Without -i, the first error ends the program, naming its line.
+/// The collector frees what a loop makes while what's still reachable survives.
+#[test]
+fn lisp_example_runs() {
+    let exe = example("lisp");
+    let feed = |args: &[&str], src: &str| {
+        use std::io::Write;
+        let mut child = Command::new(&exe)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(src.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+            out.status.code().unwrap_or(-1),
+        )
+    };
+    let (out, err, code) = feed(
+        &["-i"],
+        r#"(define (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
+(fib 20)
+(define (make-counter) (let ((n 0)) (lambda () (set! n (+ n 1)) n)))
+(define c (make-counter))
+(c) (c)
+(define (map f xs) (if (null? xs) '() (cons (f (car xs)) (map f (cdr xs)))))
+(map (lambda (x) (* x x)) '(1 2 3))
+(define (sum . xs) (apply + xs))
+(sum 1 2 3 4)
+(cond ((= 1 2) 'no) (else 'yes))
+(car 5)
+nowhere
+(/ 1 0)
+(* 4611686018427387903 4)
+(write "a \"quoted\" line\n") (newline)
+'(1 (2 . 3) "s" #t #f ())
+(define (range a b) (if (>= a b) '() (cons a (range (+ a 1) b))))
+(define keep (range 0 1000))
+(define (churn n) (if (= n 0) 'done (begin (range 0 100) (c) (churn (- n 1)))))
+(churn 20000)
+(apply + keep)
+(c)
+"#,
+    );
+    assert_eq!(
+        out,
+        "6765\n1\n2\n(1 4 9)\n10\nyes\n\"a \\\"quoted\\\" line\\n\"\n\
+         (1 (2 . 3) \"s\" #t #f ())\ndone\n499500\n20003\n"
+    );
+    assert_eq!(
+        err,
+        "error: car of something that isn't a pair: 5\nerror: not defined: nowhere\n\
+         error: division by zero\nerror: integer overflow\n"
+    );
+    assert_eq!(code, 1);
+
+    let (out, err, code) = feed(
+        &[],
+        "(display (+ 1 2))\n(newline)\n\n  (car '())\n(display 4)\n",
+    );
+    assert_eq!(out, "3\n");
+    assert_eq!(err, "stdin:4: car of something that isn't a pair: ()\n");
+    assert_eq!(code, 1);
 }
 
 /// The examples that need zink.io and zink.cli: csvsort, sortlines, stats and dirwalk.
