@@ -22,6 +22,11 @@ then check each rule with a program that breaks it and the message it gives. A
 last test deletes or repeats each line of each example, or 200 lines spread through
 a long one, and checks the result, to make sure the checker never crashes.
 
+The documentation's tests (`tests/docs.rs`) compile every complete program in
+`../docs`, run those followed by an `output` block and compare what they print, and
+check that those followed by an `error` block are rejected with its message
+(`docs/README.md`, "Examples"). `ZINK_DOCS=03-text.md` checks one chapter.
+
 ## Using it
 
 ```

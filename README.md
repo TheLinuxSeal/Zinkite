@@ -59,6 +59,9 @@ $ zink grepish.zn -n the notes.txt
 3: the lazy dog
 ```
 
+[The documentation](docs/README.md) describes every feature, with examples the compiler's
+tests compile and run.
+
 ## The ideas
 
 - **No heap.** Values live on the native stack, in static data, or on *data
@@ -190,6 +193,7 @@ again skips the C compiler. That is `$CC` if set, then clang, then gcc.
 
 | File | What it holds |
 |---|---|
+| [`docs/`](docs) | the documentation: every feature, with examples the tests compile and run |
 | [`DESIGN.md`](DESIGN.md) | the language: every decision, its status and its reasons |
 | [`GRAMMAR.md`](GRAMMAR.md) | the grammar |
 | [`REFERENCES.md`](REFERENCES.md) | the reference rules the compiler checks |
