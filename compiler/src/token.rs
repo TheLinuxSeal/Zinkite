@@ -199,7 +199,6 @@ impl Kw {
             Kw::Double => "the type is spelled `f64`",
             Kw::Char => "a code point is a `u32` (DESIGN §9.1)",
             Kw::Struct => "declare a `class`",
-            Kw::Final => "`final` is undecided (GRAMMAR §8)",
             Kw::Delete => "there are no destructors; use `defer` (DESIGN §6.4)",
             _ => return None,
         })

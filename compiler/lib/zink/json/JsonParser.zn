@@ -6,7 +6,7 @@ import zink.data.*;
 // recurses either. Numbers keep their text, duplicate keys are kept, and strings with
 // escapes are decoded into the caller's strings.
 public class JsonParser implements Parser {
-    public string input;
+    public final string input;
     public i64 maxDepth = 1024;     // nesting deeper than this fails with FULL
     private u8 errCode = 0;
     private i64 errLine = 0;

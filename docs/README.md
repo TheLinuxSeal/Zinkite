@@ -30,7 +30,7 @@ hello, world
 | 3 | [Text](03-text.md) | `string` views and `u8` arrays, interpolation, printing and formatting, text methods, UTF-8 |
 | 4 | [Arrays](04-arrays.md) | the slot grammar, every kind of array, operators, indexing, slices and writable views, sorting and the other methods |
 | 5 | [Memory and references](05-memory.md) | data stacks, copies and references, roots and lifetimes, removals, variable-size records, links, roots with several arrays |
-| 6 | [Classes, interfaces and generics](06-classes.md) | classes, constructors, visibility, `mut`, statics, interfaces, enums, generics and bounds, `packed`, `defer` |
+| 6 | [Classes, interfaces and generics](06-classes.md) | classes, constructors, visibility, `mut`, `final` fields, statics and constants, interfaces, enums, generics and bounds, `packed`, `defer` |
 | 7 | [Errors and statuses](07-errors.md) | the status code: `#`, `@`, `@@`, `@@@`, repeat loops, failures nothing reads, named codes |
 | 8 | [Functions and lambdas](08-functions.md) | functions, overloading, lambdas and function types, multiple results, recursion |
 | 9 | [Maps, sets, pools and iterators](09-collections.md) | `hashmap`, `hashset`, `pool` and `Handle`, iterators and for-each |

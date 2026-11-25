@@ -9,8 +9,8 @@ import zink.time.*;
 // object, gives an absent value, so a chain such as cfg.get("server").get("port").asI64()
 // needs one check, at the end. Only reading a value sets a status.
 public class Value {
-    public Node[:] tree;
-    public i64 index;
+    public final Node[:] tree;
+    public final i64 index;
 
     public Kind kind() {
         if (index < 0) {

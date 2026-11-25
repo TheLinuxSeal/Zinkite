@@ -3,8 +3,8 @@
 Zinkite's classes look like Java's, but they are values: a class is exactly its fields,
 stored where it is declared, and `=` copies it. There is no inheritance, no heap and no
 destructor. This chapter covers classes and their constructors, visibility, `mut` methods,
-static members, interfaces, enums, generics and their bounds, `packed` classes, and cleanup
-with `defer`. Where class values are stored, and what references to them may do, is in
+`final` fields, static members and constants, interfaces, enums, generics and their bounds,
+`packed` classes, and cleanup with `defer`. Where class values are stored, and what references to them may do, is in
 [Memory and references](05-memory.md). The reasons behind each decision are in
 [DESIGN §6](../DESIGN.md#6-classes-and-interfaces) and [§10](../DESIGN.md#10-generics).
 
@@ -469,10 +469,93 @@ help: it was bound to it: `all` is a plain parameter, which is a read-only copy
   object's fields can't be written through either. After `Node&? n = next;`, assigning
   `n.value` is an error, "`n` refers to something that can't be changed here". Reading
   through it, as a loop that walks a list with `cur .= cur.next` does, needs no `mut`.
-- **Static fields aren't part of an object**, so any method can change them, `mut` or not.
-  `static mut` is an error, since a static function has no object.
+- **Static fields aren't part of an object**, so any method can change them, `mut` or not,
+  unless they're `final` ([Constants](#constants)). `static mut` is an error, since a static
+  function has no object.
 - **An interface method's `mut` must match** in every class that implements it
   ([Interfaces](#interfaces)).
+
+## `final` fields
+
+A `final` field is set when its value is made: by its initializer, or else by the class's
+constructors. After that nothing changes it, as nothing changes a plain parameter.
+
+```java
+class Item {
+    final i64 id;
+    final i64 kind = 1;
+    f64 weight;
+
+    new(i64 id, f64 weight) {
+        this.id = id;
+        this.weight = weight;
+    }
+
+    mut void heavier(f64 by) { weight += by; }
+}
+
+void main() {
+    Item a = new Item(7, 12.5);
+    a.heavier(1.5);
+    println("${a.id} ${a.kind} ${a.weight}");
+    a = new Item(8, 1.0);         // a new value, with an id of its own
+    println("${a.id} ${a.weight}");
+}
+```
+
+```output
+7 1 14.0
+8 1.0
+```
+
+Changing one anywhere else is an error, in a `mut` method too:
+
+```java
+class Item {
+    final i64 id;
+    final i64 kind = 1;
+
+    new(i64 id) {
+        this.id = id;
+        kind = 2;
+    }
+
+    mut void renumber() { id = 0; }
+}
+
+void main() {
+    Item a = new Item(7);
+    a.id++;
+}
+```
+
+```error
+example.zn:7:9: error: can't assign to this: `kind` is `final`, and its initializer sets it for good
+help: drop the initializer to set it in the constructors instead (DESIGN §6.1)
+example.zn:10:27: error: can't assign to this: `id` is `final`, so only a constructor sets it
+help: make a new value with the one it should have, or drop `final` (DESIGN §6.1)
+example.zn:15:5: error: can't change this: `id` is `final`, so only a constructor sets it
+help: make a new value with the one it should have, or drop `final` (DESIGN §6.1)
+```
+
+- **Read-only means what it does for a plain parameter**: no `=`, `++` or `.=`, no
+  insertion or removal, no `mut` method, and no passing it to a `&` parameter or taking a
+  writable view of it. A reference bound to it can be read and not written through.
+- **The whole value can still be replaced**, as `a = new Item(8, 1.0)` is above, and so can
+  an array element holding one, which sorting does. A value has no identity, so `final`
+  works as Swift's `let` does in a struct, not as Java's `final` does on an object.
+- **A field with an initializer is fixed by it**, so a constructor can't change it either.
+  An editable array, a map, a set or a pool needs no initializer, since it starts empty, so
+  a `final string[..>] tags;` is filled by the constructors and fixed after.
+- **Only the constructor itself sets one**, through `this`: not a method it calls, another
+  value of the class, or a lambda inside it.
+- **A `final` reference field can't be rebound with `.=`**, but what it refers to can still
+  change.
+- **The default constructor** takes the `final` fields that have no initializer, like the
+  others ([The default constructor](#the-default-constructor)).
+- **`final` goes only on fields.** On a class, a method or a constructor it is an error,
+  since there are no subclasses. On a local or a parameter it is one too: the compiler
+  already knows which locals change, and a plain parameter can't.
 
 ## Static members
 
@@ -508,6 +591,87 @@ void main() {
 - **A script file**, whose top level has functions and fields but no class around them, is
   wrapped in a hidden class, and its top-level functions and fields are static members of it
   ([Programs, packages and building](10-programs.md)).
+
+### Constants
+
+A `static final` field is set only by its initializer, which it must have. An integer,
+`bool` or `string` one whose initializer is a constant expression is a **constant**: its
+value is worked out when the program is compiled, so it can give an array's capacity and be
+a case label. A constant expression is made of literals, other constants, `T.MIN` and
+`T.MAX`, and the arithmetic, bitwise, shift, comparison and logical operators.
+
+```java
+class Blocks {
+    public static final u8 AIR = 0;
+    public static final u8 GRASS = AIR + 1;
+    public static final u8 STONE = GRASS + 1;
+    public static final i64 MAX_NAME = 8;
+}
+
+static final string GREETING = "hello";
+
+string describe(u8 b) {
+    return switch (b) {
+        case Blocks.AIR => "air";
+        case Blocks.GRASS => "grass";
+        case Blocks.STONE => "stone";
+        default => "unknown";
+    };
+}
+
+void main() {
+    u8[..~Blocks.MAX_NAME] name = [];
+    name.append("quarry");
+    println("${GREETING} ${name}: ${describe(Blocks.GRASS)} ${describe(9)}");
+}
+```
+
+```output
+hello quarry: grass unknown
+```
+
+A plain static, or a `static final` set by a call, is a variable as far as a cap or a case
+label goes, and a constant that doesn't fit its type is an error:
+
+```java
+static i64 size = 4;
+static final i64 TWICE = twice(2);
+static final u8 BIG = 200 * 2;
+
+i64 twice(i64 n) { return n * 2; }
+
+void main() {
+    u8[..~size] a = [];
+    i64 v = 2;
+    switch (v) {
+        case size => println("size");
+        case TWICE => println("twice");
+        default => println("other");
+    }
+}
+```
+
+```error
+example.zn:3:23: error: 400 doesn't fit in u8
+help: `(u8%) x` wraps and `(u8|) x` saturates, if that's what you want (DESIGN §9.1)
+example.zn:8:11: error: `size` isn't a constant, so it can't give an array's capacity
+help: a capacity is a number or a constant, a `static final` set by a constant expression: `static final i64 MAX_NAME = 64;` (DESIGN §4.2, §6.1)
+example.zn:11:14: error: `size` isn't a constant, and a case label is a literal, an enum constant or a constant
+help: declare it `static final` with a value worked out from literals: `static final u8 GRASS = 1;` (DESIGN §6.1, §9.4)
+example.zn:12:14: error: `TWICE` is `static final`, but its initializer isn't a constant expression, so it can't be a case label
+help: a constant's initializer is literals, other constants and operators on them (DESIGN §6.1)
+```
+
+- **A constant is worked out exactly**: one that doesn't fit its type, a division by zero,
+  or a shift by the type's width or more is an error. `~` on an unsigned type flips that
+  type's bits, so `static final u32 ALL = ~0;` is 4294967295.
+- **A constant is named like any static**: by its bare name in its own class or script
+  file, and as `Blocks.GRASS` elsewhere, case labels included.
+- **A constant is the same in every thread**, since nothing changes it
+  ([Threads](11-threads.md)).
+- **Other `static final` fields are read-only statics**, set before `main` like any
+  static: one set by a call, and floats, such as `static final f64 PI = 3.14159;`, which
+  nothing needs as constants.
 
 ## Class values
 

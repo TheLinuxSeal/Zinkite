@@ -16,7 +16,7 @@ that has no object.
 
 ```java
 class Temperature {
-    static f64 FREEZING = 0.0;
+    static final f64 FREEZING = 0.0;
 
     static f64 toFahrenheit(f64 celsius) {
         return celsius * 9.0 / 5.0 + 32.0;

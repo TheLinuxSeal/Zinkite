@@ -265,6 +265,8 @@ help: only views of string literals are shared between threads; copy the text in
   that moment, `counter` 42 above, not its initializer's.
 - **Statics the worker never uses are copied all the same.** A large static array is copied
   into every worker; pass what a worker needs through its lambda or a queue instead.
+- **Constants aren't copied**: an integer or `bool` `static final` set by a constant
+  expression is the same in every thread ([Constants](06-classes.md#constants)).
 - **Calls through `func` values are followed conservatively**: a worker that calls through
   one is checked as if it could call any lambda in the program.
 

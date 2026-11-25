@@ -13,9 +13,9 @@ public class DateTime {
     public i16 offsetMinutes;
     public u8 parts;
 
-    public static u8 DATE = 1;
-    public static u8 TIME = 2;
-    public static u8 OFFSET = 4;
+    public static final u8 DATE = 1;
+    public static final u8 TIME = 2;
+    public static final u8 OFFSET = 4;
 
     // RFC 3339 ("2026-11-18T09:30:00.5+01:00"), and its date-only ("2026-11-18") and
     // time-only ("09:30:00") forms. 't' and ' ' may stand for 'T', 'z' for 'Z'. INVALID.

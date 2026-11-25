@@ -16,7 +16,7 @@ use crate::builtins::{self, Need, NumCaps, Origin, SeqKind, Sig};
 use crate::diag::{Diagnostic, Severity};
 use crate::flow::Flow;
 use crate::program::{
-    ClassKind, FieldInfo, Lookup, MethodInfo, Program, Scope, active, starts_empty,
+    ClassKind, ConstVal, FieldInfo, Lookup, MethodInfo, Program, Scope, active, starts_empty,
 };
 use crate::source::{SourceFile, Span};
 use crate::token::Prim;
@@ -157,6 +157,12 @@ struct Ro {
 
 fn is_ref_ty(t: &Ty) -> bool {
     matches!(t, Ty::Ref(_)) || matches!(t, Ty::Nullable(x) if matches!(**x, Ty::Ref(_)))
+}
+
+/// A reference or a writable view: `final` on a field of one keeps it from being rebound,
+/// not what it refers to from being changed (DESIGN §5.1, §6.1).
+fn ref_like(t: &Ty) -> bool {
+    is_ref_ty(t) || matches!(t, Ty::View(_))
 }
 
 /// A field a constructor must assign.
@@ -469,6 +475,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             &Scope {
                 file: self.file,
                 tparams: &tps,
+                class: self.class,
             },
             &mut d,
         );
@@ -520,11 +527,26 @@ impl<'p, 'a> Checker<'p, 'a> {
                         ctps.clone(),
                     );
                     self.root_new_ok = f.is_static && matches!(init.kind, E::New { .. });
+                    let before = self.error_count();
                     let t = self.expr(init, Some(&f.ty));
                     self.root_new_ok = false;
                     self.expect(&t, &f.ty, init);
                     self.end();
                     self.init_of = None;
+                    // A constant is worked out now: one that can't be is reported here.
+                    if f.is_static
+                        && f.is_final
+                        && self.error_count() == before
+                        && let Err(e) = prog.const_value(id, &f.name)
+                        && e.span.start >= init.span.start
+                        && e.span.end <= init.span.end
+                    {
+                        self.diags.push((
+                            e.file,
+                            Diagnostic::error(e.span, e.msg)
+                                .with_help("a constant is worked out when the program is compiled, exactly, and must fit its type (DESIGN §6.1)"),
+                        ));
+                    }
                 }
             }
             for ctor in &c.ctors {
@@ -2682,7 +2704,17 @@ impl<'p, 'a> Checker<'p, 'a> {
                             ),
                             CaseLabel::Char(c, span) => ((*c).to_string(), *span),
                             CaseLabel::Str(s, span) => (format!("{:?}", s), *span),
-                            CaseLabel::Ident(id) => (id.name.clone(), id.span),
+                            CaseLabel::Ident(id) => (
+                                self.label_key(&[&id.name], matches!(kind, K::Enum(_))),
+                                id.span,
+                            ),
+                            CaseLabel::Static { class, name } => (
+                                self.label_key(
+                                    &[&class.name, &name.name],
+                                    matches!(kind, K::Enum(_)),
+                                ),
+                                name.span,
+                            ),
                         };
                         if seen.contains(&key) {
                             self.err(span, "this case is already covered by an earlier label");
@@ -2838,11 +2870,137 @@ impl<'p, 'a> Checker<'p, 'a> {
                 }
                 None => {
                     let t = self.ident(&id.name, id.span);
-                    if !int.as_ref().is_some_and(|i| self.rank(&t, i).is_some()) && !is_str {
-                        mismatch(self, id.span, "a name");
+                    if self.lookup_local(&id.name).is_some() {
+                        self.err_help(
+                            id.span,
+                            format!("`{}` is a variable, and a case label is a constant", id.name),
+                            "compare it with `==` in an `if`, or make the label a `static final` constant (DESIGN §6.1, §9.4)",
+                        );
+                        return;
                     }
+                    self.label_constant(&[&id.name], id.span, &t, int, is_str, desc);
                 }
             },
+            CaseLabel::Static { class, name } => {
+                let path = [class.name.as_str(), name.name.as_str()];
+                if let Some(e) = en {
+                    let c = &self.prog.classes[e];
+                    let same = matches!(self.prog.find_class(self.file, &class.name), Lookup::Found(id) if id == e);
+                    if !same || !c.constants.contains(&name.name) {
+                        let msg = format!(
+                            "`{}.{}` isn't a constant of `{}`",
+                            class.name, name.name, c.name
+                        );
+                        self.err(name.span, msg);
+                    }
+                    return;
+                }
+                let base = Expr {
+                    kind: E::Ident(class.name.clone()),
+                    span: class.span,
+                };
+                let member = Expr {
+                    kind: E::Member {
+                        expr: Box::new(base),
+                        name: name.clone(),
+                    },
+                    span: class.span.to(name.span),
+                };
+                let t = self.expr(&member, None);
+                if let Some(f) = self.prog.final_named(self.file, self.class, &path)
+                    && let Some(i) = self.prog.classes[f.class]
+                        .fields
+                        .iter()
+                        .position(|x| x.name == f.name)
+                {
+                    self.facts
+                        .names
+                        .insert(key(name.span), NameRes::Field(f.class, i));
+                }
+                self.label_constant(&path, name.span, &t, int, is_str, desc);
+            }
+        }
+    }
+
+    /// How a named case label is compared for repeats: an enum constant by its name, a
+    /// constant by its value, as a literal is.
+    fn label_key(&self, path: &[&str], is_enum: bool) -> String {
+        let name = path.last().copied().unwrap_or_default().to_string();
+        if is_enum || (path.len() == 1 && self.lookup_local(path[0]).is_some()) {
+            return name;
+        }
+        let Some(f) = self.prog.final_named(self.file, self.class, path) else {
+            return name;
+        };
+        match self.prog.const_value(f.class, &f.name) {
+            Ok(Some(ConstVal::Int(v))) => v.to_string(),
+            Ok(Some(ConstVal::Str(s))) => format!("{:?}", s),
+            _ => path.join("."),
+        }
+    }
+
+    /// A case label that names something other than an enum constant: it must be a
+    /// constant whose value suits the switch (DESIGN §6.1, §9.4).
+    fn label_constant(
+        &mut self,
+        path: &[&str],
+        span: Span,
+        t: &Ty,
+        int: Option<Ty>,
+        is_str: bool,
+        desc: &str,
+    ) {
+        if matches!(t, Ty::Unknown) {
+            return;
+        }
+        let shown = path.join(".");
+        let Some(f) = self.prog.final_named(self.file, self.class, path) else {
+            self.err_help(
+                span,
+                format!("`{}` isn't a constant, and a case label is a literal, an enum constant or a constant", shown),
+                "declare it `static final` with a value worked out from literals: `static final u8 GRASS = 1;` (DESIGN §6.1, §9.4)",
+            );
+            return;
+        };
+        let v = match self.prog.const_value(f.class, &f.name) {
+            Ok(Some(v)) => v,
+            // Reported where it's declared.
+            Err(_) => return,
+            Ok(None) => {
+                self.err_help(
+                    span,
+                    format!("`{}` is `static final`, but its initializer isn't a constant expression, so it can't be a case label", shown),
+                    "a constant's initializer is literals, other constants and operators on them (DESIGN §6.1)",
+                );
+                return;
+            }
+        };
+        match (&v, &int) {
+            (ConstVal::Int(x), Some(Ty::Prim(p))) => {
+                if !fits(*x, *p) {
+                    self.err(
+                        span,
+                        format!(
+                            "`{}` is {}, which doesn't fit in {}, the type of the switch",
+                            shown,
+                            x,
+                            p.name()
+                        ),
+                    );
+                }
+            }
+            (ConstVal::Str(_), _) if is_str => {}
+            _ => {
+                let what = match v {
+                    ConstVal::Int(_) => "an integer",
+                    ConstVal::Str(_) => "a string",
+                    ConstVal::Bool(_) => "a `bool`",
+                };
+                self.err(
+                    span,
+                    format!("this label is {}, and the switch is on {}", what, desc),
+                );
+            }
         }
     }
 
@@ -6232,6 +6390,14 @@ impl<'p, 'a> Checker<'p, 'a> {
             }
             return None;
         }
+        if let Some((c, i)) = self.bare_field(n) {
+            let f = &self.prog.classes[c].fields[i];
+            if !(through && ref_like(&f.ty))
+                && let Some(ro) = self.final_ro(c, i, true)
+            {
+                return Some(ro);
+            }
+        }
         if self.field_type_quiet(n) {
             return self.this_read_only().map(|ro| Ro {
                 msg: format!("`{}` is a field, and {}", n, ro.msg),
@@ -6241,8 +6407,116 @@ impl<'p, 'a> Checker<'p, 'a> {
         None
     }
 
+    fn error_count(&self) -> usize {
+        self.diags
+            .iter()
+            .filter(|d| d.1.severity == Severity::Error)
+            .count()
+    }
+
+    /// The field a bare name reaches, when no local has the name: one of the current
+    /// class, or a script file's static.
+    fn bare_field(&self, n: &str) -> Option<(ClassId, usize)> {
+        let prog = self.prog;
+        self.class
+            .into_iter()
+            .chain(prog.files[self.file].script)
+            .find_map(|c| {
+                prog.classes[c]
+                    .fields
+                    .iter()
+                    .position(|f| f.name == n)
+                    .map(|i| (c, i))
+            })
+    }
+
+    /// Why `classes[cls].fields[i]`, when it is `final`, can't be changed here (DESIGN
+    /// §6.1): a static one is set only by its initializer, and one of each value by its
+    /// initializer or else by its class's constructors, through `this` (`on_this`).
+    fn final_ro(&self, cls: ClassId, i: usize, on_this: bool) -> Option<Ro> {
+        let f = &self.prog.classes[cls].fields[i];
+        if !f.is_final {
+            return None;
+        }
+        if f.is_static {
+            return Some(Ro {
+                msg: format!("`{}` is `final`, so only its initializer sets it", f.name),
+                help: "drop `final` if it should change (DESIGN §6.1)".into(),
+            });
+        }
+        if f.init.is_some() {
+            return Some(Ro {
+                msg: format!(
+                    "`{}` is `final`, and its initializer sets it for good",
+                    f.name
+                ),
+                help: "drop the initializer to set it in the constructors instead (DESIGN §6.1)"
+                    .into(),
+            });
+        }
+        let in_ctor = on_this
+            && self.class == Some(cls)
+            && self.fns.last().is_some_and(|f| f.kind == FnKind::Ctor);
+        if in_ctor {
+            return None;
+        }
+        let lambda = if on_this && self.in_ctor() {
+            ", not a lambda inside one"
+        } else {
+            ""
+        };
+        Some(Ro {
+            msg: format!(
+                "`{}` is `final`, so only a constructor sets it{}",
+                f.name, lambda
+            ),
+            help: "make a new value with the one it should have, or drop `final` (DESIGN §6.1)"
+                .into(),
+        })
+    }
+
+    /// `final_ro` for the member `name` of `base`, a value or a class name. With
+    /// `through`, a write to what a reference field refers to, which `final` allows.
+    fn final_member(&self, base: &Expr, name: &str, through: bool) -> Option<Ro> {
+        let mut b = base;
+        while let E::Paren(x) = &b.kind {
+            b = x;
+        }
+        let on_this = matches!(b.kind, E::This);
+        // A constructor's `this.x = ...` isn't typed through `this`.
+        let (cls, is_static) = if on_this {
+            (self.class?, false)
+        } else {
+            let mut bt = self.facts.types.get(&key(base.span))?;
+            while let Ty::Ref(x) | Ty::Nullable(x) = bt {
+                bt = x;
+            }
+            match bt {
+                Ty::TypeName(t) => match &**t {
+                    Ty::Class(id, _) => (*id, true),
+                    _ => return None,
+                },
+                Ty::Class(id, _) => (*id, false),
+                _ => return None,
+            }
+        };
+        let i = self.prog.classes[cls]
+            .fields
+            .iter()
+            .position(|f| f.name == name && f.is_static == is_static)?;
+        if through && ref_like(&self.prog.classes[cls].fields[i].ty) {
+            return None;
+        }
+        self.final_ro(cls, i, on_this)
+    }
+
     /// Why the storage `e` names can't be changed here, or `None` when it can.
     fn read_only(&self, e: &Expr) -> Option<Ro> {
+        if let E::Member { expr, name } = &e.kind
+            && let Some(ro) = self.final_member(expr, &name.name, true)
+        {
+            return Some(ro);
+        }
         match &e.kind {
             E::Paren(x) => self.read_only(x),
             E::Ident(n) => self.read_only_name(n, true),
@@ -6421,6 +6695,9 @@ impl<'p, 'a> Checker<'p, 'a> {
                 // will refer to too, since the reference outlives this statement.
                 let place = match &target.kind {
                     E::Ident(n) => self.read_only_name(n, false),
+                    E::Member { expr, name } => self
+                        .final_member(expr, &name.name, false)
+                        .or_else(|| self.read_only(target)),
                     _ => self.read_only(target),
                 };
                 match place {

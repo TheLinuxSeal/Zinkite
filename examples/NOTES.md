@@ -183,7 +183,8 @@ Also clarified: generic code may cast a `T` to any number type (DESIGN §10.1), 
 
 ### 6.3 What it ran into
 - **No constants.** Block ids are `u8` statics, `u8 GRASS = 1;`, which are variables, so
-  they can't be `case` labels.
+  they can't be `case` labels. Since 2026-11-25, `final u8 GRASS = 1;` is a constant
+  (DESIGN §6.1), which can be one, and quarry's block ids and sizes are `final`.
 - **No integer for an enum constant.** An enum can't index an array or be written to a
   file as a byte. So a block's id is a `u8`, and how it's drawn is an enum, `Kind`, in a
   table indexed by the id.

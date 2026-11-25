@@ -564,7 +564,7 @@ Timestamp dt.toTimestamp()           // INVALID without a date or an offset
 u8 dt.weekday()                      // 1 = Monday … 7 = Sunday, as in ISO 8601
 ```
 
-- **`parts` says which pieces the text had**: a date, a time, an offset (`DateTime.DATE`, `TIME` and `OFFSET`). TOML's local dates and times (§9.5) need it.
+- **`parts` says which pieces the text had**: a date, a time, an offset (`DateTime.DATE`, `TIME` and `OFFSET`, constants). TOML's local dates and times (§9.5) need it.
 - **`Duration` and `Timestamp` hold their nanoseconds in a public `i64 nanos`**, so a `Timestamp` covers 1677 to 2262.
 - **Later**:
   - time zones beyond UTC and fixed offsets (reading `/etc/localtime` and the tz database);
@@ -993,7 +993,7 @@ while (true) {
   - lines end in `\n` or `\r\n`;
   - a UTF-8 byte-order mark at the start is skipped.
 - **It fails with `INVALID`** for a quote that is never closed, or for text after a closing quote (`"a"b`). With `r.strict = true`, every row must also have as many fields as the first.
-- **Fields**: `string input; u8 separator = ','; u8 quote = '"'; bool strict = false;`.
+- **Fields**: `final string input; u8 separator = ','; u8 quote = '"'; bool strict = false;`.
 - **`csvsort.zn` can use it** to handle quoted fields, which it currently doesn't.
 
 `CsvWriter`:
@@ -1054,7 +1054,7 @@ for (Value user : cfg.get("users").items()) {
 - Only reading a value sets a status.
 - So a chain such as `cfg.get("server").get("port").asI64()` needs one check, at the end, and drops no status along the way.
 
-`Value` is a view of one node, `{ Node[:] tree; i64 index; }`, 24 bytes, with `index` -1 for an absent value. It is rooted at the tree, and through the tree at `text` and `strings`.
+`Value` is a view of one node, `{ final Node[:] tree; final i64 index; }`, 24 bytes, with `index` -1 for an absent value. It is rooted at the tree, and through the tree at `text` and `strings`.
 
 | Method | Result | Fails with |
 |---|---|---|
@@ -1124,7 +1124,7 @@ interface Parser {
 The format is RFC 8259.
 
 ```
-JsonParser p = new JsonParser(text);   // fields: string input; i64 maxDepth = 1024; bool json5 = false, later
+JsonParser p = new JsonParser(text);   // fields: final string input; i64 maxDepth = 1024; bool json5 = false, later
 Value v @bad = p.parse(tree, strings);
 ```
 

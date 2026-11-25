@@ -1345,7 +1345,7 @@ DateTime DateTime.parse(string s)     // RFC 3339, and its date-only and time-on
 u8[..~40] dt.iso()                    // RFC 3339 text of the parts it has
 Timestamp dt.toTimestamp()            // INVALID without a date or an offset
 u8 dt.weekday()                       // 1 = Monday ... 7 = Sunday, as in ISO 8601
-static u8 DateTime.DATE = 1         // and DateTime.TIME = 2, DateTime.OFFSET = 4: the bits of parts
+static final u8 DateTime.DATE = 1   // and DateTime.TIME = 2, DateTime.OFFSET = 4: the bits of parts
 ```
 
 ```java

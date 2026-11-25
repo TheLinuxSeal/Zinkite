@@ -368,7 +368,7 @@ CsvReader r = new CsvReader(string input)
 void r.next(string[..~]& fields, u8[..>]& strings)   // END after the last record; INVALID
 ParseError r.error()                                 // how the last failure happened; code 0 when none did
 
-class CsvReader { string input; u8 separator = ','; u8 quote = '"'; bool strict = false; ... }
+class CsvReader { final string input; u8 separator = ','; u8 quote = '"'; bool strict = false; ... }
 ```
 
 - **`next` clears `fields`**, then appends one view per field. Clearing is a removal, so
@@ -587,8 +587,8 @@ void main() {
   loops over one; kept in a variable, one is stepped with `next()` until `END`
   ([Iterators](09-collections.md#iterators)).
 
-`Value` is a view of one node, `{ Node[:] tree; i64 index; }`, with `index` -1 for an
-absent value.
+`Value` is a view of one node, `{ final Node[:] tree; final i64 index; }`, with `index` -1
+for an absent value.
 
 | Method | Result | Fails with |
 |---|---|---|
@@ -847,7 +847,7 @@ JsonParser p = new JsonParser(string input)
 Value p.parse(Node[..>]& tree, u8[..>]& strings)   // INVALID or FULL, with an absent value
 ParseError p.error()
 
-class JsonParser { string input; i64 maxDepth = 1024; ... }
+class JsonParser { final string input; i64 maxDepth = 1024; ... }
 ```
 
 - **Nesting deeper than `maxDepth` fails with `FULL`.** The parser doesn't recurse: it is
@@ -919,7 +919,7 @@ JsonEvent r.next()                     // END once the value is complete; INVALI
 void r.skipValue()                     // skips the value that comes next, a whole object or array included
 ParseError r.error()
 
-class JsonReader { string input; i64 maxDepth = 1024; ... }
+class JsonReader { final string input; i64 maxDepth = 1024; ... }
 class JsonEvent { JsonToken kind; string text; i64 line; i64 column; }
 string e.decode(u8[..>]& strings)      // the text with its escapes decoded
 i64 e.asI64()                          // TYPE for anything but a NUMBER without a fraction or exponent; RANGE

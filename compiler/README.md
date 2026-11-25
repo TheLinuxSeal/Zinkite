@@ -72,7 +72,15 @@ Done:
   that isn't `mut` can't change its object or call one that is, a writable view
   needs an array the code may change, and a lambda's captures are read-only and
   never assigned after they're initialized. A reference bound to something the
-  code can't change can't be written through.
+  code can't change can't be written through. A `final` field is set only by its
+  initializer or else its class's constructors, and a `static final` only by its
+  initializer (DESIGN §6.1).
+
+- constants (DESIGN §6.1): an integer, `bool` or `string` `static final` set by
+  a constant expression is worked out exactly at compile time, in
+  `program.rs`, where a cap may need it while types are resolved; it can give
+  an array's capacity and be a case label, and the C has an integer or `bool`
+  one's value, not a thread-local copy.
 
 - roots and lifetimes (`REFERENCES.md`), after type checking: rule S (no
   reference outlives what it points into), with a summary inferred for every

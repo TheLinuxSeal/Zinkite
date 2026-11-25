@@ -35,10 +35,10 @@ Reserved keywords:
 | Group | Keywords |
 |---|---|
 | Types | `bool` `i8` `i16` `i32` `i64` `u8` `u16` `u32` `u64` `f32` `f64` `string` `void` `func` |
-| Declarations | `package` `import` `as` `class` `interface` `enum` `implements` `static` `public` `private` `mut` `extern` (`new` is listed under Expressions) |
+| Declarations | `package` `import` `as` `class` `interface` `enum` `implements` `static` `public` `private` `mut` `final` `extern` (`new` is listed under Expressions) |
 | Statements | `if` `else` `while` `do` `for` `break` `continue` `return` `switch` `case` `default` `yield` `var` `defer` |
 | Expressions | `new` `this` `null` `true` `false` `instanceof` |
-| Reserved, not used | `extends` `protected` `abstract` `final` `struct` `super` `try` `catch` `finally` `throw` `long` `short` `byte` `double` `char` `delete` |
+| Reserved, not used | `extends` `protected` `abstract` `struct` `super` `try` `catch` `finally` `throw` `long` `short` `byte` `double` `char` `delete` |
 
 The unused keywords are reserved so the compiler can explain why they aren't available: there is no inheritance (DESIGN §6.1), nothing is thrown (DESIGN §7), there are no destructors (`delete()` suggests `defer`, DESIGN §6.4), the number types are spelled `i32`, `u8`, `f64` and so on, and code points are `u32` (DESIGN §9.1).
 
@@ -218,7 +218,7 @@ Checked after parsing:
 ## 4. Declarations
 
 ```
-modifier       = "public" | "private" | "static" | "mut"
+modifier       = "public" | "private" | "static" | "mut" | "final"
                | "extern" [ "(" STRING ")" ]      (* a C function, with its C name: extern("glClearColor") *)
                | "simd" ;                         (* contextual: §1.3, DESIGN §12.8 *)
 
@@ -262,6 +262,7 @@ constructor_decl = { modifier } "new" "(" [ param { "," param } ] ")" block ;
 
 Checked after parsing:
 - **`mut`** goes only on instance methods and interface methods (DESIGN §6.1). `static` goes only on fields and methods. `public` and `private` go on declarations, not on locals. `simd` goes only on functions and methods with a body, and not on `main` (DESIGN §12.8).
+- **`final`** goes only on fields (DESIGN §6.1). On a class, a method or a constructor it is an error that says there are no subclasses; on a local or a parameter, one that says it isn't needed (DESIGN Appendix A.15). A `static final` field must have an initializer.
 - **Constructors** are written `new(...)` and have no return type (DESIGN §6.2). Each must assign every field on every path that doesn't fail (DESIGN §6.2), which the type checker verifies. `this.new(...)` appears only in a constructor, as a statement or after `@err =`.
 - **Packed classes** (DESIGN §6.1): a `packed` class has no type parameters, and each field is a number, `bool`, an enum, a reference, a link, a slice, a function or another `packed` class. A reference can't point at one of its fields, except one that is `packed` itself.
 - **Roots** (DESIGN §6.6): a `class` may have only one growable field, and no cursor-array field; either is an error that suggests `root`. A root can't be copied, passed as a plain parameter, returned by value, stored by value in a class, root or array, or created as an unnamed temporary.
@@ -320,7 +321,7 @@ expr_list     = expression { "," expression } ;
 switch_block  = "switch" "(" expression ")" "{" { switch_rule } "}" ;
 switch_rule   = ( "case" case_label { "," case_label } | "default" ) "=>"
                 ( expression ";" | block ) ;
-case_label    = [ "-" ] INT | CHAR | STRING | IDENT ;
+case_label    = [ "-" ] INT | CHAR | STRING | IDENT [ "." IDENT ] ;   (* RED, Color.RED, a constant: GRASS, Blocks.GRASS *)
 ```
 
 Checked after parsing:
@@ -347,6 +348,7 @@ Checked after parsing:
 - **For-each over an iterator variable** is an error that suggests the repeat loop (DESIGN §9.4). An iterator expression, such as `text.lines()`, is fine.
 - **`defer`** runs its statement when the enclosing block ends, in reverse order of the `defer`s (DESIGN §6.4). The deferred expression must be one that could be an expression statement, and the deferred code can't contain a `return`, a `break` or `continue` that leaves it, a status write, or another `defer`.
 - **`yield`** gives the value of a `switch` expression from a block arm.
+- **Case labels** (DESIGN §9.4): a name is an enum constant of the switch's enum, or a constant (DESIGN §6.1), and `A.B` names `B` of the enum or class `A`. A variable or a static that isn't a constant is an error, and so are two labels with the same value.
 - **`case` labels** are constants: a literal (strings without interpolation) or an enum constant written by its bare name. A `switch` used as an expression must cover every case (DESIGN §9.4).
 
 ---
@@ -576,7 +578,6 @@ These need a decision before they are added. Until then, the parser rejects them
 - Multi-dimensional arrays (`m[i, j]`).
 - Default and static methods in interfaces.
 - Nested type declarations.
-- `final` fields and locals.
 - Method references such as `this::close`.
 - Varargs parameters.
 - Static initializer blocks (`static { ... }`).

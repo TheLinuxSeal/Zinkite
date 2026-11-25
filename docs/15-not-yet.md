@@ -154,8 +154,6 @@ example.zn:3:22: error: multi-dimensional indexing `m[i, j]` is undecided (GRAMM
   function that takes the interface reference.
 - **Nested type declarations**, a class inside a class. Declare it at the top
   level, package-private.
-- **`final` fields and locals** (`final` is reserved). There are no constants
-  either (below, "Limits").
 - **Enums with fields, methods or payloads**, and **patterns in `switch`**
   (a syntax error today). An enum is a list of constants; keep data about each in a
   `switch` that returns it, or in a table indexed by a number you keep beside it.
@@ -207,7 +205,8 @@ done
   from the arguments ([Classes, interfaces and generics](06-classes.md)); pass a typed local
   where they can't be inferred.
 - **Compile-time constant type parameters**, `<const N: i32>`, and so caps chosen by a
-  generic class (a syntax error today). Write the cap as a number in each class.
+  generic class (a syntax error today). Write the cap as a number or a constant in each
+  class ([Constants](06-classes.md#constants)).
 - **Varargs** (`i64... xs`, a syntax error). Take a slice, `i64[:] xs`, and pass an array
   literal: `sum([1, 2, 3])`.
 - **Multi-line strings** (`"""`, a syntax error: strings can't span lines). Write `\n`, or
@@ -329,11 +328,6 @@ void main() {
 green 1
 ```
 
-- **No constants** (limit, with `final` undecided). A static such as `u8 GRASS = 1;` is a
-  variable. The compiler accepts one as a `case` label, which the grammar allows only for
-  literals and enum constants, and compares with its value when the `switch` runs; and as an
-  array's cap, which the C backend doesn't generate (below). Write literals in `case`
-  labels, with a comment, or use an enum.
 - **Stored lambdas that capture** (undecided, [DESIGN
   §9.3](../DESIGN.md#93-function-types-and-lambdas-decided)). A lambda that uses a local can
   be passed as an argument, and not kept in a variable or field, since a stored `func` is a
@@ -999,9 +993,6 @@ scratch space of `stableSort`, gate nothing ([STDLIB §11](../STDLIB.md#11-open-
 The compiler is meant to refuse what it can't compile, with a clear error, rather than make
 wrong code. These pass `zink check` today and then do something other than the design says:
 
-- **A static as a `case` label** is accepted, though the grammar allows only literals and
-  enum constants, and compared with its value when the `switch` runs (above, "No
-  constants").
 - **The rules on packages and imports** that [Programs, packages and
   building](10-programs.md) lists as not checked yet: a `package` line in a script file, a
   file's package and its directory, and an import of a `zink.*` package the program doesn't
@@ -1016,7 +1007,8 @@ another layout passed to a `T[..>]&` or `T[..>]` parameter, which get a copy of 
 function for their layout; copies of values with a growable field, refused; failing
 constructors nothing reads, which stop the program; field initializers reading fields not
 yet set, refused; `==` on arrays of strings and floats, element by element; NaN last in
-`min`, `max` and sorts; and the programs whose C didn't compile.
+`min`, `max` and sorts; the programs whose C didn't compile; and a plain static as a `case`
+label, now an error, since a label must be a constant ([Constants](06-classes.md#constants)).
 
 ## Listed as missing elsewhere, and there now
 
@@ -1027,9 +1019,9 @@ today:
   array makes one, and `-<` and `->` narrow it.
 - **A fixed array of k zero values**, `T[.k] a = [];`, which with `fill` covers the arrays
   of n copies that `examples/NOTES.md` found missing, when n is known at compile time.
-- **A static as a `case` label**, which the notes from `quarry` say can't be one. The
-  compiler accepts it now, compared at run time, though the grammar doesn't allow it
-  (above, "No constants").
+- **Constants as `case` labels**, which the notes from `quarry` say a static can't be: a
+  `static final` set by a constant expression can, and can give an array's capacity too
+  ([Constants](06-classes.md#constants)).
 - **`split`, and `append` on a capped array**, which `examples/NOTES.md` records as fixed
   while `quarry` and `hashtree` were written.
 - **A lambda that captures, passed to a function of the program's own**: the function gets

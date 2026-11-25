@@ -9,7 +9,7 @@ import zink.data.*;
 // It keeps a stack of the objects and arrays that are open, so it never recurses. A
 // byte-order mark at the start is skipped.
 public class JsonReader {
-    public string input;
+    public final string input;
     public i64 maxDepth = 1024;     // nesting deeper than this fails with FULL
     private u8[..~] open = [];      // per open container: 1 an object, 2 an array
     private i64 pos = 0;

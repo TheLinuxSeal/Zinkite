@@ -96,8 +96,9 @@ example.zn:3:5: error: `$` needs a cursor slot other than `.` (DESIGN §4.1)
 - **In a type, the characters between the brackets are read as slots**, so `>>` and `<<`
   count as two slot characters there, though they are shift operators elsewhere.
 - **Arrays nest**: `i32[.2][.3]` is an array of 3 elements, each an `i32[.2]`.
-- **Not yet:** a cap given by a named constant, as in `u8[..~MAX_NAME]`, type-checks, but
-  the C backend doesn't generate code for it ([What isn't there yet](15-not-yet.md)).
+- **A cap can be a constant**, as in `u8[..~MAX_NAME]` after `static final i64 MAX_NAME =
+  16;`, or `Limits.MAX_NAME` from another class ([Constants](06-classes.md#constants)). A
+  plain static can't be one.
 
 ## The kinds of array
 
@@ -1711,7 +1712,6 @@ or the compiler handles them differently from the design. Chapter 15,
 - Heaps: `heapPush`, `heapPop` and `heapify` on `T[..~]` arrays
   ([STDLIB §7.2](../STDLIB.md#72-heaps-v1)).
 - Sorting a class by the `compareTo` of `implements ordered`.
-- Caps given by a named constant.
 - `==` on arrays of classes, as on classes.
 - Printing arrays of arrays, enums or classes.
 - The lint that warns about capabilities an array's type allows and the code never uses,

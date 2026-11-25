@@ -53,32 +53,32 @@ extern("glFogfv") void fogColor(u32 name, f32[:] rgba);
 
 // ---------------------------------------------------------------- blocks
 
-i64 SX = 256;           // the world's size in blocks: east to west,
-i64 SZ = 256;           // north to south,
-i64 SY = 80;            // and up
-i64 SEA = 24;           // water fills every column up to this height
-i64 CHUNK = 16;         // a chunk is 16 x 16 columns, the full height, with a mesh of its own
+final i64 SX = 256;           // the world's size in blocks: east to west,
+final i64 SZ = 256;           // north to south,
+final i64 SY = 80;            // and up
+final i64 SEA = 24;           // water fills every column up to this height
+final i64 CHUNK = 16;         // a chunk is 16 x 16 columns, the full height, with a mesh of its own
 
 // Block ids, a byte each in the world. BLOCKS says how each one looks and behaves.
-u8 AIR = 0;
-u8 GRASS = 1;
-u8 DIRT = 2;
-u8 STONE = 3;
-u8 SAND = 4;
-u8 WATER = 5;
-u8 LOG = 6;
-u8 LEAVES = 7;
-u8 PLANKS = 8;
-u8 GLASS = 9;
-u8 SNOW = 10;
-u8 COAL = 11;
-u8 ZINCITE = 12;
-u8 BEDROCK = 13;
-u8 BRICK = 14;
-u8 ZINC = 15;
-u8 RED_FLOWER = 16;
-u8 YELLOW_FLOWER = 17;
-u8 TALL_GRASS = 18;
+final u8 AIR = 0;
+final u8 GRASS = 1;
+final u8 DIRT = 2;
+final u8 STONE = 3;
+final u8 SAND = 4;
+final u8 WATER = 5;
+final u8 LOG = 6;
+final u8 LEAVES = 7;
+final u8 PLANKS = 8;
+final u8 GLASS = 9;
+final u8 SNOW = 10;
+final u8 COAL = 11;
+final u8 ZINCITE = 12;
+final u8 BEDROCK = 13;
+final u8 BRICK = 14;
+final u8 ZINC = 15;
+final u8 RED_FLOWER = 16;
+final u8 YELLOW_FLOWER = 17;
+final u8 TALL_GRASS = 18;
 
 // How a block is drawn, and whether it stops you.
 enum Kind {

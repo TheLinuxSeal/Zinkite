@@ -7,7 +7,7 @@ import zink.data.*;
 // is a view into the input whenever it can be; one with doubled quotes is decoded into the
 // `strings` the caller passes. A blank line is a record with no fields, as Python reads it.
 public class CsvReader {
-    public string input;
+    public final string input;
     public u8 separator = ',';
     public u8 quote = '"';
     // Every row must have as many fields as the first.

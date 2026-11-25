@@ -679,7 +679,8 @@ impl Parser {
                     mods.push(Modifier::Extern(cname));
                     continue;
                 }
-                Tok::Kw(k @ (Kw::Protected | Kw::Abstract | Kw::Final)) => {
+                Tok::Kw(Kw::Final) => Modifier::Final,
+                Tok::Kw(k @ (Kw::Protected | Kw::Abstract)) => {
                     let k = *k;
                     let span = self.bump().span;
                     let msg = format!(
@@ -1067,6 +1068,14 @@ impl Parser {
         if !self.at(P::RParen) {
             loop {
                 let start = self.span();
+                if let Tok::Kw(Kw::Final) = self.tok() {
+                    let span = self.bump().span;
+                    self.error_help(
+                        span,
+                        "`final` goes on fields: a plain parameter is already a read-only copy",
+                        "drop `final` (DESIGN §5.1, §6.1)",
+                    );
+                }
                 let ty = self.ty()?;
                 let name = self.name("a parameter name")?;
                 params.push(Param {
@@ -1410,6 +1419,14 @@ impl Parser {
     }
 
     fn stmt(&mut self) -> PResult<Stmt> {
+        if let Tok::Kw(Kw::Final) = self.tok() {
+            let span = self.bump().span;
+            self.error_help(
+                span,
+                "`final` goes on fields: a local needs no mark, and one a lambda captures is checked without it",
+                "drop `final` (DESIGN §6.1, §9.3)",
+            );
+        }
         let start = self.span();
         let kind = match self.tok() {
             Tok::P(P::LBrace) => StmtKind::Block(self.block()?),
@@ -1840,8 +1857,15 @@ impl Parser {
                 }
                 Ok(CaseLabel::Str(text, span))
             }
+            Tok::Ident(_) if self.tok_at(1) == &Tok::P(P::Dot) => {
+                let class = self.ident("a case label")?;
+                self.bump();
+                let name = self.ident("a constant's name after `.`")?;
+                Ok(CaseLabel::Static { class, name })
+            }
             Tok::Ident(_) => Ok(CaseLabel::Ident(self.ident("a case label")?)),
-            _ => Err(self.expected("a case label: a number, character, string or enum constant")),
+            _ => Err(self
+                .expected("a case label: a number, character, string, constant or enum constant")),
         }
     }
 

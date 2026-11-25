@@ -139,6 +139,9 @@ pub enum Modifier {
     Private,
     Static,
     Mut,
+    /// A field set only when its value is made: by its initializer, or else by a
+    /// constructor; a static one only by its initializer (DESIGN §6.1).
+    Final,
     /// A C function, with its C name when that differs: `extern("glClearColor")`.
     Extern(Option<String>),
     /// Compiled once more for each wider vector unit, the widest the CPU has chosen when
@@ -480,6 +483,11 @@ pub enum CaseLabel {
     Char(u32, Span),
     Str(String, Span),
     Ident(Ident),
+    /// `Blocks.GRASS`: a constant of another class, or an enum's constant named with it.
+    Static {
+        class: Ident,
+        name: Ident,
+    },
 }
 
 // ---------------------------------------------------------------- expressions

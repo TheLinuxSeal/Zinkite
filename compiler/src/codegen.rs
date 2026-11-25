@@ -21,7 +21,7 @@ use crate::ast::{
 use crate::builtins::Origin;
 use crate::check::{Facts, NameRes, key};
 use crate::diag::Diagnostic;
-use crate::program::{ClassKind, MethodInfo, Program, active, starts_empty};
+use crate::program::{ClassKind, ConstVal, MethodInfo, Program, active, starts_empty};
 use crate::source::{SourceFile, Span};
 use crate::token::Prim;
 use crate::types::*;
@@ -1003,6 +1003,19 @@ impl<'p, 'a> Gen<'p, 'a> {
                 }
                 let ct = self.cty(&f.ty, f.span);
                 let name = format!("zs{}_{}", id, i);
+                // A constant has its value from the start, the same in every thread, so the
+                // C compiler can fold it (DESIGN §6.1).
+                if f.is_final
+                    && let Ok(Some(v @ (ConstVal::Int(_) | ConstVal::Bool(_)))) =
+                        prog.const_value(id, &f.name)
+                {
+                    let lit = match v {
+                        ConstVal::Int(x) => self.int_lit(x, &f.ty),
+                        _ => (v == ConstVal::Bool(true)).to_string(),
+                    };
+                    let _ = writeln!(self.protos, "static {} {} = {};", ct, name, lit);
+                    continue;
+                }
                 // Each thread has its own (STDLIB §10.3).
                 let tls = if self.threads { "ZR_TLS " } else { "" };
                 let _ = writeln!(self.protos, "static {}{} {};", tls, ct, name);
@@ -3031,7 +3044,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             } => format!("{} == {}{}", v, if *negative { "-" } else { "" }, value),
             ast::CaseLabel::Char(c, _) => format!("{} == {}", v, c),
             ast::CaseLabel::Str(s, _) => format!("zr_eq({}, {}, 1)", v, lit(s)),
-            ast::CaseLabel::Ident(id) => match st {
+            ast::CaseLabel::Ident(id) | ast::CaseLabel::Static { name: id, .. } => match st {
                 Ty::Class(c, _) => {
                     let i = self.prog.classes[*c]
                         .constants
@@ -3040,15 +3053,26 @@ impl<'p, 'a> Gen<'p, 'a> {
                         .unwrap_or(0);
                     format!("{} == {}", v, i)
                 }
-                _ => {
-                    let e = Expr {
-                        kind: E::Ident(id.name.clone()),
-                        span: id.span,
-                    };
-                    let x = self.expr(&e, st);
-                    format!("{} == {}", v, x)
-                }
+                _ => match self.constant_at(id.span) {
+                    Some(ConstVal::Str(s)) => format!("zr_eq({}, {}, 1)", v, lit(&s)),
+                    Some(ConstVal::Int(x)) => format!("{} == {}", v, self.int_lit(x, st)),
+                    _ => self.unsupported(id.span, "a case label that isn't a constant"),
+                },
             },
+        }
+    }
+
+    /// The constant the name at `span` reads, if it reads one (DESIGN §6.1).
+    pub(super) fn constant_at(&self, span: Span) -> Option<ConstVal> {
+        match self.facts.names.get(&key(span))? {
+            NameRes::Field(c, i) => {
+                let f = &self.prog.classes[*c].fields[*i];
+                if !(f.is_static && f.is_final) {
+                    return None;
+                }
+                self.prog.const_value(*c, &f.name).ok().flatten()
+            }
+            _ => None,
         }
     }
 

@@ -48,10 +48,10 @@ These words are reserved:
 | Group | Keywords |
 |---|---|
 | Types | `bool` `i8` `i16` `i32` `i64` `i128` `u8` `u16` `u32` `u64` `u128` `f32` `f64` `string` `void` `func` |
-| Declarations | `package` `import` `as` `class` `interface` `enum` `implements` `static` `public` `private` `mut` `extern` |
+| Declarations | `package` `import` `as` `class` `interface` `enum` `implements` `static` `public` `private` `mut` `final` `extern` |
 | Statements | `if` `else` `while` `do` `for` `break` `continue` `return` `switch` `case` `default` `yield` `var` `defer` |
 | Expressions | `new` `this` `null` `true` `false` `instanceof` |
-| Reserved, not used | `extends` `protected` `abstract` `final` `struct` `super` `try` `catch` `finally` `throw` `long` `short` `byte` `double` `char` `delete` |
+| Reserved, not used | `extends` `protected` `abstract` `struct` `super` `try` `catch` `finally` `throw` `long` `short` `byte` `double` `char` `delete` |
 
 The last row is reserved so the compiler can say why each isn't there, for the habits that
 Java, C and C++ bring:
@@ -72,8 +72,7 @@ example.zn:2:5: error: `long` is reserved: the type is spelled `i64`
   ([Classes, interfaces and generics](06-classes.md)).
 - `try`, `catch`, `finally` and `throw` say that failures are status codes
   ([Errors and statuses](07-errors.md)).
-- `delete` says there are no destructors, and suggests `defer`; `struct` suggests `class`;
-  `final` is undecided.
+- `delete` says there are no destructors, and suggests `defer`; `struct` suggests `class`.
 
 Some words are keywords only in one place, so they can still name variables and fields:
 `root` and `packed` at the start of a type declaration, `simd` before a function, `link`
@@ -889,7 +888,12 @@ help: assign it on every path before this, as with an `else` (DESIGN §6.2)
 - **Top-level fields of a script file** are static variables, which every function of the
   file can read and change, and which are set before `main` runs
   ([Programs, packages and building](10-programs.md)).
-- **There are no `final` locals** yet: `final` is reserved and undecided.
+- **There are no `final` locals**: `final` goes on fields ([`final`
+  fields](06-classes.md#final-fields)), and on a local it is an error. The compiler already
+  knows which locals change, and a lambda's captures are checked without it
+  ([Functions and lambdas](08-functions.md)).
+- **A named constant is a `static final`**, `static final i64 LIMIT = 64;`
+  ([Constants](06-classes.md#constants)).
 
 ## Operators and precedence
 
@@ -1131,10 +1135,12 @@ red
 other
 ```
 
-- **A case label is a constant**: an integer, possibly negative, a character, a string
-  without interpolation, or an enum constant written by its bare name, `case HEARTS`, not
-  `case Suit.HEARTS`.
-- **A value can't appear in two labels**; the second is an error.
+- **A case label is known when the program is compiled**: an integer, possibly negative, a
+  character, a string without interpolation, an enum constant, `case HEARTS` or `case
+  Suit.HEARTS`, or a constant, `case GRASS` or `case Blocks.GRASS`
+  ([Constants](06-classes.md#constants)). A variable, or a static that isn't a constant, is
+  an error.
+- **A value can't appear in two labels**, however they're written; the second is an error.
 - **`yield v;` gives the value of a block arm** of a switch expression. Every path through
   the block must reach a `yield`.
 - **A switch expression must cover every case**: with `default`, or with every constant of

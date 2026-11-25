@@ -38,11 +38,48 @@ pub struct FieldInfo<'a> {
     /// that element. Its type is the array of the references they hold.
     pub elem_link: Option<crate::token::Prim>,
     pub is_static: bool,
+    /// Set only when its value is made: by its initializer, or else by a constructor; a
+    /// static one only by its initializer (DESIGN §6.1).
+    pub is_final: bool,
     pub is_private: bool,
     /// Neither: package-private (DESIGN §6.1).
     pub is_public: bool,
     pub init: Option<&'a ast::Expr>,
     pub span: Span,
+}
+
+/// A `static final` field as declared, so its value can be worked out while types are
+/// still being resolved, since a cap may name one (DESIGN §4.2, §6.1).
+pub struct StaticFinal<'a> {
+    pub class: ClassId,
+    pub name: String,
+    pub ty: &'a ast::Type,
+    pub init: Option<&'a ast::Expr>,
+}
+
+/// A constant's value: a `static final` integer, `bool` or `string` whose initializer is
+/// a constant expression (DESIGN §6.1).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConstVal {
+    Int(i128),
+    Bool(bool),
+    Str(String),
+}
+
+/// A constant expression whose value can't be worked out, as one that overflows its type.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConstErr {
+    pub file: usize,
+    pub span: Span,
+    pub msg: String,
+}
+
+/// What a constant's initializer must give.
+#[derive(Clone, Copy)]
+enum Want {
+    Int(crate::token::Prim),
+    Bool,
+    Str,
 }
 
 pub struct MethodInfo<'a> {
@@ -109,6 +146,8 @@ pub struct Program<'a> {
     pub files: Vec<FileInfo<'a>>,
     pub classes: Vec<ClassInfo<'a>>,
     pub diags: Vec<(usize, Diagnostic)>,
+    /// Every `static final` field, from pass 1.
+    pub finals: Vec<StaticFinal<'a>>,
 }
 
 /// What `#if` conditions mean while checking: Linux on x86-64, no build flags.
@@ -191,6 +230,8 @@ fn writes_status(b: &ast::Block) -> bool {
 pub struct Scope<'s> {
     pub file: usize,
     pub tparams: &'s [TParam],
+    /// The class whose constants a bare name in a cap may be (DESIGN §4.2).
+    pub class: Option<ClassId>,
 }
 
 pub enum Lookup {
@@ -227,6 +268,7 @@ impl<'a> Program<'a> {
             files: Vec::new(),
             classes: Vec::new(),
             diags: Vec::new(),
+            finals: Vec::new(),
         };
         // Pass 1: every type declaration, with its name, kind and type parameters' names.
         let mut decls: Vec<(ClassId, &'a ast::TypeDecl)> = Vec::new();
@@ -388,7 +430,23 @@ impl<'a> Program<'a> {
                             ctors: Vec::new(),
                             constants: Vec::new(),
                         });
-                        decls.push((prog.classes.len() - 1, t));
+                        let id = prog.classes.len() - 1;
+                        if t.modifiers.contains(&Modifier::Final) {
+                            prog.diags.push((fi, Diagnostic::error(name.span, "every class is final already: there are no subclasses (DESIGN §6.1)").with_help("drop `final`")));
+                        }
+                        if let TypeDeclKind::Class(c) | TypeDeclKind::Root(c) = &t.kind {
+                            let mut members = Vec::new();
+                            flatten_members(&c.members, &mut members);
+                            for m in members {
+                                if let Member::Field(f) = m
+                                    && f.modifiers.contains(&Modifier::Final)
+                                    && f.modifiers.contains(&Modifier::Static)
+                                {
+                                    prog.add_static_final(id, f);
+                                }
+                            }
+                        }
+                        decls.push((id, t));
                     }
                     TopItem::Field(_) | TopItem::Method(_) => {
                         if prog.files[fi].script.is_none() {
@@ -408,6 +466,12 @@ impl<'a> Program<'a> {
                                 constants: Vec::new(),
                             });
                             prog.files[fi].script = Some(prog.classes.len() - 1);
+                        }
+                        if let TopItem::Field(f) = item
+                            && f.modifiers.contains(&Modifier::Final)
+                        {
+                            let id = prog.files[fi].script.expect("a script class");
+                            prog.add_static_final(id, f);
                         }
                     }
                     TopItem::If(_) => {}
@@ -462,6 +526,278 @@ impl<'a> Program<'a> {
         self.diags.push((file, Diagnostic::error(span, msg)));
     }
 
+    fn error_help(
+        &mut self,
+        file: usize,
+        span: Span,
+        msg: impl Into<String>,
+        help: impl Into<String>,
+    ) {
+        self.diags
+            .push((file, Diagnostic::error(span, msg).with_help(help)));
+    }
+
+    fn add_static_final(&mut self, class: ClassId, f: &'a ast::FieldDecl) {
+        for v in &f.vars {
+            self.finals.push(StaticFinal {
+                class,
+                name: v.name.name.clone(),
+                ty: &f.ty,
+                init: v.init.as_ref(),
+            });
+        }
+    }
+
+    /// The `static final` field `name` of class `cls`.
+    pub fn static_final(&self, cls: ClassId, name: &str) -> Option<&StaticFinal<'a>> {
+        self.finals
+            .iter()
+            .find(|f| f.class == cls && f.name == name)
+    }
+
+    /// The `static final` field a bare name or `Class.NAME` names, seen from `class` in
+    /// `file`: a bare name is one of `class`, or a script's top-level one.
+    pub fn final_named(
+        &self,
+        file: usize,
+        class: Option<ClassId>,
+        path: &[&str],
+    ) -> Option<&StaticFinal<'a>> {
+        match path {
+            [n] => class
+                .into_iter()
+                .chain(self.files[file].script)
+                .find_map(|c| self.static_final(c, n)),
+            [c, n] => match self.find_class(file, c) {
+                Lookup::Found(id) => self.static_final(id, n),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The value of the `static final` field `name` of `cls`, when it is a constant: an
+    /// integer, `bool` or `string` whose initializer is a constant expression (DESIGN
+    /// §6.1). `Ok(None)` when it isn't one; an error when it is one that can't be worked
+    /// out, as one that doesn't fit its type.
+    pub fn const_value(&self, cls: ClassId, name: &str) -> Result<Option<ConstVal>, ConstErr> {
+        self.const_value_in(cls, name, 0)
+    }
+
+    fn const_value_in(
+        &self,
+        cls: ClassId,
+        name: &str,
+        depth: u32,
+    ) -> Result<Option<ConstVal>, ConstErr> {
+        use crate::token::Prim;
+        let Some(f) = self.static_final(cls, name) else {
+            return Ok(None);
+        };
+        let Some(init) = f.init else {
+            return Ok(None);
+        };
+        let want = match &f.ty.kind {
+            ast::TypeKind::Prim(p) if p.is_int() => Want::Int(*p),
+            ast::TypeKind::Prim(Prim::Bool) => Want::Bool,
+            ast::TypeKind::String => Want::Str,
+            _ => return Ok(None),
+        };
+        // A loop of constants naming each other is no constant.
+        if depth > 32 {
+            return Ok(None);
+        }
+        let file = self.classes[cls].file;
+        let v = match self.const_eval(init, file, cls, want, depth)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        match (want, &v) {
+            (Want::Int(p), ConstVal::Int(x)) => {
+                if !fits(*x, p) {
+                    return Err(ConstErr {
+                        file,
+                        span: init.span,
+                        msg: format!("this constant is {}, which doesn't fit in {}", x, p.name()),
+                    });
+                }
+            }
+            (Want::Bool, ConstVal::Bool(_)) | (Want::Str, ConstVal::Str(_)) => {}
+            // The checker reports a value of the wrong type.
+            _ => return Ok(None),
+        }
+        Ok(Some(v))
+    }
+
+    /// A constant expression's value, worked out exactly: literals, constants, and the
+    /// arithmetic, bitwise, shift, comparison and logical operators on them. `Ok(None)`
+    /// when `e` isn't one.
+    fn const_eval(
+        &self,
+        e: &ast::Expr,
+        file: usize,
+        cls: ClassId,
+        want: Want,
+        depth: u32,
+    ) -> Result<Option<ConstVal>, ConstErr> {
+        use ConstVal::*;
+        use ast::ExprKind as X;
+        let err = |msg: String| {
+            Err(ConstErr {
+                file,
+                span: e.span,
+                msg,
+            })
+        };
+        let named = |path: &[&str]| -> Result<Option<ConstVal>, ConstErr> {
+            match self.final_named(file, Some(cls), path) {
+                Some(f) => self.const_value_in(f.class, &f.name, depth + 1),
+                None => Ok(None),
+            }
+        };
+        let width = match want {
+            Want::Int(p) => Some(p),
+            _ => None,
+        };
+        Ok(Some(match &e.kind {
+            X::Int { value, .. } => match i128::try_from(*value) {
+                Ok(v) => Int(v),
+                Err(_) => return Ok(None),
+            },
+            X::Char(c) => Int(*c as i128),
+            X::Bool(b) => Bool(*b),
+            X::Str(parts) => {
+                let mut t = String::new();
+                for p in parts {
+                    match p {
+                        ast::StrPart::Text(x) => t.push_str(x),
+                        ast::StrPart::Interp(_) => return Ok(None),
+                    }
+                }
+                Str(t)
+            }
+            X::Paren(x) => return self.const_eval(x, file, cls, want, depth),
+            X::Ident(n) => return named(&[n]),
+            X::Member { expr, name } => match &expr.kind {
+                X::Ident(c) => return named(&[c, &name.name]),
+                _ => return Ok(None),
+            },
+            X::PrimMember { prim, name } if prim.is_int() => {
+                let b = bits(*prim);
+                let (lo, hi) = if signed(*prim) {
+                    (-(1i128 << (b - 1)), (1i128 << (b - 1)).wrapping_sub(1))
+                } else if b == 128 {
+                    return Ok(None);
+                } else {
+                    (0, (1i128 << b) - 1)
+                };
+                match name.name.as_str() {
+                    "MIN" => Int(lo),
+                    "MAX" => Int(hi),
+                    _ => return Ok(None),
+                }
+            }
+            X::Unary { op, expr } => {
+                let Some(v) = self.const_eval(expr, file, cls, want, depth)? else {
+                    return Ok(None);
+                };
+                match (op, v) {
+                    (ast::UnaryOp::Plus, Int(x)) => Int(x),
+                    (ast::UnaryOp::Neg, Int(x)) => match x.checked_neg() {
+                        Some(v) => Int(v),
+                        None => return err("this constant is too large to work out".into()),
+                    },
+                    // On an unsigned type, `~` flips the type's own bits.
+                    (ast::UnaryOp::BitNot, Int(x)) => match width {
+                        Some(p) if !signed(p) && bits(p) < 128 => Int(((1i128 << bits(p)) - 1) ^ x),
+                        Some(p) if !signed(p) => return Ok(None),
+                        _ => Int(!x),
+                    },
+                    (ast::UnaryOp::Not, Bool(b)) => Bool(!b),
+                    _ => return Ok(None),
+                }
+            }
+            X::Binary { op, lhs, rhs } => {
+                use ast::BinOp as B;
+                let Some(a) = self.const_eval(lhs, file, cls, want, depth)? else {
+                    return Ok(None);
+                };
+                let Some(b) = self.const_eval(rhs, file, cls, want, depth)? else {
+                    return Ok(None);
+                };
+                match (a, b) {
+                    (Int(x), Int(y)) => {
+                        let big = || "this constant is too large to work out".to_string();
+                        match op {
+                            B::Add => Int(match x.checked_add(y) {
+                                Some(v) => v,
+                                None => return err(big()),
+                            }),
+                            B::Sub => Int(match x.checked_sub(y) {
+                                Some(v) => v,
+                                None => return err(big()),
+                            }),
+                            B::Mul => Int(match x.checked_mul(y) {
+                                Some(v) => v,
+                                None => return err(big()),
+                            }),
+                            B::Div | B::Rem if y == 0 => {
+                                return err("this constant divides by zero".into());
+                            }
+                            B::Div => Int(x / y),
+                            B::Rem => Int(x % y),
+                            B::Shl | B::Shr => {
+                                let Some(p) = width else {
+                                    return Ok(None);
+                                };
+                                if y < 0 || y >= bits(p) as i128 {
+                                    return err(format!(
+                                        "this shifts by {}, and {} has {} bits",
+                                        y,
+                                        p.name(),
+                                        bits(p)
+                                    ));
+                                }
+                                if *op == B::Shr {
+                                    Int(x >> y)
+                                } else {
+                                    match x.checked_mul(1i128 << y) {
+                                        Some(v) => Int(v),
+                                        None => return err(big()),
+                                    }
+                                }
+                            }
+                            B::BitAnd => Int(x & y),
+                            B::BitOr => Int(x | y),
+                            B::BitXor => Int(x ^ y),
+                            B::Eq => Bool(x == y),
+                            B::Ne => Bool(x != y),
+                            B::Lt => Bool(x < y),
+                            B::Gt => Bool(x > y),
+                            B::Le => Bool(x <= y),
+                            B::Ge => Bool(x >= y),
+                            _ => return Ok(None),
+                        }
+                    }
+                    (Bool(x), Bool(y)) => match op {
+                        B::And => Bool(x && y),
+                        B::Or => Bool(x || y),
+                        B::Eq => Bool(x == y),
+                        B::Ne => Bool(x != y),
+                        _ => return Ok(None),
+                    },
+                    (Str(x), Str(y)) => match op {
+                        B::Eq => Bool(x == y),
+                        B::Ne => Bool(x != y),
+                        _ => return Ok(None),
+                    },
+                    _ => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        }))
+    }
+
     fn resolve_bounds(
         &mut self,
         id: ClassId,
@@ -497,7 +833,14 @@ impl<'a> Program<'a> {
         {
             return Some(Bound::Builtin(k));
         }
-        let ty = self.resolve_interface(b, &Scope { file, tparams });
+        let ty = self.resolve_interface(
+            b,
+            &Scope {
+                file,
+                tparams,
+                class: None,
+            },
+        );
         match &ty {
             Ty::Class(c, _) if self.classes[*c].kind == ClassKind::Interface => {
                 Some(Bound::Interface(ty))
@@ -542,6 +885,7 @@ impl<'a> Program<'a> {
                         &Scope {
                             file,
                             tparams: &tps,
+                            class: Some(id),
                         },
                     );
                     match &ty {
@@ -566,9 +910,17 @@ impl<'a> Program<'a> {
                             let params = ctor
                                 .params
                                 .iter()
-                                .map(|p| self.resolve_param(&p.ty, file, &tps))
+                                .map(|p| self.resolve_param(&p.ty, file, &tps, id))
                                 .collect();
                             let can_fail = writes_status(&ctor.body);
+                            if ctor.modifiers.contains(&Modifier::Final) {
+                                self.error_help(
+                                    file,
+                                    ctor.span,
+                                    "`final` goes on fields, not constructors",
+                                    "drop `final` (DESIGN §6.1)",
+                                );
+                            }
                             if ctor.modifiers.contains(&Modifier::Simd) {
                                 let file = self.classes[id].file;
                                 self.error(
@@ -635,8 +987,21 @@ impl<'a> Program<'a> {
     }
 
     /// A parameter's type, which may be a reference or a writable view.
-    fn resolve_param(&mut self, t: &ast::Type, file: usize, tparams: &[TParam]) -> Ty {
-        self.resolve(t, &Scope { file, tparams })
+    fn resolve_param(
+        &mut self,
+        t: &ast::Type,
+        file: usize,
+        tparams: &[TParam],
+        class: ClassId,
+    ) -> Ty {
+        self.resolve(
+            t,
+            &Scope {
+                file,
+                tparams,
+                class: Some(class),
+            },
+        )
     }
 
     fn add_field(&mut self, id: ClassId, f: &'a ast::FieldDecl, script: bool) {
@@ -648,9 +1013,33 @@ impl<'a> Program<'a> {
             &Scope {
                 file,
                 tparams: &tps,
+                class: Some(id),
             },
         );
         let is_static = script || f.modifiers.contains(&Modifier::Static);
+        let is_final = f.modifiers.contains(&Modifier::Final);
+        if is_final && is_static {
+            for v in f.vars.iter().filter(|v| v.init.is_none()) {
+                self.error_help(
+                    file,
+                    v.name.span,
+                    format!(
+                        "`{}` is a {} with no initializer, and nothing else can set it",
+                        v.name.name,
+                        if script {
+                            "top-level `final`"
+                        } else {
+                            "`static final`"
+                        }
+                    ),
+                    if script {
+                        "give it its value here: `final i64 LIMIT = 64;` (DESIGN §6.1)"
+                    } else {
+                        "give it its value here: `static final i64 LIMIT = 64;` (DESIGN §6.1)"
+                    },
+                );
+            }
+        }
         if f.modifiers.contains(&Modifier::Simd)
             && let Some(v) = f.vars.first()
         {
@@ -683,6 +1072,7 @@ impl<'a> Program<'a> {
                 pool_link: pool_link(&f.ty),
                 elem_link: elem_link(&f.ty),
                 is_static,
+                is_final,
                 is_private,
                 is_public,
                 init: v.init.as_ref(),
@@ -700,7 +1090,7 @@ impl<'a> Program<'a> {
         let params: Vec<Ty> = m
             .params
             .iter()
-            .map(|p| self.resolve_param(&p.ty, file, &all))
+            .map(|p| self.resolve_param(&p.ty, file, &all, id))
             .collect();
         let ret = match &m.ret {
             ast::ReturnType::Void => Ty::Void,
@@ -709,6 +1099,7 @@ impl<'a> Program<'a> {
                 &Scope {
                     file,
                     tparams: &all,
+                    class: Some(id),
                 },
             ),
             ast::ReturnType::Tuple(ts) => Ty::Tuple(
@@ -719,6 +1110,7 @@ impl<'a> Program<'a> {
                             &Scope {
                                 file,
                                 tparams: &all,
+                                class: Some(id),
                             },
                         )
                     })
@@ -728,6 +1120,14 @@ impl<'a> Program<'a> {
         let can_fail = m.body.as_ref().is_some_and(writes_status);
         let is_static = script || m.modifiers.contains(&Modifier::Static);
         let is_mut = m.modifiers.contains(&Modifier::Mut);
+        if m.modifiers.contains(&Modifier::Final) {
+            self.error_help(
+                file,
+                m.name.span,
+                "`final` goes on fields: there are no subclasses, so nothing could override a method",
+                "drop `final` (DESIGN §6.1)",
+            );
+        }
         if self.classes[id].kind == ClassKind::Interface && m.modifiers.contains(&Modifier::Static)
         {
             self.error(
@@ -934,6 +1334,55 @@ impl<'a> Program<'a> {
     }
 
     /// Resolves a written type, putting any errors in `diags`.
+    /// The capacity a constant gives an array, `u8[..~MAX_NAME]` (DESIGN §4.2, §6.1); 0
+    /// when it can't, which is reported.
+    fn cap_constant(
+        &self,
+        q: &ast::QualName,
+        scope: &Scope,
+        span: Span,
+        diags: &mut Vec<Diagnostic>,
+    ) -> u64 {
+        let parts: Vec<&str> = q.parts.iter().map(|p| p.name.as_str()).collect();
+        let text = q.text();
+        let span = match (q.parts.first(), q.parts.last()) {
+            (Some(a), Some(b)) => a.span.to(b.span),
+            _ => span,
+        };
+        let Some(f) = self.final_named(scope.file, scope.class, &parts) else {
+            diags.push(
+                Diagnostic::error(
+                    span,
+                    format!("`{}` isn't a constant, so it can't give an array's capacity", text),
+                )
+                .with_help("a capacity is a number or a constant, a `static final` set by a constant expression: `static final i64 MAX_NAME = 64;` (DESIGN §4.2, §6.1)"),
+            );
+            return 0;
+        };
+        match self.const_value(f.class, &f.name) {
+            Ok(Some(ConstVal::Int(v))) if v >= 1 && v <= u64::MAX as i128 => v as u64,
+            Ok(Some(ConstVal::Int(v))) => {
+                diags.push(Diagnostic::error(
+                    span,
+                    format!("an array's capacity is at least 1, and `{}` is {}", text, v),
+                ));
+                0
+            }
+            // Reported where it is declared.
+            Err(_) => 0,
+            Ok(_) => {
+                diags.push(
+                    Diagnostic::error(
+                        span,
+                        format!("`{}` isn't an integer constant, so it can't give an array's capacity", text),
+                    )
+                    .with_help("a constant's initializer is literals, other constants and operators on them (DESIGN §6.1)"),
+                );
+                0
+            }
+        }
+    }
+
     pub fn resolve_quiet(&self, t: &ast::Type, scope: &Scope, diags: &mut Vec<Diagnostic>) -> Ty {
         use ast::TypeKind as K;
         match &t.kind {
@@ -970,6 +1419,7 @@ impl<'a> Program<'a> {
                 };
                 let size = match &slots.cap {
                     Some(ast::Cap::Int(n)) => *n,
+                    Some(ast::Cap::Const(q)) => self.cap_constant(q, scope, t.span, diags),
                     _ => 0,
                 };
                 let kind = ArrayKind {

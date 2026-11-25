@@ -6668,3 +6668,26 @@ fn a_programs_own_h_flag_wins() {
     );
     assert!(!r.stdout.contains("-h, --help"), "{}", r.stdout);
 }
+
+/// Constants: worked out when the program is compiled, usable as caps and case labels,
+/// and the same in every thread, which doesn't copy them (DESIGN §6.1).
+#[test]
+fn constants_give_caps_labels_and_values() {
+    prints(
+        "class Blocks {\n    public static final u8 GRASS = 1;\n    public static final u8 STONE = GRASS + 1;\n    public static final i64 NAME = 4;\n    public static final string HELLO = \"hi\";\n    static final u32 ALL = ~0;\n    static final bool BIG = NAME > 2;\n}\nstatic final i64 THREE = 3;\nvoid main() {\n    u8[..~Blocks.NAME] name = [];\n    name +> 'a' +> 'b';\n    i64[.THREE] three = [];\n    name +> 'c' +> 'd';\n    u8 e = @name.push('e');\n    println(\"${name} ${three.len} ${status.name(e)} ${Blocks.ALL} ${Blocks.BIG}\");\n    for (u8 b = 0; b < 4; b++) {\n        switch (b) {\n            case Blocks.GRASS => println(\"grass\");\n            case Blocks.STONE, THREE => println(\"stone\");\n            default => println(\"air\");\n        }\n    }\n    switch (\"hi\") {\n        case Blocks.HELLO => println(\"hello\");\n        default => println(\"?\");\n    }\n}\n",
+        "abcd 3 FULL 4294967295 true\nair\ngrass\nstone\nstone\nhello\n",
+    );
+    prints(
+        "import zink.thread.*;\nstatic final i64 N = 1000;\nstatic i64 count = 0;\ni64 work() {\n    i64 s = 0;\n    for (i64 i = 0; i < N; i++) { s += i; }\n    count += 1;\n    return s + count;\n}\nvoid main() {\n    queue<i64> q = [];\n    var w = thread.spawn(() => { q.put(work()); });\n    w.join();\n    println(\"${q.get()} ${count} ${N}\");\n}\n",
+        "499501 0 1000\n",
+    );
+}
+
+/// A `final` field changes only when its whole value is replaced (DESIGN §6.1).
+#[test]
+fn final_fields_hold_while_values_move() {
+    prints(
+        "class Item {\n    final i64 id;\n    final i64[..~4] log;\n    f64 w;\n    new(i64 id, f64 w) { this.id = id; this.w = w; log = []; log +> id +> id * 2; }\n    mut void heavier(f64 by) { w += by; }\n}\nvoid main() {\n    Item[..>] items = [];\n    items +> new Item(3, 0.5) +> new Item(1, 2.0) +> new Item(2, 1.0);\n    items.sortBy((Item it) => it.id);\n    items[0].heavier(1.0);\n    items[2] = new Item(9, 0.0);\n    for (Item it : items) { println(\"${it.id} ${it.w} ${it.log[1]}\"); }\n}\n",
+        "1 3.0 2\n2 1.0 4\n9 0.0 18\n",
+    );
+}

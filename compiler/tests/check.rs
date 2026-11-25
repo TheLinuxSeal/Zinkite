@@ -2311,3 +2311,184 @@ fn messages_name_types_as_theyre_said() {
         "an enum value can't be printed until default formatting is decided",
     );
 }
+
+/// A `final` field is set when its value is made: by its initializer, or else by its
+/// class's constructors, through `this`. After that nothing changes it, as nothing changes
+/// a plain parameter, though the whole value can still be replaced (DESIGN §6.1).
+#[test]
+fn final_fields_are_set_when_the_value_is_made() {
+    let item = "class Item {\n    final i64 id;\n    final i64[..>] log;\n    final i64 kind = 3;\n    final Item&? next;\n    i64 w;\n    new(i64 id) { this.id = id; log +> id; w = 0; next = null; }\n    mut void heavier() { w += 1; }\n    i64 code() { return id * 10 + kind; }\n}\n";
+    ok(&format!(
+        "{}void main() {{\n    Item a = new Item(1);\n    a.heavier();\n    Item[..~2] items = [];\n    items +> new Item(2);\n    items[0] = new Item(3);\n    a = new Item(4);\n    i64& r = a.id;\n    println(\"${{a.code()}} ${{r}} ${{a.log.len}}\");\n}}\n",
+        item
+    ));
+    let only_ctor = "`id` is `final`, so only a constructor sets it | make a new value with the one it should have, or drop `final` (DESIGN §6.1)";
+    for (stmt, needle) in [
+        ("a.id = 2;", only_ctor),
+        ("a.id++;", "can't change this: `id` is `final`"),
+        (
+            "a.log +> 5;",
+            "since it inserts into the array: `log` is `final`",
+        ),
+        (
+            "a.log.clear();",
+            "can't call `clear` here, since it changes what it's called on: `log` is `final`",
+        ),
+        (
+            "i64[:]& v = a.log;",
+            "can't take a writable view of this: `log` is `final`",
+        ),
+        (
+            "i64& r = a.id;\n    r = 9;",
+            "`r` refers to something that can't be changed here",
+        ),
+        (
+            "Item b = new Item(2);\n    a.next .= b;",
+            "can't rebind this: `next` is `final`",
+        ),
+    ] {
+        rejects(
+            &format!(
+                "{}void main() {{\n    Item a = new Item(1);\n    {}\n}}\n",
+                item, stmt
+            ),
+            needle,
+        );
+    }
+    let class = |members: &str| {
+        format!(
+            "class Item {{\n    final i64 id;\n    {}\n}}\nvoid main() {{ }}\n",
+            members
+        )
+    };
+    rejects(
+        &class("new(i64 n) { id = n; }\n    mut void bump() { id += 1; }"),
+        only_ctor,
+    );
+    rejects(
+        &class("new(i64 n) { id = n; Item t = new Item(0); t.id = 5; }"),
+        only_ctor,
+    );
+    rejects(
+        &class("new(i64 n) { id = n; func(void => void) f = () => { this.id = 3; }; }"),
+        "`id` is `final`, so only a constructor sets it, not a lambda inside one",
+    );
+    rejects(
+        "class Item {\n    final i64 kind = 3;\n    new() { kind = 4; }\n}\nvoid main() { }\n",
+        "`kind` is `final`, and its initializer sets it for good | drop the initializer to set it in the constructors instead (DESIGN §6.1)",
+    );
+    // A reference field's referent can still change; only `.=` is stopped.
+    ok(
+        "class Node {\n    i64 v;\n    final Node&? up;\n    new(i64 v, Node&? up) { this.v = v; this.up = up; }\n}\nvoid main() {\n    Node[..>] nodes = [];\n    Node& root = nodes.push(new Node(1, null));\n    Node& kid = nodes.push(new Node(2, root));\n    Node&? u = kid.up;\n    if (u != null) { u.v = 5; }\n    println(\"${root.v}\");\n}\n",
+    );
+}
+
+/// `final` goes on fields only (DESIGN §6.1).
+#[test]
+fn final_goes_on_fields() {
+    rejects(
+        "final class Item { i64 x; }\nvoid main() { }\n",
+        "every class is final already: there are no subclasses (DESIGN §6.1)",
+    );
+    rejects(
+        "class Item { i64 x; final i64 get() { return x; } }\nvoid main() { }\n",
+        "`final` goes on fields: there are no subclasses, so nothing could override a method",
+    );
+    rejects(
+        "class Item { i64 x; final new() { x = 0; } }\nvoid main() { }\n",
+        "`final` goes on fields, not constructors",
+    );
+    rejects(
+        &body("final i64 x = 2;\nprintln(\"${x}\");"),
+        "`final` goes on fields: a local needs no mark, and one a lambda captures is checked without it",
+    );
+    rejects(
+        "void f(final i64 x) { println(\"${x}\"); }\nvoid main() { f(1); }\n",
+        "`final` goes on fields: a plain parameter is already a read-only copy",
+    );
+}
+
+/// A `static final` is set only by its initializer, which it must have; an integer,
+/// `bool` or `string` one set by a constant expression is a constant, worked out when the
+/// program is compiled (DESIGN §6.1).
+#[test]
+fn static_finals_and_constants() {
+    ok(
+        "class Limits {\n    public static final i64 MAX = 8;\n    public static final u8 GRASS = 1;\n    public static final u8 STONE = GRASS + 1;\n    static final u32 ALL = ~0;\n    static final u64 TOP = u64.MAX >> 1;\n    static final bool BIG = MAX * 2 > 10 && true;\n    static final string NAME = \"limits\";\n}\nstatic final i64 TWICE = Limits.MAX * 2;\nvoid main() { println(\"${TWICE} ${Limits.STONE}\"); }\n",
+    );
+    rejects(
+        "static final i64 LIMIT = 3;\nvoid main() { LIMIT = 4; }\n",
+        "can't assign to this: `LIMIT` is `final`, so only its initializer sets it | drop `final` if it should change (DESIGN §6.1)",
+    );
+    rejects(
+        "class Limits { public static final i64 MAX = 4; }\nvoid main() { Limits.MAX = 5; }\n",
+        "`MAX` is `final`, so only its initializer sets it",
+    );
+    rejects(
+        "class Limits { static final i64 NONE; }\nvoid main() { }\n",
+        "`NONE` is a `static final` with no initializer, and nothing else can set it",
+    );
+    rejects(
+        "final i64 NONE;\nvoid main() { }\n",
+        "`NONE` is a top-level `final` with no initializer, and nothing else can set it",
+    );
+    rejects(
+        "static final u8 BASE = 200;\nstatic final u8 OVER = BASE + BASE;\nvoid main() { }\n",
+        "this constant is 400, which doesn't fit in u8 | a constant is worked out when the program is compiled, exactly, and must fit its type (DESIGN §6.1)",
+    );
+    rejects(
+        "static final i64 BITS = 64;\nstatic final i64 TOO_FAR = 1 << BITS;\nvoid main() { }\n",
+        "this shifts by 64, and i64 has 64 bits",
+    );
+}
+
+/// A cap may be a constant (DESIGN §4.2, §6.1).
+#[test]
+fn caps_may_be_constants() {
+    ok(
+        "class Limits { public static final i64 NAME = 8; }\nstatic final i64 THREE = 3;\nvoid main() {\n    u8[..~Limits.NAME] a = [];\n    i64[.THREE] b = [];\n    println(\"${a.len} ${b.len}\");\n}\n",
+    );
+    rejects(
+        "static i64 n = 4;\nvoid main() { u8[..~n] a = []; }\n",
+        "`n` isn't a constant, so it can't give an array's capacity",
+    );
+    rejects(
+        "static final i64 N = twice(2);\ni64 twice(i64 x) { return x * 2; }\nvoid main() { u8[..~N] a = []; }\n",
+        "`N` isn't an integer constant, so it can't give an array's capacity",
+    );
+    rejects(
+        "static final i64 N = 1 - 1;\nvoid main() { u8[..~N] a = []; }\n",
+        "an array's capacity is at least 1, and `N` is 0",
+    );
+}
+
+/// A case label is a literal, an enum constant or a constant, compared by its value; a
+/// variable or another static is an error (DESIGN §9.4).
+#[test]
+fn case_labels_are_constants() {
+    ok(
+        "class Blocks { public static final u8 GRASS = 1; public static final u8 STONE = 2; }\nstatic final string HELLO = \"hi\";\nenum Color { RED, GREEN }\nvoid main() {\n    u8 b = 2;\n    switch (b) {\n        case Blocks.GRASS => println(\"grass\");\n        case Blocks.STONE, 3 => println(\"stone\");\n        default => println(\"other\");\n    }\n    switch (\"hi\") {\n        case HELLO => println(\"hello\");\n        default => println(\"?\");\n    }\n    Color c = Color.RED;\n    switch (c) {\n        case Color.RED => println(\"red\");\n        case GREEN => println(\"green\");\n    }\n}\n",
+    );
+    rejects(
+        "static u8 GRASS = 1;\nvoid main() {\n    u8 b = 1;\n    switch (b) { case GRASS => println(\"g\"); default => println(\"o\"); }\n}\n",
+        "`GRASS` isn't a constant, and a case label is a literal, an enum constant or a constant",
+    );
+    rejects(
+        &body(
+            "i64 k = 3;\ni64 v = 3;\nswitch (v) { case k => println(\"k\"); default => println(\"o\"); }",
+        ),
+        "`k` is a variable, and a case label is a constant",
+    );
+    rejects(
+        "static final i64 THREE = 3;\nvoid main() {\n    i64 v = 3;\n    switch (v) { case THREE => println(\"a\"); case 3 => println(\"b\"); default => println(\"c\"); }\n}\n",
+        "this case is already covered by an earlier label",
+    );
+    rejects(
+        "static final i64 BIG = 300;\nvoid main() {\n    u8 v = 3;\n    switch (v) { case BIG => println(\"a\"); default => println(\"c\"); }\n}\n",
+        "`BIG` is 300, which doesn't fit in u8, the type of the switch",
+    );
+    rejects(
+        "enum Color { RED }\nenum Size { BIG }\nvoid main() {\n    Color c = Color.RED;\n    switch (c) { case Size.BIG => println(\"a\"); default => println(\"c\"); }\n}\n",
+        "`Size.BIG` isn't a constant of `Color`",
+    );
+}

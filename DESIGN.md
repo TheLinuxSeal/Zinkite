@@ -42,6 +42,7 @@ Left out to stay light: inheritance, exceptions, destructors, reflection, dynami
 | Reference safety | Every reference has an inferred root and can't outlive it; removing from an array while a reference into it may still be used is a compile error; follows Goose, with no annotations and no aliasing rules (`REFERENCES.md`) | Decided | 5.2 |
 | Links inside data | `T&` fields, rooted like any reference; relative links `T&<i32>` for compact structures, as fields or the elements of a capped array field, copied only with their whole array; saving them as bytes is Open | Decided | 5.4 |
 | Classes | Methods in the body, constructors `new(...)`, `mut` methods, `private`; no header, so a class is exactly as large as its fields; `packed Node { ... }` drops the padding too | Decided | 6.1 |
+| Final fields and constants | A `final` field is set only when its value is made, by its initializer or else a constructor; a `static final` integer, `bool` or `string` set by a constant expression is a constant, for caps and case labels; no `final` locals | Decided | 6.1 |
 | Default constructors | A class with no constructor gets one taking each field without an initializer, in declaration order | Decided | 6.2 |
 | Constructors | Every field assigned on every path, checked for the worst case; `this.new(...)` delegates; a failing `return #code;` gives the zero value | Decided | 6.2 |
 | Roots | `root Parser { ... }` is a class whose growable fields each get their own data stack; it can't be copied or stored by value | Decided | 6.6 |
@@ -180,7 +181,7 @@ The optional trailing `cap`, or `$` in its place:
 
 | Cap | Meaning |
 |---|---|
-| a number or compile-time constant (`16`, `MAX_NAME`) | inline storage with that capacity |
+| a number or a constant (`16`, `MAX_NAME`, §6.1) | inline storage with that capacity |
 | `*` | variable-width (varint) length field, frozen arrays only |
 | `$` | chunked index, cursor arrays only (above) |
 | *(none)* | no inline cap: the array lives on a data stack (editable) or is sized at construction (frozen) |
@@ -573,6 +574,37 @@ first.heavier(2.5);
 - **`new` means "construct in place at the destination"**, never heap allocation (§3.3). It is only for classes: arrays, primitives and other values come from literals and declarations. Where the target type is known, the class name can be dropped: `items.push(new(1, 0.0))` (Decided).
 - **Implicit `this`**: fields are reachable by their bare names.
 - **`mut`** marks methods that change the object. Other methods are read-only, which the compiler checks.
+- **`final` fields** (Decided 2026-11-25): `final i64 id;` is set when its value is made, by its initializer or else by its class's constructors, through `this`. After that it is read-only, as a plain parameter is (§5.1): no `=`, `.=`, `++`, insertion or `mut` method, and it can't be passed to a `&` parameter or given a writable view.
+  ```
+  class Item {
+      final i64 id;
+      final string[..>] tags;       // starts empty: the constructors fill it
+      f64 weight;
+      new(i64 id, f64 w) { this.id = id; weight = w; tags +> "new"; }
+      mut void heavier(f64 by) { weight += by; }
+      mut void renumber() { id = 0; }    // compile error: only a constructor sets `id`
+  }
+  ```
+  - **It doesn't stop the whole value from being replaced.** `items[0] = new Item(2, 0.0)` still works, and has to, since sorting an array of `Item`s moves whole values. A value has no identity, so `final` behaves as Swift's `let` in a struct does, not as Java's `final` does on an object.
+  - **A `final` reference field can't be rebound with `.=`**, but what it refers to can still change, as for a reference held in any read-only slot (§5.1).
+  - **A field with an initializer is fixed by it**, so a constructor can't change it either. An editable array, a map, a set or a pool needs no initializer, since it starts empty, so a `final` one is filled by the constructors and fixed after.
+  - **Only the constructor itself sets one**: not a method it calls, another value of the class, or a lambda inside it, whose captures are read-only (§9.3).
+  - **The default constructor** takes the `final` fields that have no initializer, like the others (§6.2).
+  - **`final` goes only on fields.** On a class, a method or a constructor it is an error, since there are no subclasses; on a local or a parameter as well (Appendix A.15).
+- **Constants** (Decided 2026-11-25): a `static final` field is set only by its initializer, which it must have. One of an integer type, `bool` or `string` whose initializer is a constant expression is a constant: literals, other constants, `T.MIN` and `T.MAX`, and the arithmetic, bitwise, shift, comparison and logical operators on them.
+  ```
+  class Blocks {
+      public static final u8 AIR = 0;
+      public static final u8 GRASS = AIR + 1;
+      public static final i64 MAX_NAME = 16;
+  }
+  u8[..~Blocks.MAX_NAME] name = [];
+  switch (block) { case Blocks.GRASS => grow(); default => {} }
+  ```
+  - **Its value is worked out when the program is compiled**, exactly: one that doesn't fit its type, a division by zero, or a shift by the type's width or more is a compile error. `~` on an unsigned type flips that type's bits, so `static final u32 ALL = ~0;` is 4294967295.
+  - **A constant can give an array's capacity** (§4.2) **and be a case label** (§9.4), which need a value the compiler knows.
+  - **Every thread sees the same one**, since nothing changes it. An integer or `bool` one isn't copied into a new thread at all (§12.9): the C compiler is given its value, so it folds it as it would a literal.
+  - **Other `static final` fields are read-only statics**, set before `main` like any static (§8.7): one set by a call, and floats, which nothing needs as constants.
 - **Visibility**: `public`, `private` (only this class's methods), and package-private when nothing is written. There is no `protected`, since there are no subclasses.
 - **`static`** marks functions and fields with no instance.
 - **`==` compares fields** (Decided). Values have no identity.
@@ -1336,7 +1368,8 @@ enum Color { RED, GREEN, BLUE }
   - **For generic code**, `zink.lang` declares `interface Iterator<T> { mut T next(); }`, so a function can take `<I implements Iterator<T>>`.
   - **Library iterators**: `s.codePoints()`, `s.lines()` and `s.splitBy(sep)`. The eager `s.split(sep)` still returns a `string[..>]` when an array is wanted.
   - Goose has no iterator protocol; it iterates through functions that take a lambda. Those stay available in the library too (`filter`, `map`, `sort`, `retain`).
-- **`switch`** has only the arrow form: no fall-through and no `break`. The case arrow is `=>`, as for lambdas (§9.3). A case can list several values (`case 1, 2 =>`). It works on integer types (character literals included), `string` and enums, as a statement or as an expression. As an expression it must cover every case, with `default` or every enum constant.
+- **`switch`** has only the arrow form: no fall-through and no `break`. The case arrow is `=>`, as for lambdas (§9.3). A case can list several values (`case 1, 2 =>`). It works on integer types (character literals included), `string` and enums, as a statement or as an expression.
+  - **A case label is known when the program is compiled**: a literal; an enum constant, `case HEARTS` or `case Suit.HEARTS`; or a constant (§6.1), by its bare name in its own class or script file, or as `Blocks.GRASS`. A variable or another static is a compile error, and so are two labels with the same value, however they are written. As an expression it must cover every case, with `default` or every enum constant.
 - **`yield`** gives the value of a `switch` expression from a block arm, and a **label** names a loop for `break` and `continue`: `outer: for (...) { ... break outer; }` (`GRAMMAR.md` §5).
 - **Enums** are Java-style lists of constants, stored in static data. Enums with fields, and Goose-style variants with payloads, are Open (§17).
 
@@ -1370,7 +1403,7 @@ enum Color { RED, GREEN, BLUE }
 - **Everything is monomorphized.** Values of different classes have different sizes, so each instantiation is compiled separately with sizes and offsets hardcoded. Goose does the same.
 - **Angle brackets** (`hashmap<K, V>`) are kept (Decided). Slot types inside them (`hashmap<string, u8[..>16]>`) work because `[...]` in a type is lexed on its own (§4.12).
 - **Array parameters are specialized per layout** (§4.3).
-- **Compile-time constants as type arguments** are needed for capped arrays (`T[.N]`); the syntax is Open (§17).
+- **Compile-time constants as type arguments**, so a generic function can take a `T[.N]` for any `N`: the syntax is Open (§17). A cap may already be a constant (§6.1).
 - No runtime type information.
 - **Compiler details**:
   - Instantiations get internal names users can't type, so they never collide with user declarations. Errors show the written form.
@@ -1566,7 +1599,7 @@ for (i64 i = 0; i < thread.cores(); i++) {
 
 - **`thread.spawn` takes a lambda with no parameters** and runs it on a thread of its own. What the lambda uses from outside is copied into the new thread when it starts: a loop's counter gives each worker the value it had then, and may change afterwards, unlike what other lambdas capture (§9.3). Method references being undecided, a lambda is the only way to name the work.
 - **What crosses must be flat**: numbers, `bool`, enums, queues, capped arrays, and classes made only of those. A view, a reference, an array on a data stack, a map, a pool, `this` and a `File` can't, each a compile error that names what refers into the thread's memory. A `File` belongs to the thread that opened it, which writes it out and closes it when it ends.
-- **Statics are copied too.** A new thread gets a copy of each static whose type allows it: flat values, views of string literals, and arrays on data stacks of those, elements included, which go on data stacks of the new thread's own. What it changes stays its own. A worker that reaches any other static, a map or a view into an array, directly or through anything it calls, is a compile error; such a static would start empty there.
+- **Statics are copied too**, except integer and `bool` constants, which are the same in every thread (§6.1). A new thread gets a copy of each static whose type allows it: flat values, views of string literals, and arrays on data stacks of those, elements included, which go on data stacks of the new thread's own. What it changes stays its own. A worker that reaches any other static, a map or a view into an array, directly or through anything it calls, is a compile error; such a static would start empty there.
 - **`queue<T>`** is a built-in type, made with `[]`, of a flat `T`. It is a handle: copies share the queue, so a worker takes one along like any flat value. `put` copies a value in, failing with `FULL` at a limit `limit(n)` sets and with `END` once the queue is closed; `get` waits for the oldest value, and fails with `END` once the queue is closed and empty, which ends a repeat loop; `get(timeout)` fails with `TIMEOUT` and `poll` with `EMPTY`. A queue lasts for the whole run.
 - **Failures follow §7.6 per thread.** A failure nothing reads in a worker stops the program, as in `main`; a worker that should survive its own failures puts `@@` around its work. `w.join()` waits and fails with the status the lambda ended with.
 - **Output stays whole**: one thread's `println` is written as one line, never mixed with another's.
@@ -2017,6 +2050,10 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 140. A spawned lambda that uses a `string`, an array on a data stack, a `File` or `this` from outside it, a `queue` of a class with a `string` field, and a worker that reaches a static `hashmap` through a method it calls are compile errors; a loop's counter captured by a spawned lambda isn't.
 141. Eight workers printing lines at once never mix two lines; a failure nothing reads in a worker stops the program with exit status 1.
 
+**Final fields and constants** (§6.1)
+142. A `final` field set in a constructor reads the same after the value is copied, sorted and moved; assigning it, `++`, inserting into it or calling a `mut` method on it outside a constructor is a compile error, and so is assigning one with an initializer in a constructor, or rebinding a `final` reference field with `.=`. `items[0] = new Item(...)` still compiles.
+143. `static final u8 GRASS = 1;` works as a case label and `static final i64 N = 8;` as a cap; a plain static, a local, or a `static final` set by a call is a compile error in either place, and so are a constant that doesn't fit its type and two labels with the same value.
+
 ---
 
 ## Appendix A. Superseded and rejected designs
@@ -2092,3 +2129,6 @@ Most common types are spelled the same either way (`T[..>]`, `T[..~]`, `T[.~.]`,
 
 ### A.14 A one-bit status
 The pasted notes gave every call a one-bit side output, 0 or 1, read as a `bool`. Replaced on 2026-11-18 by a `u8` status (§7), so a failed call can also say why: "no such file" or "permission denied", which CLI tools need for their messages. The value `u8 main` returns becomes the exit status. To keep `if (failed)` working, unsigned integers became usable as conditions (§9.4). A separate `status` type with that one property was considered and found unnecessary.
+
+### A.15 `final` locals and parameters
+Rejected (2026-11-25), when `final` fields were decided (§6.1). The checker already knows which locals are assigned after their initialization, and a captured one must not be (§9.3); a plain parameter is a read-only copy (§5.1). Marking a local would only document intent, and give the compiler nothing it doesn't know. So `final` goes only on fields, and on a local or a parameter the error says why.
