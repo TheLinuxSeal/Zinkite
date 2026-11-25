@@ -149,10 +149,11 @@ void trim(i32[..~]& xs) { while (xs.len > 10) { @_ = xs ->; } }
 - **The effects** apply to the arguments: calling `trim(nums)` is a removal from `nums` for rule R.
 
 ### 4.3 Recursion, interfaces and function values
-- **Recursion**: summaries are sets of parameter positions and statics, so the compiler computes them by iterating over the call graph until nothing changes. This always terminates.
-- **Interfaces**: a call through an interface reference uses the union of the summaries of every implementing method.
-- **Function values**: a call through a `func` value uses the union over every function stored in a value of that type.
-- The whole program is visible, so both of those sets are known.
+- **Recursion**: summaries are sets of parameter positions and statics, so the compiler computes them by iterating over the call graph until nothing changes, however many rounds that takes. This always terminates; a guard on the number of rounds refuses the program rather than accept it unchecked.
+- **Interfaces**: a call through an interface reference uses the union of the summaries of every implementing method: in each class, the method with the interface method's name and parameter types, not another overload.
+- **Function values**: a call through a `func` value may run any lambda with as many parameters that isn't passed straight to a built-in. It does to its arguments what any of them does to its parameters: removes, moves elements, grows. Its result is rooted at its arguments. Inside such a lambda a parameter refers to what its caller passed, which only the lambda's own locals can keep, and the lambda can't return a reference into what it captures, since what calls it may keep the result longer (DESIGN §9.3).
+- **Lambdas passed straight to a built-in** are checked as the built-in runs them: once for each element, or not at all, as the body of a for-each over its receiver. Their parameters are its elements, or for `fold`'s first one its running result.
+- The whole program is visible, so these sets are known.
 
 ### 4.4 No annotations
 Nothing is written by the programmer. Error messages show the summary that caused them: "`longest(...)` may return a view rooted at its second argument, `inner`".
@@ -168,6 +169,7 @@ Each function is compiled once per array layout and generic instance (DESIGN §4
 - `pop`, `popFront`, `removeBefore`, `removeAfter`, `removeAt` and `clear`;
 - the operators that call them (`->`, `-<`, `-^`, `^-`);
 - assigning a whole array, or rebuilding a variable-size value (§6);
+- replacing a value whose fields hold arrays that are storage of their own (§5.3): assigning it, directly or through a reference, or moving values between slots, as `swap`, a sort or `fill` do;
 - calling a function whose summary says it does any of these to an argument (§4.1).
 
 ### 5.2 The rule
@@ -199,8 +201,9 @@ println("${top}");
 ### 5.4 Capped arrays and pools
 - **Capped arrays** (a number or constant after the slots, such as `u8[..~16]`) follow rule R: a removal ends references into one.
   - `T[..>k]`, `T[..~k]` and capped arrays that change only at the start (`T[>..k]`, `T[~..k]`), which sit at the top of their buffer, never move an element, so inserts end nothing.
-  - **Ring and gap buffers move elements**: a gap buffer (a cursor slot) on every edit, and a ring that changes at both ends when it wraps and a slice rotates it (DESIGN §4.10). An insert into one counts as a removal. A slice, sort or comparison of one, which may first make it one block, ends references to its elements; slices of it taken since its last change stay right, since nothing moves until the next one. References into one can't be kept in fields (§5.3).
-- **Pools** (`pool<T>`, DESIGN §3.5) are exempt from rule R. Their storage never holds another type, and freeing a slot only marks it reusable, so a stale reference may see the value that replaced it: a logic bug, never memory corruption (Goose §5.3).
+  - **Ring and gap buffers move elements**: a gap buffer (a cursor slot) on every edit, and a ring that changes at both ends when it wraps and a slice rotates it (DESIGN §4.10). An insert into one counts as a removal. Anything that uses one as a single slice may first make it one block, and ends references to its elements: a slice, a sort or `selectNth`, a comparison, a text method, or passing it where a slice or `string` goes. What goes element by element, as indexing, `contains`, `fold` or printing it in `${}` do, doesn't. Slices of it taken since its last change stay right, since nothing moves until the next one. References into one can't be kept in fields (§5.3).
+  - **A ring or gap buffer isn't passed to an array parameter whose elements stay where they are**, such as a `T[..>]&`: the function is compiled again for its layout (DESIGN §4.3), but checked for its own.
+- **Pools** (`pool<T>`, DESIGN §3.5) are exempt from rule R. Their storage never holds another type, and freeing a slot only marks it reusable, so a stale reference may see the value that replaced it: a logic bug, never memory corruption (Goose §5.3). An array that is a pool's element isn't exempt: removing from it follows rule R.
 
 ### 5.5 What rule R buys
 After a removal, no reference into the freed slots can be used. So the slots are reused right away:
@@ -215,14 +218,14 @@ The reuse is never visible to the program.
 
 A value is **variable-size** when its size isn't fixed by its type: a frozen array with a runtime length (`T[.]`, `T[.*]`), or a class value with such a field.
 
-- **V1, written once**: a variable-size value is written only when it is built. Its variable-size fields can't be assigned, and neither can the elements of an array of variable-size values. To change one, build a new value (Goose §4.4).
+- **V1, written once**: a variable-size value is written only when it is built. Its variable-size fields can't be assigned, and neither can the elements of an array of variable-size values, nor what a reference refers to (`for (Item& it : items) { it = ...; }`), since the values after it sit right behind it. To change one, build a new value (Goose §4.4).
 - **V2, whole variables**: a variable holding a variable-size value can be assigned as a whole. That rebuilds the value on its data stack, and counts as a removal for rule R: references into the old value must not be used afterwards.
 - **V3, arrays of variable-size values**:
   - they can't be indexed (DESIGN §3.2);
   - they have no `pop` or `popFront`, since the start of the last element can't be found (Goose §3.3);
   - their cursor slot must be `.`, since a cursor array's holes are reused by elements of the same size;
   - `clear` works, under rule R.
-- **V4, building in place**: while a value is being built in place in an array, nothing may grow that array (Goose §4.2). `items.push(make(items))` is an error when `make` can grow `items`.
+- **V4, building in place**: while a value is being built in place in an array, nothing may grow that array (Goose §4.2). `items.push(make(items))` is an error when `make` can grow `items`. The constructor that builds it can't grow, move or remove from it either, nor anything it calls: `tree.push(new Node(tree, 1))` is an error when the constructor clears `tree`. This holds for values with self-relative links too, which are always built in place (§7.4).
 - **V5, built in order**: a variable-size record is written from its start, so a constructor of a variable-size class assigns each variable-size field at most once, by a statement directly in its body (not inside an `if`, a loop or an expression), in the order the fields are declared, and none after `this.new(...)`, which writes them all. A field it doesn't assign gets its initializer, in its place. Fixed-size fields are assigned anywhere. A constructor that fails leaves the zero value: zeroed fixed-size fields and empty arrays.
 
 ```
@@ -300,7 +303,7 @@ for (Node& k : root.kids) { println("${k.key}"); }   // 2, then 3
   - a self-relative link can be stored only from a reference into the same array as the field it is stored in: the same root variable and field path (Goose §3.9);
   - a pool link only from a reference into its array;
   - when the compiler can't tell which array a reference points into, for example because two arrays were passed as parameters, it is a compile error.
-- **L2, no copying out**: a value with self-relative links can't be copied out of its array. `Node n = tree[0];` is an error; use `Node& n = tree[0];`. The links are measured from where the value sits, so a copy elsewhere would point at the wrong memory. Copying a whole array is fine, and so is copying values whose links are all pool links.
+- **L2, no copying out**: a value with self-relative links can't be copied out of its array. `Node n = tree[0];` is an error; use `Node& n = tree[0];`. The links are measured from where the value sits, so a copy elsewhere would point at the wrong memory. That includes copies a built-in makes, as `fill`, a map's `put` and a pool's `add`, and copies of part of the array: an array made from a slice of it, and assigning a slice or through a writable view. Copying a whole array is fine, and so is copying values whose links are all pool links.
 - **L3, arrays that keep their elements in place**: links, and references in fields (§7.1), can only point into arrays whose elements never move and whose memory never holds another type. That means grow-only and frozen arrays, capped ones included, except a capped ring that grows at both ends (`T[>.>k]`), which can wrap (§5.4). Capped arrays that can remove elements, and gap buffers, which move them, are excluded like any removable array (§5.3). References in fields may also point into pools (§5.4); links can't.
 - **L4, width**:
   - storing a link whose offset doesn't fit its width stops the program, like an overflow (DESIGN §7.6), for example more than 127 bytes for `<i8>`;
@@ -368,12 +371,13 @@ Goose marks the entry to a recursive cycle with `recursive fn`. Zinkite finds cy
 - **Plain parameters**: they are read-only copies (DESIGN §5.1). The compiler passes a large one by pointer only when no `&` argument of the same call, and no reference the callee can reach, shares a root with it. Otherwise it copies.
 - **Slices are read-only; writable views are `T[:]&`** (DESIGN §4.10). A writable view follows the same root rules as a slice, and can only be taken of an array the code may change, so never of a string literal, which lives in read-only memory. Goose instead tracks which views are writable from where they came from, with literals typed `const u8[:]` (Goose §3.10, §9.5). Zinkite writes it in the type, as plain and `&` parameters already say whether a callee may change an argument.
 - **Interface references** follow the same rules as `T&`. The slot they point into keeps its class, so the method table stays right.
-- **Lambdas** passed as parameters are compile-time values. A captured reference keeps its roots, and the lambda can't outlive the call. A `func` stored in a variable or field can't capture (DESIGN §9.3).
+- **Lambdas** passed as parameters are compile-time values. A captured reference keeps its roots, and the lambda can't outlive the call. A `func` stored in a variable or field can't capture (DESIGN §9.3). What calling one does is in §4.3.
 - **Hash maps** (DESIGN §4.14) follow the rules for removable arrays. Their entries never move on insert, so `put` and `getOrAdd` invalidate nothing. `remove` and `clear` are removals under rule R, and may compact the entries. References into a `hashmap` can be held only in local variables and parameters (§5.3). Each map is one region on one data stack under rule G: its entries, then its index (DESIGN §4.14).
 - **Repeat loops** (`while (T x : call)`, DESIGN §9.4): the header's variables are declared afresh in the body on each pass, and the call is made before they exist. So when the call runs, no binding from the previous pass is live, and the call may remove from what that binding viewed: `stdin.nextLine(buf)` clears `buf` on every pass. Storing `line` in an outer array is still rejected, by §5.3: `buf` is removable, so a view into it can't be stored in an array.
-- **For-each over an iterator** (DESIGN §9.4): the loop keeps the iterator in a hidden local for the whole loop. An iterator that holds a view or a reference into something, like `text.lines()`, keeps it live for the whole loop, so a removal from that data inside the loop is a compile error under rule R. A `mut T& next()` returns references, which follow rule S like any other.
+- **For-each over an iterator** (DESIGN §9.4): the loop keeps the iterator in a hidden local, declared just before the loop, for the whole loop, and each pass calls its `next()` on that local; over a class with `iterator()`, that call makes the iterator. The loop variable is what `next()` returns, so a view into the iterator's own storage lasts only as long as the loop. An iterator that holds a view or a reference into something, like `text.lines()`, keeps it live for the whole loop, so a removal from that data inside the loop is a compile error under rule R. A `mut T& next()` returns references, which follow rule S like any other.
 - **For-each by reference** (`for (Item& it : items)`): the loop variable is a reference rooted at the array, so removing from that array inside the loop body is a compile error under rule R. For-each by value holds no reference; removing inside one is a compile error until DESIGN §17 decides whether to allow it.
-- **`defer`** (DESIGN §6.4): for rules S and R, a deferred statement counts as running at the end of its block, before any of the block's variables are released. A reference it uses is therefore live until then, so a removal later in the block from the array it points into is a compile error.
+- **`defer`** (DESIGN §6.4): for rules S and R, a deferred statement counts as running at the end of its block, before any of the block's variables are released, the last one first, and also when a `break` or `continue` leaves the block. A reference it uses is therefore live until then, so a removal later in the block from the array it points into is a compile error.
+- **Constructors**: a constructor builds its value where the code generator chooses and copies it to where it goes, so it can't keep a reference to `this`, or into its inline storage, anywhere: in a field, a parameter's object or a static. A root's growable fields, on data stacks of their own, are the exception. A class's field initializers count as the start of each of its constructors, the default one included, and static initializers as stores into their statics, so a temporary can't be kept by either.
 - **`File` handles** (DESIGN §6.4) are plain values, a slot and a generation number, so copies and stale copies are safe: the runtime checks the generation on every operation.
 - **Windows** (`T[<.<]`) made from another array are views with that array's roots.
 - **Enums with payloads** (Open in DESIGN §17): if they are added, a value never changes variant in place, as in Goose (Goose §3.5), so references into a payload stay valid.

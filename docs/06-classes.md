@@ -193,6 +193,13 @@ void main() {
 - **`this` can't be used until every field is assigned**, except to assign fields, since a
   method could read a field that isn't set: "`describe` can't be called until every field
   is assigned, and `h` isn't yet".
+- **A constructor can't keep a reference to `this`**, in a field, an argument's object or a
+  static: the value is built where the compiler chooses and copied to where it goes, so
+  the reference would point at the old place. Set it once the value is in place, as
+  `n.me .= n;`.
+- **Field initializers run as the start of every constructor**, the default one included,
+  so they follow the same rules for references: interpolated text, which lasts only for
+  its statement, can't initialize a `string` field.
 
 ### Every field on every path
 

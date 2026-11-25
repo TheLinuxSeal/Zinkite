@@ -1397,6 +1397,16 @@ impl<'p, 'a> Checker<'p, 'a> {
             self.links_copied(e.span, to);
             return false;
         }
+        // Nor are the elements of a slice of an array of them, into another array: a
+        // whole array copied keeps its links right, as they are relative to it (§7.2).
+        if let Ty::Array(el, _) = to
+            && self.prog.link_bearing(el)
+            && matches!(from.unref(), Ty::Slice(_) | Ty::View(_))
+        {
+            let el = (**el).clone();
+            self.links_copied(e.span, &el);
+            return false;
+        }
         let place = self.is_place(e);
         self.expect_at(from, to, e.span, place)
     }
@@ -3929,7 +3939,8 @@ impl<'p, 'a> Checker<'p, 'a> {
                 help,
             );
         }
-        // V1: a variable-size field is written once, when its value is built.
+        // V1: a variable-size value is written once, when it is built: not a field, an
+        // element of an array of them, or what a reference refers to, whose size is set.
         if op != AssignOp::Rebind && self.prog.variable_size(&tt) && !self.in_ctor() {
             let field = match &target.kind {
                 E::Member { .. } => true,
@@ -3941,6 +3952,32 @@ impl<'p, 'a> Checker<'p, 'a> {
                     target.span,
                     format!("a variable-size field can't be assigned: {} is stored inline, so its size is set when the value is built", self.show(&tt)),
                     "build a new value instead (REFERENCES §6, V1)",
+                );
+            }
+        }
+        // Assigning a slice, or through a writable view, copies elements: not ones with
+        // self-relative links (L2).
+        if op == AssignOp::Assign
+            && let Ty::Slice(el) | Ty::View(el) = &tt
+            && self.prog.link_bearing(el)
+            && (matches!(target.kind, E::Slice { .. }) || !self.binds_ref(target))
+        {
+            let el = (**el).clone();
+            self.links_copied(value.span, &el);
+        }
+        if op != AssignOp::Rebind && self.prog.variable_size(tt.unref()) {
+            let inner = match &target.kind {
+                E::Index { .. } => Some("as an element of an array of them"),
+                _ if matches!(tt, Ty::Ref(_)) && !self.binds_ref(target) => {
+                    Some("through a reference")
+                }
+                _ => None,
+            };
+            if let Some(what) = inner {
+                self.err_help(
+                    target.span,
+                    format!("a variable-size value can't be assigned {}: {} is stored inline, between the values around it, so its size is set when it is built", what, self.show(tt.unref())),
+                    "build the array again, or assign a whole variable, which rebuilds it (REFERENCES §6, V1, V2)",
                 );
             }
         }
@@ -5247,6 +5284,27 @@ impl<'p, 'a> Checker<'p, 'a> {
     ) -> Ty {
         self.last_call_mut = false;
         let t = self.method_call_inner(bt, base, name, args, span, consumed);
+        // A built-in that stores a copy of its argument copies the links in it (L2).
+        if matches!(
+            name.name.as_str(),
+            "fill" | "put" | "getOrAdd" | "add" | "insertAt" | "heapPush"
+        ) && matches!(
+            bt.unref(),
+            Ty::Array(..) | Ty::Map(..) | Ty::Set(_) | Ty::Pool(_)
+        ) {
+            for a in args {
+                if let Some(at) = self
+                    .facts
+                    .types
+                    .get(&key(a.expr.span))
+                    .map(|t| t.unref().clone())
+                    && self.prog.link_bearing(&at)
+                    && !self.built_in_place(&a.expr)
+                {
+                    self.links_copied(a.expr.span, &at);
+                }
+            }
+        }
         let on_value = !matches!(bt, Ty::TypeName(_) | Ty::Namespace(_));
         if self.last_call_mut && on_value {
             let action = format!(
@@ -6414,6 +6472,13 @@ impl<'p, 'a> Checker<'p, 'a> {
             .count()
     }
 
+    /// Whether an assignment to `target`, a reference, binds it rather than writing
+    /// through it: the first assignment to a reference field in a constructor.
+    fn binds_ref(&self, target: &Expr) -> bool {
+        self.target_slot(target)
+            .is_some_and(|s| !self.flow.is_def(s))
+    }
+
     /// The field a bare name reaches, when no local has the name: one of the current
     /// class, or a script file's static.
     fn bare_field(&self, n: &str) -> Option<(ClassId, usize)> {
@@ -7383,7 +7448,7 @@ fn rebound_in_expr(e: &Expr, out: &mut Vec<String>) {
 
 /// "a" or "an" before a type's name as written, read as it's said: "an `i64[:]`", "an
 /// `f32`", "a `u8[:]`", "an `Item`".
-fn article(shown: &str) -> &'static str {
+pub(crate) fn article(shown: &str) -> &'static str {
     let mut cs = shown.chars();
     match (cs.next(), cs.next()) {
         (Some('i' | 'f'), Some(d)) if d.is_ascii_digit() => "an",

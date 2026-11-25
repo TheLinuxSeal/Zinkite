@@ -548,6 +548,29 @@ impl<'a> Program<'a> {
         }
     }
 
+    /// The method of class `cls` that implements method `m` of interface `iface`: the same
+    /// name and, once the interface's type arguments are bound, the same parameter types,
+    /// as the checker matched it (DESIGN §6.3).
+    pub fn implementation(&self, cls: ClassId, iface: ClassId, m: usize) -> Option<usize> {
+        let args = self.classes[cls].implements.iter().find_map(|t| match t {
+            Ty::Class(i, a) if *i == iface => Some(a.clone()),
+            _ => None,
+        })?;
+        let ic = &self.classes[iface];
+        let map: Vec<(String, Ty)> = ic
+            .type_params
+            .iter()
+            .map(|p| p.name.clone())
+            .zip(args)
+            .collect();
+        let im = ic.methods.get(m)?;
+        let want: Vec<Ty> = im.params.iter().map(|p| p.subst(&map)).collect();
+        self.classes[cls]
+            .methods
+            .iter()
+            .position(|x| x.name == im.name && !x.is_static && x.params == want)
+    }
+
     /// The `static final` field `name` of class `cls`.
     pub fn static_final(&self, cls: ClassId, name: &str) -> Option<&StaticFinal<'a>> {
         self.finals

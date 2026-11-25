@@ -879,3 +879,473 @@ fn workers_reach_only_statics_they_get_copies_of() {
         "can't use the static `FIRST`: it holds views that may point into the spawning thread's memory",
     );
 }
+
+// ---------------------------------------------------------------- the audit of 2026-11-25 (TODO.md)
+
+/// Text built in an inner block, which a later round of the loop overwrites: a view of it
+/// kept outside must be refused.
+fn escape(defs: &str, escape: &str, after: &str) -> String {
+    format!(
+        "{}\nvoid main() {{\n    for (i64 round = 0; round < 2; round++) {{\n        u8[..>] buf = [];\n        buf.append(round == 0 ? \"secret-AAAAAAAA\" : \"overwritten-BBB\");\n        if (round == 0) {{ {} }}\n    }}\n    {}\n}}\n",
+        defs, escape, after
+    )
+}
+
+/// Item 3: an interface call is checked against the method that implements it, not
+/// another of the same name and count of parameters.
+#[test]
+fn interface_calls_use_the_implementing_overload() {
+    rejects(
+        &main_with(
+            "interface Z { void zap(i32[..~]& a); }\nclass K implements Z { i64 q; void zap(i64 a) {} void zap(i32[..~]& a) { a.clear(); } }",
+            "i32[..~] a = [];\na +> 5;\nK[..>] ks = [];\nZ& z = ks.push(new K(1));\ni32& x = a[0];\nz.zap(a);\na +> 777;\nprintln(\"${x}\");",
+        ),
+        "`zap(...)` removes from `a` while `x` may still refer into it",
+    );
+    rejects(
+        &escape(
+            "string saved = \"\";\ninterface Sink { void put(string s); }\nclass Keeper implements Sink { i64 n = 0; void put(i64 x) {} void put(string s) { saved = s; } }\nvoid send(Sink& k, string s) { k.put(s); }",
+            "Keeper[..>] ks = []; Keeper& k = ks.push(new Keeper()); send(k, buf);",
+            "println(saved);",
+        ),
+        "can't be stored in a static",
+    );
+}
+
+/// Item 4: deferred statements run last first, and also when `break` or `continue`
+/// leaves their block.
+#[test]
+fn deferred_statements_are_checked_where_they_run() {
+    let pre = "i32[..~] a = [];\na +> 5;\ni32& x = a[0];\n";
+    rejects(
+        &main_with(
+            "",
+            &format!(
+                "{}defer println(\"${{x}}\");\ndefer a +> 777;\ndefer a.clear();",
+                pre
+            ),
+        ),
+        "`clear` removes from `a` while `x` may still refer into it",
+    );
+    for jump in ["break", "continue"] {
+        rejects(
+            &main_with(
+                "",
+                &format!(
+                    "{}for (i64 i = 0; i < 1; i++) {{\n    defer println(\"${{x}}\");\n    a.clear();\n    a +> 777;\n    {};\n}}",
+                    pre, jump
+                ),
+            ),
+            "`clear` removes from `a` while `x` may still refer into it",
+        );
+    }
+    // A block with no deferred statements adds nothing at a jump.
+    ok(&main_with(
+        "class Frame { i64 next; i64 end; }",
+        "Frame[..~] stack = [];\nstack +> new Frame(0, 1);\nwhile (stack.len > 0) {\n    Frame& top = stack[^1];\n    if (top.next == top.end) {\n        @_ = stack ->;\n        continue;\n    }\n    top.next++;\n}",
+    ));
+}
+
+/// Item 7: what makes a ring or gap buffer one block, or moves its elements, ends
+/// references into it.
+#[test]
+fn every_rearrangement_of_a_ring_or_gap_buffer_counts() {
+    let ring = "i64[~.~4] q = [1, 2, 3, 4];\n@_ = q -<;\n@_ = q +> 5;\ni64& r = q[0];\n";
+    for m in [
+        "q.partialSort(1);",
+        "q.radixSort();",
+        "@_ = q.selectNth(0);",
+        "q.sortByDescending((i64 v) => v);",
+    ] {
+        rejects(
+            &main_with("", &format!("{}{}\nprintln(\"${{r}}\");", ring, m)),
+            "can rearrange `q` while `r` may still refer into it",
+        );
+    }
+    let gap = "u8[~8] g = \"abcde\";\n@_ = g.seek(3);\n@_ = g +^ 'X';\nu8& r = g[4];\n";
+    rejects(
+        &main_with("", &format!("{}g.append(\"zz\");\nr = 'Z';", gap)),
+        "`append` can move the elements of `g`",
+    );
+    rejects(
+        &main_with("", &format!("{}println(g);\nr = 'Z';", gap)),
+        "can rearrange `g` while `r` may still refer into it",
+    );
+    rejects(
+        &main_with(
+            "",
+            &format!(
+                "{}var parts = g.split(\"b\");\nr = 'Z';\nprintln(\"${{parts.len}}\");",
+                gap
+            ),
+        ),
+        "`split` can rearrange `g`",
+    );
+    // Going element by element leaves it as it is.
+    ok(&main_with(
+        "",
+        &format!(
+            "{}println(\"${{g}} ${{g.contains(98)}} ${{g.indexOf(98)}}\");\ng.reverse();\nr = 'Z';",
+            gap
+        ),
+    ));
+}
+
+/// Item 9: a pool's exemption covers its elements, not removals from an array that is one.
+#[test]
+fn arrays_in_pools_follow_rule_r() {
+    rejects(
+        &main_with(
+            "",
+            "pool<i64[..~8]> p = [];\nHandle<i64[..~8]> h = p.add([1]);\ni64[..~8]& arr = p.get(h);\ni64& r = arr[0];\narr.clear();\narr +> 777;\nprintln(\"${r}\");",
+        ),
+        "`clear` removes from `p` while `r` may still refer into it",
+    );
+}
+
+/// Item 10: a function storing views of one part of an object in another part of it.
+#[test]
+fn summaries_keep_stores_within_an_object() {
+    rejects(
+        &main_with(
+            "root Lexer { u8[..>] text; string[..>] words; }\nvoid add(Lexer& lx, string s) { i64 st = lx.text.len; lx.text.append(s); lx.words +> lx.text[st:]; }",
+            "Lexer lx = new Lexer();\nadd(lx, \"secret\");\nlx.text.clear();\nadd(lx, \"overwritten\");\nprintln(lx.words[0]);",
+        ),
+        "`clear` removes from `lx.text` while `lx` may still refer into it",
+    );
+    rejects(
+        &main_with(
+            "class Doc {\n    u8[..>16] text;\n    string[..>] words;\n    mut void add(string s) { i64 st = text.len; text.append(s); words +> text[st:]; }\n    mut void reset() { text.clear(); }\n}",
+            "Doc d = new Doc(\"\");\nd.add(\"secret\");\nd.reset();\nd.add(\"overwritten\");\nprintln(d.words[0]);",
+        ),
+        "`reset(...)` removes from `d` while `d` may still refer into it",
+    );
+}
+
+/// Item 11: destructuring into a static, a field or a reference stores into it.
+#[test]
+fn destructuring_stores_into_existing_names() {
+    let pair = "(string, i64) pair(string s) { return (s, s.len); }";
+    rejects(
+        &escape(
+            &format!("string saved = \"\";\n{}", pair),
+            "i64 n = 0; (saved, n) = pair(buf);",
+            "println(saved);",
+        ),
+        "can't be stored in a static",
+    );
+    rejects(
+        &escape(
+            &format!("class Holder {{ string s; }}\n(Holder, i64) mk(string s) {{ return (new Holder(s), s.len); }}\n{}", pair),
+            "",
+            "println(outer.s);",
+        )
+        .replace("for (i64 round", "Holder outer = new Holder(\"\");\n    for (i64 round")
+        .replace("if (round == 0) {  }", "if (round == 0) { Holder& h = outer; i64 n = 0; (h, n) = mk(buf); }"),
+        "a reference into `buf` can't be stored in `outer`",
+    );
+}
+
+/// Item 13: the analysis goes on until nothing changes, however long a chain is.
+#[test]
+fn long_chains_are_followed_to_the_end() {
+    let n = 80;
+    let decls: String = (1..=n).map(|i| format!("string v{} = \"\"; ", i)).collect();
+    let mut chain = String::from("out = v1; ");
+    for i in 1..n {
+        chain.push_str(&format!("v{} = v{}; ", i, i + 1));
+    }
+    chain.push_str(&format!("v{} = buf; ", n));
+    let body = format!("{} {}", decls, chain.repeat(n + 2));
+    rejects(
+        &escape("", &body, "println(out);")
+            .replace("for (i64 round", "string out = \"\";\n    for (i64 round"),
+        "a reference into `buf` can't be stored in `out`",
+    );
+    let mut fns = String::new();
+    for k in 0..120 {
+        fns.push_str(&format!(
+            "string g{}(string s) {{ return g{}(s); }}\n",
+            k,
+            k + 1
+        ));
+    }
+    fns.push_str("string g120(string s) { return s; }\nstring saved = \"\";");
+    rejects(
+        &escape(&fns, "saved = g0(buf);", "println(saved);"),
+        "can't be stored in a static",
+    );
+}
+
+/// Item 16: an array arm of a `?:` or a switch that gives a view is a view of that array.
+#[test]
+fn conditional_arms_keep_the_roots_of_what_they_convert() {
+    rejects(
+        "string f(string t, bool p) { u8[..>] b = []; b.append(t); return p ? b : \"literal\"; }\nvoid main() { println(f(\"x\", true)); }\n",
+        "this returns a reference into `b`",
+    );
+    for e in [
+        "saved = round == 0 ? buf : \"literal\";",
+        "saved = switch (round) { case 0 => buf; default => \"literal\"; };",
+        "saved = switch (round) { case 0 => { yield buf; } default => \"literal\"; };",
+    ] {
+        rejects(
+            &escape("string saved = \"\";", e, "println(saved);"),
+            "can't be stored in a static",
+        );
+    }
+}
+
+/// Item 18: whether a class holds references is right for classes that contain each other.
+#[test]
+fn recursive_classes_hold_what_their_fields_hold() {
+    rejects(
+        &escape(
+            "class A { B b; string s; }\nclass B { A[.] xs; }",
+            "A[..>] tmp = []; tmp +> new A(new B([]), buf); saved = new B(tmp);",
+            "for (A& a : saved.xs) { println(a.s); }",
+        )
+        .replace("for (i64 round", "B saved = new B([]);\n    for (i64 round"),
+        "a reference into `buf` can't be stored in `saved`",
+    );
+}
+
+/// Item 2: a call through a function value does what any lambda with as many parameters
+/// does to its arguments; a lambda passed to a built-in runs once for each element.
+#[test]
+fn function_values_and_built_in_lambdas_have_effects() {
+    let pre = "i32[..~] a = [];\na +> 5;\n";
+    rejects(
+        &main_with(
+            "",
+            &format!(
+                "{}func(i32[..~]& => void) g = (i32[..~]& b) => {{ @_ = b ->; }};\ni32& x = a[0];\ng(a);\na +> 777;\nprintln(\"${{x}}\");",
+                pre
+            ),
+        ),
+        "`g(...)` removes from `a` while `x` may still refer into it",
+    );
+    rejects(
+        &main_with(
+            "void apply(func(i32[..~]& => void) f, i32[..~]& xs) { f(xs); }",
+            &format!(
+                "{}i32& x = a[0];\napply((i32[..~]& b) => {{ b.clear(); }}, a);\na +> 777;\nprintln(\"${{x}}\");",
+                pre
+            ),
+        ),
+        "`apply(...)` removes from `a` while `x` may still refer into it",
+    );
+    // Run once per element: what one pass removes, a later one may still use.
+    let arr = "i64[..~] a = [];\na +> 30 +> 10;\ni64[..~]& ar = a;\n";
+    rejects(
+        &main_with(
+            "",
+            &format!(
+                "{}var m = a.map((i64 v) => {{ if (v == 30) {{ ar.clear(); ar +> 777; }} return v; }});\nprintln(\"${{m}}\");",
+                arr
+            ),
+        ),
+        "`clear` removes from `a` inside a for-each over it",
+    );
+    rejects(
+        &main_with(
+            "",
+            &format!(
+                "{}i64[..~] b = [];\nb +> 1 +> 2;\ni64& x = a[0];\nvar n = b.count((i64 v) => {{ println(\"${{x}}\"); ar.clear(); ar +> 777; return true; }});",
+                arr
+            ),
+        ),
+        "`clear` removes from `a` while `x` may still refer into it",
+    );
+    // A lambda's result can't outlive what it captures, when anything may call it.
+    rejects(
+        &escape(
+            "void apply(string[..>]& out, func(i64 => string) f) { out +> f(0); }",
+            "apply(keep, (i64 k) => { string v = buf; return v[k:15]; });",
+            "println(keep[0]);",
+        )
+        .replace(
+            "for (i64 round",
+            "string[..>] keep = [];\n    for (i64 round",
+        ),
+        "this lambda returns a reference into `buf`, which it captures",
+    );
+    ok(&main_with(
+        "",
+        "i64[..>] xs = [];\nxs +> 3 +> 1;\nxs.sortBy((i64 v) => -v);\nstring all = \"\";\nvar n = xs.fold(0, (i64 acc, i64 v) => acc + v);\nprintln(\"${n}\");",
+    ));
+}
+
+/// Item 5: replacing a whole value through a reference, or a class value holding an
+/// array that can remove elements, removes what references point at.
+#[test]
+fn replacing_a_value_removes_its_elements() {
+    rejects(
+        &main_with(
+            "",
+            "i64[..~] a = [];\na +> 5;\ni64[..~]& ar = a;\ni64& r = a[0];\nar = [];\na +> 777;\nprintln(\"${r}\");",
+        ),
+        "assigning through `ar` removes from `a` while `r` may still refer into it",
+    );
+    let bag = "class Bag { i32[..~8] xs; }";
+    let body = |change: &str| {
+        format!(
+            "Bag[..>] bags = [];\nbags +> new Bag([5]) +> new Bag([6]);\ni32& r = bags[0].xs[0];\n{}\nprintln(\"${{r}}\");",
+            change
+        )
+    };
+    for change in ["bags[0] = new Bag([]);", "bags.swap(0, 1);"] {
+        rejects(
+            &main_with(bag, &body(change)),
+            "while `r` may still refer into it",
+        );
+    }
+    rejects(
+        &main_with(
+            &format!("{}\nvoid reset(Bag& b) {{ b = new Bag([]); }}", bag),
+            "Bag b = new Bag([5]);\ni32& r = b.xs[0];\nreset(b);\nprintln(\"${r}\");",
+        ),
+        "`reset(...)` removes from `b.xs` while `r` may still refer into it",
+    );
+}
+
+/// Item 6: a constructor run while its value is built in place in an array can't change
+/// that array (REFERENCES §6, V4).
+#[test]
+fn a_value_built_in_place_leaves_its_array_alone() {
+    rejects(
+        &main_with(
+            "class Node { i64 key; Node&<i32>? next; new(Node[..>]& xs, i64 k) { xs.clear(); key = k; next = null; } }",
+            "Node[..>] tree = [];\nNode& a = tree.push(new Node(tree, 1));",
+        ),
+        "`new Node` removes from the array this value is being built in, while it's built there",
+    );
+    rejects(
+        &main_with(
+            "class Rec { i64 id; u8[.] name; new(Rec[..>]& rs, i64 i) { rs +> new Rec(rs, 0); id = i; name = \"x\"; } }",
+            "Rec[..>] recs = [];\nrecs +> new Rec(recs, 1);",
+        ),
+        "adds to the array this value is being built in",
+    );
+}
+
+/// Item 8: a ring or gap buffer isn't given to a function checked for an array whose
+/// elements stay where they are.
+#[test]
+fn moving_layouts_arent_passed_as_fixed_ones() {
+    rejects(
+        "void add(i64[..>]& xs, i64 v) { @_ = xs +> v; }\nvoid main() { i64[~8] g = [1, 2]; add(g, 3); }\n",
+        "an `i64[~8]` can't be passed to `add`, which takes an `i64[..>]&`",
+    );
+    ok(
+        "void add(i64[..>]& xs, i64 v) { @_ = xs +> v; }\nvoid main() { i64[..~8] g = [1, 2]; add(g, 3); println(\"${g}\"); }\n",
+    );
+}
+
+/// Item 12: a lambda's parameters are rooted at what it is given: the elements, for a
+/// built-in, and otherwise what its caller passed, which only its own locals can keep.
+#[test]
+fn lambda_parameters_have_roots() {
+    rejects(
+        &escape(
+            "string saved = \"\";",
+            "string[..>] parts = []; parts +> buf[0:15]; var n = parts.count((string s) => { saved = s; return true; });",
+            "println(saved);",
+        ),
+        "can't be stored in a static",
+    );
+    rejects(
+        "string saved = \"\";\nvoid remember(string s) { saved = s; }\nvoid main() { func(string => void) f = (string s) => remember(s); f(\"x\"); }\n",
+        "the lambda's parameter `s` refers to what its caller passed",
+    );
+    ok(
+        "void each(string[:] xs, func(string => void) f) { for (string x : xs) { f(x); } }\nvoid main() { each([\"a\", \"b\"], (string s) => { string t = s; println(t); }); }\n",
+    );
+}
+
+/// Item 14: a constructor's `this` is moved into place, so no reference to it is kept.
+#[test]
+fn this_doesnt_escape_a_constructor() {
+    rejects(
+        "class Node { i64 v; Node&? me = null; new(i64 v) { this.v = v; me .= this; } }\nvoid main() { Node n = new Node(1); }\n",
+        "a constructor's `this` is copied to where the value goes when it returns",
+    );
+    ok(
+        "class Node { i64 v; Node&? me = null; new(i64 v) { this.v = v; } }\nvoid main() { Node n = new Node(1); n.me .= n; }\n",
+    );
+}
+
+/// Item 15: a for-each over an iterator gives what its `next()` returns, rooted at the
+/// loop's own copy of the iterator.
+#[test]
+fn for_each_over_an_iterator_follows_next() {
+    rejects(
+        "class Chars { u8[..~16] data; i64 at = 0;\n  mut string next() { if (at + 4 > data.len) { return #status.END \"\"; } at++; return data[at-1:at+3]; } }\nvoid main() {\n  string[..>] keep = [];\n  for (string s : new Chars(\"secret-AAAAAAAA\")) { if (keep.len == 0) { keep +> s; } }\n  println(keep[0]);\n}\n",
+        "a reference into the for-each's iterator can't be stored in `keep`",
+    );
+}
+
+/// Item 17: field initializers are checked as part of every constructor, and static
+/// initializers as stores into their statics.
+#[test]
+fn initializers_are_checked() {
+    rejects(
+        "class Box { string label = \"box-${Box.count}\"; static i64 count = 7; }\nvoid main() { Box b = new Box(); println(b.label); }\n",
+        "this text is a temporary, built only for this statement, so `this` can't keep a view of it",
+    );
+    rejects(
+        "string saved = \"\";\ni64 keep(string s) { saved = s; return 1; }\ni64 X = keep(\"built-${X}\".trim());\nvoid main() { }\n",
+        "this text is a temporary",
+    );
+}
+
+/// Item 19: what a worker's for-each calls counts toward the statics it reaches.
+#[test]
+fn workers_follow_for_each_calls() {
+    rejects(
+        "import zink.thread.*;\nu8[..>] buffer = [];\nstring first = \"\";\nclass It { i64 n = 0; mut string next() { if (n > 0) { return #status.END \"\"; } n++; return first; } }\nvoid main() {\n    buffer.append(\"secret\");\n    first = buffer[0:6];\n    Worker w = thread.spawn(() => { for (string s : new It()) { println(s); } });\n    w.join();\n}\n",
+        "can't use the static `first`: it holds views that may point into the spawning thread's memory",
+    );
+}
+
+/// Item 20: a variable-size value isn't assigned through a reference (REFERENCES §6, V1).
+#[test]
+fn variable_size_values_arent_written_through_references() {
+    let item = "class Item { u8[.*] sku; i32 qty; }";
+    rejects(
+        &main_with(
+            item,
+            "Item[..>] items = [];\nitems +> new Item(\"a\", 1);\nfor (Item& it : items) { it = new Item(\"much-longer\", 5); }",
+        ),
+        "a variable-size value can't be assigned through a reference",
+    );
+    rejects(
+        &format!(
+            "{}\nvoid set(Item& it) {{ it = new Item(\"b\", 2); }}\nvoid main() {{ }}\n",
+            item
+        ),
+        "a variable-size value can't be assigned through a reference",
+    );
+}
+
+/// Item 21: values with self-relative links aren't copied out of their array by a slice,
+/// a built-in that stores its argument, or a view.
+#[test]
+fn links_arent_copied_by_slices_or_built_ins() {
+    let node = "class Node { i64 key; Node&<i32>? next; }";
+    let pre = "Node[..>] tree = [];\nNode& a = tree.push(new Node(1, null));\nNode& b = tree.push(new Node(2, a));\n";
+    for copy in [
+        "Node[..>] part = tree[1:];",
+        "tree[0:1] = tree[1:2];",
+        "tree.fill(tree[1]);",
+        "pool<Node> p = []; var h = p.add(b);",
+        "hashmap<i64, Node> m = []; m.put(1, b);",
+        "Node[:]& w = tree[0:1]; w = tree[1:2];",
+    ] {
+        rejects(
+            &main_with(node, &format!("{}{}", pre, copy)),
+            "`Node` holds self-relative links, so it can't be copied",
+        );
+    }
+    ok(&main_with(node, &format!("{}Node[..>] whole = tree;", pre)));
+}

@@ -65,6 +65,9 @@ enum Var {
     Literal,
     /// A temporary, which lives until the end of its statement, by span.
     Temp(TempKind, u32, u32),
+    /// What the caller of a lambda that isn't passed straight to a built-in passed for its
+    /// parameter, the local with this index: it lasts the call, and no longer for sure.
+    Arg(u32),
 }
 
 impl Var {
@@ -195,6 +198,9 @@ struct CallR {
     /// For a `new` built in place in an array, as a value with self-relative links is:
     /// that array's storage, which `This` names for rule L1 (REFERENCES §7.4).
     into: Option<R>,
+    /// A call through a function value, with this many arguments: it may run any lambda
+    /// that takes as many (REFERENCES §4.3).
+    value: Option<usize>,
 }
 
 // ---------------------------------------------------------------- the flow form
@@ -270,6 +276,23 @@ enum Ev {
         scope: u32,
         span: Span,
     },
+    /// What one call of a lambda passed to `fold` returns, passed to the next as its first
+    /// parameter: a store for the root sets, inside one statement, so nothing to check.
+    Carry {
+        dst: R,
+        src: R,
+    },
+    /// Elements added to the storage `target` names: harmless for references into it,
+    /// which survive growth, but not while a value is built in place in it (V4).
+    Grow {
+        target: R,
+    },
+    /// Something these rules can't follow, refused with this message and help.
+    Refuse {
+        span: Span,
+        msg: String,
+        help: String,
+    },
     /// A link to what `src` names stored in a field, which must point into the storage
     /// `dst` names (REFERENCES §7.4, L1): the array the field is in, for a self-relative
     /// link, or its static array, for a pool link (`pool`).
@@ -313,6 +336,8 @@ enum FnKind {
 struct Func {
     class: ClassId,
     file: usize,
+    /// Where it is declared, for an error that names the whole function.
+    span: Span,
     name: String,
     kind: FnKind,
     params: Vec<(String, Ty)>,
@@ -344,6 +369,8 @@ struct Summary {
     /// Formal storage whose elements it may move by inserting, or rearrange.
     moves: Roots,
     rearranges: Roots,
+    /// Formal storage it may add elements to.
+    grows: Roots,
     /// Rule L1 for the callers: (a, b, pool) when a link to what formal a names is stored
     /// where it must point into what b names.
     links: BTreeSet<(Root, Root, bool)>,
@@ -358,8 +385,19 @@ pub fn check(prog: &Program, facts: &Facts, sources: &[SourceFile]) -> Vec<(usiz
     an.solve();
     an.report();
     an.worker_statics();
+    for (file, start, end) in an.gave_up.take() {
+        an.error(
+            file,
+            Span { start, end },
+            "the lifetime checker didn't settle on this function, so it can't be checked".into(),
+            "split it into smaller functions (REFERENCES §4.3)".into(),
+        );
+    }
     an.diags
 }
+
+/// Rounds after which a fixpoint is taken not to settle.
+const LIMIT: usize = 100_000;
 
 struct Analysis<'p, 'a> {
     prog: &'p Program<'a>,
@@ -377,7 +415,15 @@ struct Analysis<'p, 'a> {
     /// Temporaries already reported as stored where they can't be, by file: what then
     /// holds one, and what is read from that, would only repeat the error.
     temps_reported: std::cell::RefCell<HashSet<(usize, Var)>>,
-    holds_memo: std::cell::RefCell<HashMap<ClassId, bool>>,
+    holds_memo: std::cell::RefCell<HashMap<(ClassId, String), bool>>,
+    /// Functions whose analysis didn't settle (`too_complex`).
+    gave_up: std::cell::RefCell<BTreeSet<(usize, u32, u32)>>,
+    /// Each lambda that isn't passed straight to a built-in: the function it is in, and
+    /// the locals that are its parameters, in order.
+    lambdas: std::cell::RefCell<Vec<(FnId, Vec<u32>)>>,
+    /// What a call through a function value with this many arguments may do: the union
+    /// of what each such lambda does to its parameters.
+    value_sums: HashMap<usize, Summary>,
 }
 
 impl<'p, 'a> Analysis<'p, 'a> {
@@ -406,6 +452,9 @@ impl<'p, 'a> Analysis<'p, 'a> {
             reported: HashSet::new(),
             temps_reported: Default::default(),
             holds_memo: Default::default(),
+            gave_up: Default::default(),
+            lambdas: Default::default(),
+            value_sums: HashMap::new(),
         }
     }
 
@@ -413,6 +462,11 @@ impl<'p, 'a> Analysis<'p, 'a> {
 
     /// Whether a value of this type holds references, so it has roots.
     fn holds_refs(&self, t: &Ty) -> bool {
+        self.holds_with(t, &|me, id, args| me.class_holds(id, args))
+    }
+
+    /// `holds_refs`, with `class` deciding for a class type.
+    fn holds_with(&self, t: &Ty, class: &dyn Fn(&Self, ClassId, &[Ty]) -> bool) -> bool {
         match t {
             Ty::Ref(_)
             | Ty::Nullable(_)
@@ -421,38 +475,92 @@ impl<'p, 'a> Analysis<'p, 'a> {
             | Ty::Func(..)
             | Ty::MapEntry(..) => true,
             Ty::Param(_) | Ty::Unknown => true,
-            Ty::Array(e, _) | Ty::Set(e) | Ty::Pool(e) => self.holds_refs(e),
-            Ty::Map(k, v) => self.holds_refs(k) || self.holds_refs(v),
-            Ty::Tuple(ts) => ts.iter().any(|t| self.holds_refs(t)),
+            Ty::Array(e, _) | Ty::Set(e) | Ty::Pool(e) => self.holds_with(e, class),
+            Ty::Map(k, v) => self.holds_with(k, class) || self.holds_with(v, class),
+            Ty::Tuple(ts) => ts.iter().any(|t| self.holds_with(t, class)),
             Ty::Class(id, args) => {
                 let c = &self.prog.classes[*id];
                 if c.kind == ClassKind::Enum || c.kind == ClassKind::Script {
                     return false;
                 }
-                if args.is_empty() {
-                    if let Some(b) = self.holds_memo.borrow().get(id) {
-                        return *b;
-                    }
-                    self.holds_memo.borrow_mut().insert(*id, false); // a cycle holds nothing new
-                }
-                let map: Vec<(String, Ty)> = c
-                    .type_params
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .zip(args.iter().cloned())
-                    .collect();
-                let b = c.kind == ClassKind::Interface
-                    || c.fields
-                        .iter()
-                        .filter(|f| !f.is_static)
-                        .any(|f| self.holds_refs(&f.ty.subst(&map)));
-                if args.is_empty() {
-                    self.holds_memo.borrow_mut().insert(*id, b);
-                }
-                b
+                class(self, *id, args)
             }
             _ => false,
         }
+    }
+
+    /// Whether a value of class `id` with these type arguments holds references. Classes
+    /// can contain each other, so this is worked out for every class a value of it may
+    /// contain at once, starting from "no" and repeating until nothing changes.
+    fn class_holds(&self, id: ClassId, args: &[Ty]) -> bool {
+        let key = |id: ClassId, args: &[Ty]| (id, format!("{:?}", args));
+        if let Some(b) = self.holds_memo.borrow().get(&key(id, args)) {
+            return *b;
+        }
+        // Every class instance reachable through fields held by value.
+        let mut found: Vec<(ClassId, Vec<Ty>)> = vec![(id, args.to_vec())];
+        let mut fields: Vec<Vec<Ty>> = Vec::new();
+        let mut i = 0;
+        while i < found.len() {
+            let (c, a) = found[i].clone();
+            let ci = &self.prog.classes[c];
+            let map: Vec<(String, Ty)> = ci
+                .type_params
+                .iter()
+                .map(|p| p.name.clone())
+                .zip(a.iter().cloned())
+                .collect();
+            let tys: Vec<Ty> = ci
+                .fields
+                .iter()
+                .filter(|f| !f.is_static)
+                .map(|f| f.ty.subst(&map))
+                .collect();
+            for t in &tys {
+                classes_in(t, &mut |c2, a2| {
+                    if !found.iter().any(|(x, y)| *x == c2 && y.as_slice() == a2) {
+                        found.push((c2, a2.to_vec()));
+                    }
+                });
+            }
+            fields.push(tys);
+            i += 1;
+            // Type arguments that keep growing: assume the worst.
+            if found.len() > 1000 {
+                return true;
+            }
+        }
+        let mut val = vec![false; found.len()];
+        loop {
+            let mut changed = false;
+            for k in 0..found.len() {
+                if val[k] {
+                    continue;
+                }
+                let c = &self.prog.classes[found[k].0];
+                let b = c.kind == ClassKind::Interface
+                    || fields[k].iter().any(|t| {
+                        self.holds_with(t, &|_, c2, a2| {
+                            found
+                                .iter()
+                                .position(|(x, y)| *x == c2 && y.as_slice() == a2)
+                                .is_some_and(|j| val[j])
+                        })
+                    });
+                if b {
+                    val[k] = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut memo = self.holds_memo.borrow_mut();
+        for ((c, a), v) in found.iter().zip(&val) {
+            memo.insert(key(*c, a), *v);
+        }
+        val[0]
     }
 
     /// A reference to a whole container: `T[..>]&`, `hashmap<K, V>&`.
@@ -489,9 +597,44 @@ impl<'p, 'a> Analysis<'p, 'a> {
         }
     }
 
-    /// Exempt from rule R: pools (REFERENCES §5.4).
+    /// Exempt from rule R: pools (REFERENCES §5.4), whose slots hold a value of their
+    /// type even once freed. Not an array inside an element, which can lose elements.
     fn exempt_ty(t: &Ty) -> bool {
-        matches!(t.unref(), Ty::Pool(_))
+        matches!(t.unref(), Ty::Pool(el) if !Self::removable_ty(el))
+    }
+
+    /// The fields a value of `t` holds, itself or in values it holds, that are storage of
+    /// their own (`Part`): replacing the value removes their elements.
+    fn parts_of(&self, t: &Ty) -> Vec<Part> {
+        let mut out = Vec::new();
+        let mut seen = Vec::new();
+        self.parts_into(t, &mut out, &mut seen);
+        out
+    }
+
+    fn parts_into(&self, t: &Ty, out: &mut Vec<Part>, seen: &mut Vec<ClassId>) {
+        match t {
+            Ty::Array(e, _) => self.parts_into(e, out, seen),
+            Ty::Tuple(ts) => ts.iter().for_each(|t| self.parts_into(t, out, seen)),
+            Ty::Class(id, _) => {
+                let c = &self.prog.classes[*id];
+                if c.kind == ClassKind::Enum || seen.contains(id) {
+                    return;
+                }
+                seen.push(*id);
+                for (i, f) in c.fields.iter().enumerate().filter(|(_, f)| !f.is_static) {
+                    if c.kind == ClassKind::Root && starts_empty(&f.ty) || Self::removable_ty(&f.ty)
+                    {
+                        out.push(Part {
+                            class: *id,
+                            field: i as u32,
+                        });
+                    }
+                    self.parts_into(&f.ty, out, seen);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Resizable or variable-size: needs a data stack of its own (§8.1, §8.4).
@@ -539,10 +682,12 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 debug_assert_eq!(self.fn_of.get(&(c, false, i)), Some(&self.funcs.len()));
                 let mut b = Builder::new(self, !m.is_static);
                 b.ret = m.ret.clone();
+                b.fn_id = self.funcs.len();
                 let f = b.function(&m.decl.params, body);
                 self.funcs.push(Func {
                     class: c,
                     file: ci.file,
+                    span: m.decl.name.span,
                     name: m.name.clone(),
                     kind: FnKind::Method,
                     params,
@@ -560,10 +705,14 @@ impl<'p, 'a> Analysis<'p, 'a> {
                             .zip(&k.params)
                             .map(|(p, t)| (name_of(&p.name), t.clone()))
                             .collect();
-                        let f = Builder::new(self, true).function(&d.params, &d.body);
+                        let mut b = Builder::new(self, true);
+                        b.inits = Some(c);
+                        b.fn_id = self.funcs.len();
+                        let f = b.function(&d.params, &d.body);
                         self.funcs.push(Func {
                             class: c,
                             file: ci.file,
+                            span: d.span,
                             name: format!("new {}", ci.name),
                             kind: FnKind::Ctor,
                             params,
@@ -578,18 +727,50 @@ impl<'p, 'a> Analysis<'p, 'a> {
                             .enumerate()
                             .map(|(i, t)| (format!("argument {}", i + 1), t.clone()))
                             .collect();
+                        // Its body is the field initializers.
+                        let mut b = Builder::new(self, true);
+                        b.inits = Some(c);
+                        b.fn_id = self.funcs.len();
+                        let f = b.function(
+                            &[],
+                            &ast::Block {
+                                stmts: Vec::new(),
+                                span: ci.span,
+                            },
+                        );
                         self.funcs.push(Func {
                             class: c,
                             file: ci.file,
+                            span: ci.span,
                             name: format!("new {}", ci.name),
                             kind: FnKind::DefaultCtor,
                             params,
-                            locals: Vec::new(),
-                            body: Vec::new(),
+                            locals: f.0,
+                            body: f.1,
                         });
                     }
                 }
             }
+        }
+        // Each class's static initializers, as a function of their own: what they store
+        // goes into the statics' root sets, and a temporary can't be kept (§3.3).
+        for (c, ci) in prog.classes.iter().enumerate() {
+            if !ci.fields.iter().any(|f| f.is_static && f.init.is_some()) {
+                continue;
+            }
+            let mut b = Builder::new(self, false);
+            b.fn_id = self.funcs.len();
+            let f = b.statics(c);
+            self.funcs.push(Func {
+                class: c,
+                file: ci.file,
+                span: ci.span,
+                name: format!("the static initializers of `{}`", ci.name),
+                kind: FnKind::Method,
+                params: Vec::new(),
+                locals: f.0,
+                body: f.1,
+            });
         }
         self.summaries = vec![Summary::default(); self.funcs.len()];
     }
@@ -608,6 +789,10 @@ impl<'p, 'a> Analysis<'p, 'a> {
             Var::Static(id) => out.extend(self.static_rs.get(&id).cloned().unwrap_or_default()),
             Var::Temp(..) => {
                 out.insert(*root);
+            }
+            // What the caller's value holds is the caller's too.
+            Var::Arg(_) => {
+                out.insert(Root::of(root.var));
             }
             _ => {}
         }
@@ -830,7 +1015,12 @@ impl<'p, 'a> Analysis<'p, 'a> {
             }
         }
         let evs = events(&f.body);
-        for _ in 0..64 {
+        // Root sets only grow, and are finite, so this ends; the bound is a guard.
+        for round in 0.. {
+            if round == LIMIT {
+                self.too_complex(f.file, f.span);
+                break;
+            }
             let mut changed = false;
             let mut add = |rs: &mut HashMap<Var, Roots>,
                            statics: &mut HashMap<u32, Roots>,
@@ -860,7 +1050,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
             };
             for ev in &evs {
                 match ev {
-                    Ev::Store { dst, src, .. } => {
+                    Ev::Store { dst, src, .. } | Ev::Carry { dst, src } => {
                         let s = self.eval(&rs, src);
                         if s.is_empty() {
                             continue;
@@ -923,7 +1113,6 @@ impl<'p, 'a> Analysis<'p, 'a> {
                     None => {}
                 }
             }
-            return s;
         }
         let evs = events(&f.body);
         for ev in &evs {
@@ -945,7 +1134,9 @@ impl<'p, 'a> Analysis<'p, 'a> {
                     for d in self.eval(rs, dst) {
                         if d.var.is_formal() || matches!(d.var, Var::Static(_)) {
                             for a in &src {
-                                if a.var.is_formal() && a.var != d.var {
+                                // Into the same object counts too: a view of one field
+                                // kept in another ends at a removal from the first.
+                                if a.var.is_formal() {
                                     s.stores.insert((*a, d));
                                 }
                             }
@@ -965,6 +1156,13 @@ impl<'p, 'a> Analysis<'p, 'a> {
                             .filter(|r| r.var.is_formal() || matches!(r.var, Var::Static(_))),
                     );
                 }
+                Ev::Grow { target } => {
+                    s.grows.extend(
+                        self.eval(rs, target)
+                            .into_iter()
+                            .filter(|r| r.var.is_formal() || matches!(r.var, Var::Static(_))),
+                    );
+                }
                 Ev::Change { target, kind, .. } => {
                     let set = if *kind == Change::Rearrange {
                         &mut s.rearranges
@@ -978,12 +1176,29 @@ impl<'p, 'a> Analysis<'p, 'a> {
                     );
                 }
                 Ev::Call(c) => {
+                    if let Some(n) = c.call.value
+                        && let Some(sm) = self.value_sums.get(&n)
+                    {
+                        for (from, to) in [
+                            (&sm.removes, &mut s.removes),
+                            (&sm.moves, &mut s.moves),
+                            (&sm.rearranges, &mut s.rearranges),
+                            (&sm.grows, &mut s.grows),
+                        ] {
+                            for r in from {
+                                to.extend(self.map_formal(rs, &c.call, r).into_iter().filter(
+                                    |r| r.var.is_formal() || matches!(r.var, Var::Static(_)),
+                                ));
+                            }
+                        }
+                    }
                     for &g in &c.call.callees {
                         let sm = &self.summaries[g];
                         for (from, to) in [
                             (&sm.removes, &mut s.removes),
                             (&sm.moves, &mut s.moves),
                             (&sm.rearranges, &mut s.rearranges),
+                            (&sm.grows, &mut s.grows),
                         ] {
                             for r in from {
                                 to.extend(self.map_formal(rs, &c.call, r).into_iter().filter(
@@ -996,7 +1211,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
                             for d in self.map_formal(rs, &c.call, b) {
                                 if d.var.is_formal() || matches!(d.var, Var::Static(_)) {
                                     for x in &src {
-                                        if x.var.is_formal() && x.var != d.var {
+                                        if x.var.is_formal() {
                                             s.stores.insert((*x, d));
                                         }
                                     }
@@ -1016,15 +1231,19 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 _ => {}
             }
         }
-        if f.kind == FnKind::Ctor {
-            // What a constructor builds holds whatever it stored into `this`.
-            let held: Roots = rs
+        if matches!(f.kind, FnKind::Ctor | FnKind::DefaultCtor) {
+            // What a constructor builds holds whatever it stored into `this`, and a
+            // default one its arguments.
+            let mut held: Roots = rs
                 .get(&Var::This)
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|r| keep(r) && !matches!(r.var, Var::This | Var::ThisHeld))
                 .collect();
+            if let Some(r) = s.results.first() {
+                held.extend(r.iter().copied());
+            }
             s.results = vec![held];
         }
         s
@@ -1032,9 +1251,16 @@ impl<'p, 'a> Analysis<'p, 'a> {
 
     /// Summaries for every function, and root sets for statics, by repeating until nothing changes (§4.3).
     fn solve(&mut self) {
-        for _ in 0..100 {
+        for round in 0.. {
+            if round == LIMIT {
+                if let Some(f) = self.funcs.first() {
+                    self.too_complex(f.file, f.span);
+                }
+                break;
+            }
             let mut changed = false;
             let mut statics = self.static_rs.clone();
+            let mut all_rs = Vec::new();
             for i in 0..self.funcs.len() {
                 let rs = self.root_sets(&self.funcs[i], &mut statics);
                 let s = self.summarize(&self.funcs[i], &rs);
@@ -1042,6 +1268,12 @@ impl<'p, 'a> Analysis<'p, 'a> {
                     self.summaries[i] = s;
                     changed = true;
                 }
+                all_rs.push(rs);
+            }
+            let vs = self.value_summaries(&all_rs);
+            if vs != self.value_sums {
+                self.value_sums = vs;
+                changed = true;
             }
             if statics != self.static_rs {
                 self.static_rs = statics;
@@ -1053,7 +1285,79 @@ impl<'p, 'a> Analysis<'p, 'a> {
         }
     }
 
+    /// The summaries a call may run: its callees', and for a call through a function
+    /// value, what any lambda with as many parameters does.
+    fn sums<'s>(&'s self, c: &CallR) -> Vec<&'s Summary> {
+        let mut v: Vec<&Summary> = c.callees.iter().map(|&g| &self.summaries[g]).collect();
+        if let Some(n) = c.value
+            && let Some(s) = self.value_sums.get(&n)
+        {
+            v.push(s);
+        }
+        v
+    }
+
+    /// What calls through function values may do: for each lambda not passed straight to a
+    /// built-in, the removals, moves and growth its parameters' storage may see, as the
+    /// formals of a function with as many parameters (REFERENCES §4.3).
+    fn value_summaries(&self, all_rs: &[HashMap<Var, Roots>]) -> HashMap<usize, Summary> {
+        let mut out: HashMap<usize, Summary> = HashMap::new();
+        for (fid, locals) in self.lambdas.borrow().iter() {
+            let (f, rs) = (&self.funcs[*fid], &all_rs[*fid]);
+            let s = out.entry(locals.len()).or_default();
+            let mut note = |roots: Roots, which: usize| {
+                for r in roots {
+                    if let Var::Arg(l) = r.var
+                        && let Some(pos) = locals.iter().position(|x| *x == l)
+                    {
+                        let fr = Root {
+                            var: Var::Formal(pos as u32),
+                            ..r
+                        };
+                        match which {
+                            0 => s.removes.insert(fr),
+                            1 => s.moves.insert(fr),
+                            2 => s.rearranges.insert(fr),
+                            _ => s.grows.insert(fr),
+                        };
+                    }
+                }
+            };
+            for ev in events(&f.body) {
+                match ev {
+                    Ev::Remove { target, .. } => note(self.eval(rs, target), 0),
+                    Ev::Change { target, kind, .. } => note(
+                        self.eval(rs, target),
+                        if *kind == Change::Rearrange { 2 } else { 1 },
+                    ),
+                    Ev::Grow { target } => note(self.eval(rs, target), 3),
+                    Ev::Call(c) => {
+                        for sm in self.sums(&c.call) {
+                            for (k, set) in [&sm.removes, &sm.moves, &sm.rearranges, &sm.grows]
+                                .into_iter()
+                                .enumerate()
+                            {
+                                for r in set {
+                                    note(self.map_formal(rs, &c.call, r), k);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
     // ------------------------------------------------------------ reporting
+
+    /// The analysis didn't settle within `LIMIT` rounds: refused, never accepted unchecked.
+    fn too_complex(&self, file: usize, span: Span) {
+        self.gave_up
+            .borrow_mut()
+            .insert((file, span.start, span.end));
+    }
 
     fn error(&mut self, file: usize, span: Span, msg: String, help: String) {
         if self.reported.insert((file, span.start, span.end)) {
@@ -1070,7 +1374,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
 
     fn root_name(&self, f: &Func, r: &Root) -> String {
         let base = match r.var {
-            Var::Local(i) => format!("`{}`", f.locals[i as usize].name),
+            Var::Local(i) => quoted(&f.locals[i as usize].name),
             Var::Param(i) => format!("`{}`", f.params[i as usize].0),
             Var::Formal(i) | Var::FormalHeld(i) => {
                 format!("what `{}` refers to", f.params[i as usize].0)
@@ -1082,6 +1386,10 @@ impl<'p, 'a> Analysis<'p, 'a> {
             }
             Var::Literal => "a string literal".to_string(),
             Var::Temp(..) => "a temporary".to_string(),
+            Var::Arg(i) => format!(
+                "what the lambda's caller passed for `{}`",
+                f.locals[i as usize].name
+            ),
         };
         let Some(p) = r.part else { return base };
         let holder = match r.var {
@@ -1108,6 +1416,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
             Var::Local(i) => f.locals[i as usize].ty.unref().clone(),
             Var::Param(i) | Var::Formal(i) => f.params[i as usize].1.unref().clone(),
             Var::This => Ty::Class(f.class, Vec::new()),
+            Var::Arg(i) => f.locals[i as usize].ty.unref().clone(),
             Var::Static(id) => {
                 let (c, i) = self.statics[id as usize];
                 self.prog.classes[c].fields[i].ty.clone()
@@ -1154,6 +1463,20 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 }
             }
         }
+        // The iterators of for-each loops, whose `next()` and `iterator()` they call.
+        let mut loops: HashSet<(u32, u32)> = HashSet::new();
+        for c in &prog.classes {
+            let bodies = c
+                .methods
+                .iter()
+                .filter_map(|m| m.decl.body.as_ref())
+                .chain(c.ctors.iter().filter_map(|k| k.decl.map(|d| &d.body)));
+            for b in bodies {
+                for st in &b.stmts {
+                    foreach_iters(st, &mut loops);
+                }
+            }
+        }
         for (file, lam) in spawns {
             let mut seen: HashSet<(ClassId, bool, usize)> = HashSet::new();
             let mut work: Vec<(usize, &Expr)> = vec![(file, lam)];
@@ -1168,6 +1491,12 @@ impl<'p, 'a> Analysis<'p, 'a> {
                         && !reached.iter().any(|r| r.0 == id)
                     {
                         reached.push((id, file, e.span));
+                    }
+                    if loops.contains(&key(e.span))
+                        && let Some(Ty::Class(c, _)) =
+                            facts.types.get(&key(e.span)).map(|t| t.unref())
+                    {
+                        iter_methods(prog, *c, &mut calls);
                     }
                     if let E::Call { .. } | E::New { .. } = &e.kind
                         && let Some(f) = facts.calls.get(&key(e.span))
@@ -1258,6 +1587,9 @@ impl<'p, 'a> Analysis<'p, 'a> {
                     } => {
                         let s = self.eval(&rs, src);
                         let d = self.eval(&rs, dst);
+                        if !*cell {
+                            self.this_escapes(f, &s, *span, &mut errs);
+                        }
                         self.rule_s(f, &s, &d, !*cell, *span, None, &mut errs);
                     }
                     Ev::Ret { values, span } => {
@@ -1277,6 +1609,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
                         let d = self.eval(&rs, dst);
                         self.link_rule(f, &s, &d, *pool, *span, &mut errs);
                     }
+                    Ev::Refuse { span, msg, help } => errs.push((*span, msg.clone(), help.clone())),
                     Ev::LambdaRet { value, scope, span } => {
                         for r in self.eval(&rs, value) {
                             match r.var {
@@ -1292,11 +1625,57 @@ impl<'p, 'a> Analysis<'p, 'a> {
                                         "return a copy, or build it in a variable outside the lambda (DESIGN §9.3)".into(),
                                     ))
                                 }
+                                // Its caller is anywhere the function value goes, which
+                                // may keep the result longer than what the lambda captures.
+                                Var::Local(_)
+                                | Var::Param(_)
+                                | Var::Formal(_)
+                                | Var::FormalHeld(_)
+                                | Var::This
+                                | Var::ThisHeld => errs.push((
+                                    *span,
+                                    format!("this lambda returns a reference into {}, which it captures, and what calls it may keep the result longer", self.root_name(f, &r)),
+                                    "return a copy; only a lambda passed straight to a built-in, such as `map`, can return a view of what it captures (DESIGN §9.3)".into(),
+                                )),
                                 _ => {}
                             }
                         }
                     }
                     Ev::Call(c) => {
+                        // A value built in place in an array: its constructor, and what it
+                        // calls, mustn't change that array meanwhile (REFERENCES §6, V4).
+                        if c.is_new
+                            && let Some(into) = &c.call.into
+                        {
+                            let dest = self.eval(&rs, into);
+                            for &g in &c.call.callees {
+                                let sm = &self.summaries[g];
+                                for (set, verb) in [
+                                    (&sm.removes, "removes from"),
+                                    (&sm.moves, "can move the elements of"),
+                                    (&sm.grows, "adds to"),
+                                ] {
+                                    let hit = set.iter().any(|r| {
+                                        self.map_formal(&rs, &c.call, r).iter().any(|m| {
+                                            dest.iter().any(|d| {
+                                                m.var == d.var
+                                                    && (m.part.is_none()
+                                                        || d.part.is_none()
+                                                        || m.part == d.part)
+                                            })
+                                        })
+                                    });
+                                    if hit {
+                                        errs.push((
+                                            c.span,
+                                            format!("`{}` {} the array this value is being built in, while it's built there", c.name, verb),
+                                            "compute what it needs first, or add the value with a separate statement (REFERENCES §6, V4)".into(),
+                                        ));
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         for &g in &c.call.callees {
                             for (a, b, pool) in &self.summaries[g].links {
                                 let s = self.map_link(&rs, &c.call, a);
@@ -1305,6 +1684,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
                             }
                             for (a, b) in &self.summaries[g].stores {
                                 let s = self.map_formal(&rs, &c.call, a);
+                                self.this_escapes(f, &s, c.span, &mut errs);
                                 if c.is_new && b.var == Var::This {
                                     self.holder_rule(f, &s, c.span, &mut errs);
                                     continue;
@@ -1420,8 +1800,27 @@ impl<'p, 'a> Analysis<'p, 'a> {
                             };
                             errs.push((
                                 span,
-                                format!("{}a reference into `{}` can't be stored in `{}`: `{}` {}, so it is released first", prefix, la.name, lb.name, la.name, why),
-                                format!("declare `{}` before `{}`, in the same block or an enclosing one (REFERENCES §3.3)", la.name, lb.name),
+                                format!("{}a reference into {} can't be stored in {}: {} {}, so it is released first", prefix, quoted(&la.name), quoted(&lb.name), quoted(&la.name), why),
+                                if la.name.contains(' ') {
+                                    "what it gives lasts only as long as the loop; copy it to keep it (REFERENCES §3.3)".to_string()
+                                } else {
+                                    format!("declare `{}` before `{}`, in the same block or an enclosing one (REFERENCES §3.3)", la.name, lb.name)
+                                },
+                            ));
+                        }
+                    }
+                    // A lambda's parameter, when the lambda isn't passed straight to a built-in:
+                    // only its own locals can keep what it refers to.
+                    (Var::Arg(p), _) => {
+                        let kept = match d.var {
+                            Var::Local(b) => outlives(&f.locals[p as usize], &f.locals[b as usize]),
+                            _ => false,
+                        };
+                        if !kept {
+                            errs.push((
+                                span,
+                                format!("{}the lambda's parameter `{}` refers to what its caller passed, which may not outlive the call, so {} can't keep it", prefix, f.locals[p as usize].name, self.root_name(f, d)),
+                                "copy it, or pass the lambda straight to a built-in, which tells what it passes (DESIGN §9.3)".into(),
                             ));
                         }
                     }
@@ -1446,6 +1845,35 @@ impl<'p, 'a> Analysis<'p, 'a> {
         }
         if holder {
             self.holder_rule(f, src, span, errs);
+        }
+    }
+
+    /// A constructor builds its value where the code generator chooses and copies it to
+    /// where it goes, so a reference to `this`, or into its inline storage, can't be
+    /// kept: only into a root's growable field, which is on a data stack of its own.
+    fn this_escapes(
+        &self,
+        f: &Func,
+        src: &Roots,
+        span: Span,
+        errs: &mut Vec<(Span, String, String)>,
+    ) {
+        if f.kind != FnKind::Ctor {
+            return;
+        }
+        let own_stack = |p: Part| {
+            let c = &self.prog.classes[p.class];
+            c.kind == ClassKind::Root && starts_empty(&c.fields[p.field as usize].ty)
+        };
+        if src
+            .iter()
+            .any(|r| r.var == Var::This && !r.part.is_some_and(own_stack))
+        {
+            errs.push((
+                span,
+                "a constructor's `this` is copied to where the value goes when it returns, so a reference to it can't be kept".into(),
+                "set the reference once the value is in place, as `n.me .= n;` (DESIGN §6.2)".into(),
+            ));
         }
     }
 
@@ -1616,8 +2044,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
                         let mut with_args = live.clone();
                         with_args.extend(c.uses.iter().copied());
                         if report {
-                            for &g in &c.call.callees {
-                                let sm = &self.summaries[g];
+                            for sm in self.sums(&c.call) {
                                 for (set, kind) in [
                                     (&sm.removes, Change::Remove),
                                     (&sm.moves, Change::Move),
@@ -1636,12 +2063,32 @@ impl<'p, 'a> Analysis<'p, 'a> {
                         }
                         live = with_args;
                     }
-                    Ev::Store { .. } | Ev::Ret { .. } | Ev::Link { .. } | Ev::LambdaRet { .. } => {}
+                    Ev::Store { .. }
+                    | Ev::Ret { .. }
+                    | Ev::Link { .. }
+                    | Ev::LambdaRet { .. }
+                    | Ev::Refuse { .. }
+                    | Ev::Grow { .. }
+                    | Ev::Carry { .. } => {}
                 },
                 Node::Block { body, defers } => {
-                    // A deferred statement runs when the block ends (REFERENCES §9).
-                    let end = self.live(f, rs, statics, defers, &live, ctx, report, errs);
-                    ctx.defers.push(end.clone());
+                    // A deferred statement runs when the block ends (REFERENCES §9): by
+                    // falling off its end, or by a `break` or `continue` out of it, which
+                    // goes on after an enclosing loop or at its next pass.
+                    let mut leaving = live.clone();
+                    if !defers.is_empty() {
+                        for l in &ctx.loops {
+                            leaving.extend(l.1.iter().copied());
+                            leaving.extend(l.2.iter().copied());
+                        }
+                    }
+                    let end = self.live(f, rs, statics, defers, &leaving, ctx, report, errs);
+                    // What a jump out of the block reads: its deferred statements' uses.
+                    ctx.defers.push(if defers.is_empty() {
+                        Live::new()
+                    } else {
+                        end.clone()
+                    });
                     live = self.live(f, rs, statics, body, &end, ctx, report, errs);
                     ctx.defers.pop();
                 }
@@ -1658,11 +2105,24 @@ impl<'p, 'a> Analysis<'p, 'a> {
                     live = out;
                 }
                 Node::Loop(l) => live = self.live_loop(f, rs, statics, l, &live, ctx, report, errs),
+                // Leaving blocks runs their deferred statements first.
                 Node::Break(label) => {
-                    live = ctx.target(label).map_or_else(Live::new, |t| t.0.clone())
+                    live = ctx
+                        .target(label)
+                        .map_or_else(Live::new, |(after, _, depth)| {
+                            let mut l = after.clone();
+                            l.extend(ctx.defers[depth..].iter().flatten().copied());
+                            l
+                        })
                 }
                 Node::Continue(label) => {
-                    live = ctx.target(label).map_or_else(Live::new, |t| t.1.clone())
+                    live = ctx
+                        .target(label)
+                        .map_or_else(Live::new, |(_, cont, depth)| {
+                            let mut l = cont.clone();
+                            l.extend(ctx.defers[depth..].iter().flatten().copied());
+                            l
+                        })
                 }
                 Node::Return => live = ctx.defers.iter().flatten().copied().collect(),
             }
@@ -1686,7 +2146,12 @@ impl<'p, 'a> Analysis<'p, 'a> {
     ) -> Live {
         let mut head = Live::new();
         let mut scratch = Vec::new();
-        for _ in 0..50 {
+        // What is live only grows, so this ends; the bound is a guard.
+        for round in 0.. {
+            if round == LIMIT {
+                self.too_complex(f.file, f.span);
+                break;
+            }
             let start = self.loop_pass(f, rs, statics, l, after, &head, ctx, false, &mut scratch);
             if start == head {
                 break;
@@ -1718,8 +2183,12 @@ impl<'p, 'a> Analysis<'p, 'a> {
             head.clone()
         };
         let post_start = self.live(f, rs, statics, &l.post, &post_after, ctx, report, errs);
-        ctx.loops
-            .push((l.label.clone(), after.clone(), post_start.clone()));
+        ctx.loops.push((
+            l.label.clone(),
+            after.clone(),
+            post_start.clone(),
+            ctx.defers.len(),
+        ));
         if let Some((h, s)) = &l.holder {
             ctx.holders.push((self.eval(rs, h), *s));
         }
@@ -1887,8 +2356,9 @@ type Live = BTreeSet<Var>;
 
 #[derive(Default)]
 struct LiveCtx {
-    /// Enclosing loops: label, live at their exit, live where `continue` goes.
-    loops: Vec<(Option<String>, Live, Live)>,
+    /// Enclosing loops: label, live at their exit, live where `continue` goes, and how
+    /// many blocks with deferred statements enclosed the loop.
+    loops: Vec<(Option<String>, Live, Live, usize)>,
     /// Live at the end of each enclosing block, where its defers run.
     defers: Vec<Live>,
     /// Enclosing for-each loops: what they loop over.
@@ -1896,12 +2366,12 @@ struct LiveCtx {
 }
 
 impl LiveCtx {
-    fn target(&self, label: &Option<String>) -> Option<(&Live, &Live)> {
+    fn target(&self, label: &Option<String>) -> Option<(&Live, &Live, usize)> {
         let l = match label {
             None => self.loops.last(),
             Some(n) => self.loops.iter().rev().find(|l| l.0.as_deref() == Some(n)),
         }?;
-        Some((&l.1, &l.2))
+        Some((&l.1, &l.2, l.3))
     }
 }
 
@@ -1988,6 +2458,49 @@ fn static_named(
     }
 }
 
+/// The iterator expression of every for-each in `s`, including those in lambdas.
+fn foreach_iters(s: &Stmt, out: &mut HashSet<(u32, u32)>) {
+    if let S::ForEach { iter, .. } = &s.kind {
+        out.insert(key(iter.span));
+    }
+    let (ss, es) = crate::check::stmt_children(s);
+    for st in ss {
+        foreach_iters(st, out);
+    }
+    for e in es {
+        visit_expr(e, &mut |x| {
+            if let E::Lambda { body, .. } = &x.kind
+                && let LambdaBody::Block(b) = body.as_ref()
+            {
+                for st in &b.stmts {
+                    foreach_iters(st, out);
+                }
+            }
+        });
+    }
+}
+
+/// What a for-each over a value of class `c` calls: its `next()`, or its `iterator()`
+/// and that result's `next()`.
+fn iter_methods(prog: &Program, c: ClassId, out: &mut Vec<(ClassId, bool, usize)>) {
+    let find = |c: ClassId, name: &str| {
+        prog.classes[c]
+            .methods
+            .iter()
+            .position(|m| m.name == name && m.params.is_empty() && !m.is_static)
+    };
+    if let Some(i) = find(c, "next") {
+        callees(prog, c, i, out);
+    } else if let Some(i) = find(c, "iterator") {
+        callees(prog, c, i, out);
+        if let Ty::Class(ic, _) = prog.classes[c].methods[i].ret.unref()
+            && let Some(j) = find(*ic, "next")
+        {
+            callees(prog, *ic, j, out);
+        }
+    }
+}
+
 /// What a call of method `i` of class `c` may run: the method, or for an interface's,
 /// each implementation of it.
 fn callees(prog: &Program, c: ClassId, i: usize, out: &mut Vec<(ClassId, bool, usize)>) {
@@ -1996,18 +2509,9 @@ fn callees(prog: &Program, c: ClassId, i: usize, out: &mut Vec<(ClassId, bool, u
         out.push((c, false, i));
         return;
     }
-    let name = &ci.methods[i].name;
-    for (k, kc) in prog.classes.iter().enumerate() {
-        if kc
-            .implements
-            .iter()
-            .any(|t| matches!(t, Ty::Class(x, _) if *x == c))
-        {
-            for (j, m) in kc.methods.iter().enumerate() {
-                if &m.name == name {
-                    out.push((k, false, j));
-                }
-            }
+    for k in 0..prog.classes.len() {
+        if let Some(j) = prog.implementation(k, c, i) {
+            out.push((k, false, j));
         }
     }
 }
@@ -2116,14 +2620,24 @@ struct Builder<'x, 'p, 'a> {
     collect: Vec<Vec<Var>>,
     /// The function's declared result type.
     ret: Ty,
-    /// Collecting the values of `yield`s.
+    /// Collecting the values of `yield`s, and the type each switch gives.
     yields: Vec<Vec<R>>,
+    yield_tys: Vec<Ty>,
     lambda_depth: usize,
     /// Rearrangements from converting a ring or gap buffer to a slice, which `convert`
     /// finds; emitted before the next event.
     pending: std::cell::RefCell<Vec<(R, Span)>>,
     /// The array a `new` about to be evaluated is built in place in (CallR::into).
     new_into: Option<R>,
+    /// Where each parameter is declared, for its type.
+    param_spans: Vec<Span>,
+    /// For a constructor: its class, whose field initializers run first.
+    inits: Option<ClassId>,
+    /// The function being built.
+    fn_id: FnId,
+    /// For a lambda about to be walked that is passed straight to a built-in: the
+    /// elements it is given, the built-in's name, and its other arguments.
+    lambda_elems: Option<(R, String, R)>,
     /// For each lambda being walked, its result type and what its `return`s give.
     lambda_rets: Vec<(Ty, R)>,
     /// What each lambda returns, by span, for the built-ins whose result it is.
@@ -2149,9 +2663,14 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             collect: Vec::new(),
             ret: Ty::Void,
             yields: Vec::new(),
+            yield_tys: Vec::new(),
             lambda_depth: 0,
             pending: Default::default(),
             new_into: None,
+            param_spans: Vec::new(),
+            inits: None,
+            fn_id: 0,
+            lambda_elems: None,
             lambda_rets: Vec::new(),
             lambda_res: HashMap::new(),
             lambda_to_builtin: false,
@@ -2162,9 +2681,55 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
         for (i, p) in params.iter().enumerate() {
             if let Name::Ident(id) = &p.name {
                 self.var_of.insert(key(id.span), Var::Param(i as u32));
+                self.param_spans.push(id.span);
+            } else {
+                self.param_spans.push(p.span);
+            }
+        }
+        // A constructor's field initializers run before its body, into `this`.
+        if let Some(c) = self.inits {
+            let prog = self.an.prog;
+            for (i, fd) in prog.classes[c].fields.iter().enumerate() {
+                let Some(init) = fd.init.filter(|_| !fd.is_static) else {
+                    continue;
+                };
+                let v = self.expr(init);
+                let from = self.ty(init);
+                let src = self.convert(&v, &from, &fd.ty, init.span);
+                let dst = self.field_cell(R::root(Var::This), c, i);
+                self.ev(Ev::Store {
+                    dst,
+                    src,
+                    cell: false,
+                    span: init.span,
+                });
             }
         }
         self.block(body);
+        let nodes = self.out.pop().unwrap_or_default();
+        (self.locals, nodes)
+    }
+
+    /// The static initializers of class `c`, each a store into its static.
+    fn statics(mut self, c: ClassId) -> (Vec<LocalVar>, Vec<Node>) {
+        let prog = self.an.prog;
+        for (i, fd) in prog.classes[c].fields.iter().enumerate() {
+            let Some(init) = fd.init.filter(|_| fd.is_static) else {
+                continue;
+            };
+            let Some(id) = self.an.static_of.get(&(c, i)).copied() else {
+                continue;
+            };
+            let v = self.expr(init);
+            let from = self.ty(init);
+            let src = self.convert(&v, &from, &fd.ty, init.span);
+            self.ev(Ev::Store {
+                dst: R::root(Var::Static(id)),
+                src,
+                cell: false,
+                span: init.span,
+            });
+        }
         let nodes = self.out.pop().unwrap_or_default();
         (self.locals, nodes)
     }
@@ -2307,6 +2872,140 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
         } else {
             base
         }
+    }
+
+    /// Replacing the value at `cell`, of type `t`, removes what its own storage held: an
+    /// array's, map's or set's elements, a variable-size value's parts, or the elements of
+    /// a class value's fields that are storage of their own (REFERENCES §5.2, §6).
+    fn replaces(&mut self, cell: R, t: &Ty, span: Span, what: String) {
+        let t = t.unref();
+        if matches!(t, Ty::Array(..) | Ty::Map(..) | Ty::Set(..)) || self.an.prog.variable_size(t) {
+            self.ev(Ev::Remove {
+                target: cell,
+                span,
+                what,
+            });
+            return;
+        }
+        let parts = self.an.parts_of(t);
+        if parts.is_empty() {
+            return;
+        }
+        let target = parts.into_iter().fold(R::Empty, |r, p| {
+            R::union(r, R::Part(Box::new(cell.clone()), p))
+        });
+        self.ev(Ev::Remove { target, span, what });
+    }
+
+    /// A value of this type built by `new` into an array is built in its slot: one with
+    /// self-relative links (REFERENCES §7.4), or a variable-size record (§6, V4).
+    fn in_place_ty(&self, el: &Ty) -> bool {
+        self.an.prog.link_bearing(el) || self.an.prog.variable_size(el)
+    }
+
+    /// A variable the code doesn't name, in the current scope.
+    fn hidden(&mut self, name: &str, ty: Ty, span: Span) -> Var {
+        let i = self.locals.len() as u32;
+        self.locals.push(LocalVar {
+            name: name.to_string(),
+            ty,
+            span,
+            scope: self.scopes.clone(),
+            order: self.order,
+        });
+        self.order += 1;
+        if let Some(s) = self.scope_locals.last_mut() {
+            s.push(i);
+        }
+        Var::Local(i)
+    }
+
+    /// The method `name` with no parameters of class `c`, or of an interface's
+    /// implementations.
+    fn method_callees(&self, c: ClassId, name: &str) -> Vec<FnId> {
+        let prog = self.an.prog;
+        let Some(i) = prog.classes[c]
+            .methods
+            .iter()
+            .position(|m| m.name == name && m.params.is_empty() && !m.is_static)
+        else {
+            return Vec::new();
+        };
+        if prog.classes[c].kind == ClassKind::Interface {
+            (0..prog.classes.len())
+                .filter_map(|k| {
+                    prog.implementation(k, c, i)
+                        .and_then(|j| self.an.fn_of.get(&(k, false, j)))
+                })
+                .copied()
+                .collect()
+        } else {
+            self.an
+                .fn_of
+                .get(&(c, false, i))
+                .copied()
+                .into_iter()
+                .collect()
+        }
+    }
+
+    /// A call of method `name`, with no arguments, on the value `recv` names.
+    fn method_call(&mut self, c: ClassId, name: &str, recv: R, span: Span) -> Option<Rc<CallR>> {
+        let callees = self.method_callees(c, name);
+        if callees.is_empty() {
+            return None;
+        }
+        let call = Rc::new(CallR {
+            callees,
+            recv: Some(recv),
+            recv_held: None,
+            args: Vec::new(),
+            into: None,
+            value: None,
+        });
+        let in_scope = self.resizable_in_scope();
+        self.ev(Ev::Call(CallEv {
+            call: call.clone(),
+            span,
+            name: name.into(),
+            uses: Vec::new(),
+            in_scope,
+            by_value: Vec::new(),
+            is_new: false,
+        }));
+        Some(call)
+    }
+
+    /// For a for-each over a value of class `c`: the class whose `next()` each pass calls,
+    /// and the variable that holds the iterator, which is set here.
+    fn iterator_of(&mut self, c: ClassId, it: &Ty, iv: &Val, span: Span) -> Option<(ClassId, Var)> {
+        let prog = self.an.prog;
+        let find = |c: ClassId, name: &str| {
+            prog.classes[c]
+                .methods
+                .iter()
+                .find(|m| m.name == name && m.params.is_empty() && !m.is_static)
+        };
+        let (cls, src) = if find(c, "next").is_some() {
+            (c, iv.refs.clone())
+        } else {
+            let m = find(c, "iterator")?;
+            let Ty::Class(ic, _) = m.ret.unref().clone() else {
+                return None;
+            };
+            let recv = self.storage(it, iv, span);
+            let call = self.method_call(c, "iterator", recv, span)?;
+            (ic, R::Call(call, 0))
+        };
+        let var = self.hidden("the for-each's iterator", Ty::Class(cls, Vec::new()), span);
+        self.ev(Ev::Store {
+            dst: R::root(var),
+            src,
+            cell: true,
+            span,
+        });
+        self.ev(Ev::Def(var));
+        Some((cls, var))
     }
 
     fn resizable_in_scope(&self) -> Vec<u32> {
@@ -2482,13 +3181,26 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                         (st.clone(), st)
                     }
                 };
+                // Over an iterator, or a class with `iterator()`: the loop keeps the
+                // iterator in a variable of its own, just outside it, and each pass calls
+                // its `next()`, whose result the loop variable is (DESIGN §9.4).
+                let next_of = match it.unref() {
+                    Ty::Class(c, _) => self.iterator_of(*c, &it, &iv, iter.span),
+                    _ => None,
+                };
                 self.push_scope();
                 let by_ref = matches!(ty, LocalType::VarRef)
                     || matches!(ty, LocalType::Type(t) if matches!(t.kind, ast::TypeKind::Ref { .. }));
                 let pre = self.sub(|me| {
+                    let next = next_of.map(|(cls, at)| {
+                        me.ev(Ev::Use(at));
+                        me.method_call(cls, "next", R::root(at), iter.span)
+                    });
                     if let Name::Ident(n) = name {
                         let var = me.declare(n);
-                        let elem = if by_ref || matches!(it.unref(), Ty::Class(..) | Ty::Unknown) {
+                        let elem = if let Some(Some(c)) = &next {
+                            R::Call(c.clone(), 0)
+                        } else if by_ref || matches!(it.unref(), Ty::Class(..) | Ty::Unknown) {
                             held.clone()
                         } else {
                             R::stored(held.clone())
@@ -2586,7 +3298,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 })));
             }
             S::Switch(sw) => {
-                self.switch(sw, false);
+                self.switch(sw, None);
             }
             S::Break(l) => self.emit(Node::Break(l.as_ref().map(|i| i.name.clone()))),
             S::Continue(l) => self.emit(Node::Continue(l.as_ref().map(|i| i.name.clone()))),
@@ -2654,14 +3366,43 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                             self.ev(Ev::Def(var));
                         }
                         Target::Existing(Name::Ident(n)) => {
-                            if let Some(var) = self.name_var(n.span) {
-                                self.ev(Ev::Store {
-                                    dst: R::root(var),
-                                    src: r,
-                                    cell: true,
-                                    span: value.span,
-                                });
-                                self.ev(Ev::Def(var));
+                            match self.name_var(n.span) {
+                                // A reference variable is written through, as `=` does.
+                                Some(var)
+                                    if self.local_ty(var).is_some_and(|t| {
+                                        matches!(t, Ty::Ref(_))
+                                            || matches!(&t, Ty::Nullable(x) if matches!(**x, Ty::Ref(_)))
+                                    }) =>
+                                {
+                                    self.ev(Ev::Use(var));
+                                    self.ev(Ev::Store {
+                                        dst: R::stored(R::root(var)),
+                                        src: r,
+                                        cell: false,
+                                        span: value.span,
+                                    });
+                                }
+                                Some(var) => {
+                                    self.ev(Ev::Store {
+                                        dst: R::root(var),
+                                        src: r,
+                                        cell: true,
+                                        span: value.span,
+                                    });
+                                    self.ev(Ev::Def(var));
+                                }
+                                // A field or a static.
+                                None => {
+                                    let place = self.ident(&n.name, n.span, true);
+                                    if let Some(cell) = place.cell {
+                                        self.ev(Ev::Store {
+                                            dst: cell,
+                                            src: r,
+                                            cell: false,
+                                            span: value.span,
+                                        });
+                                    }
+                                }
                             }
                         }
                         _ => {}
@@ -2670,14 +3411,17 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             }
             S::Defer(inner) => {
                 let nodes = self.sub(|me| me.stmt(inner, None));
+                // Deferred statements run last first, so the newest goes first.
                 if let Some(d) = self.defers.last_mut() {
-                    d.extend(nodes);
+                    d.splice(0..0, nodes);
                 }
             }
             S::Yield(e) => {
                 let v = self.expr(e);
+                let want = self.yield_tys.last().cloned().unwrap_or(Ty::Unknown);
+                let c = self.convert(&v, &self.ty(e), &want, e.span);
                 if let Some(y) = self.yields.last_mut() {
-                    y.push(v.refs);
+                    y.push(R::union(v.refs, c));
                 }
             }
             S::Labeled { label, stmt } => self.stmt(stmt, Some(label.name.clone())),
@@ -2704,18 +3448,28 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
         }
     }
 
-    fn switch(&mut self, sw: &ast::Switch, is_expr: bool) -> R {
+    /// A switch statement, or with the type of its value a switch expression.
+    fn switch(&mut self, sw: &ast::Switch, ty: Option<Ty>) -> R {
         self.expr(&sw.scrutinee);
+        let is_expr = ty.is_some();
         let every = is_expr || sw.rules.iter().any(|r| r.labels.is_none());
         let mut arms = Vec::new();
         let mut result = R::Empty;
+        let want = ty.unwrap_or(Ty::Unknown);
         for rule in &sw.rules {
             let mut r = R::Empty;
             let nodes = self.sub(|me| match &rule.body {
-                SwitchBody::Expr(x) => r = me.expr(x).refs,
+                SwitchBody::Expr(x) => {
+                    let v = me.expr(x);
+                    // As the switch's type: an array arm of a `string` switch is a view.
+                    let c = me.convert(&v, &me.ty(x), &want, x.span);
+                    r = R::union(v.refs, c);
+                }
                 SwitchBody::Block(b) => {
                     me.yields.push(Vec::new());
+                    me.yield_tys.push(want.clone());
                     me.block(b);
+                    me.yield_tys.pop();
                     for y in me.yields.pop().unwrap_or_default() {
                         r = R::union(r.clone(), y);
                     }
@@ -2782,7 +3536,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 Val::refs(r)
             }
             E::Switch(sw) => {
-                let r = self.switch(sw, true);
+                let r = self.switch(sw, Some(self.ty(e)));
                 Val::refs(r)
             }
             E::Paren(x) => self.expr(x),
@@ -2799,6 +3553,11 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             }
             E::Lambda { params, body } => {
                 let to_builtin = std::mem::take(&mut self.lambda_to_builtin);
+                let elems = if to_builtin {
+                    self.lambda_elems.take()
+                } else {
+                    None
+                };
                 let ret = match self.ty(e) {
                     Ty::Func(_, r) => *r,
                     _ => Ty::Unknown,
@@ -2808,10 +3567,39 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 let scope = self.scopes.last().copied().unwrap_or(0);
                 self.lambda_rets.push((ret.clone(), R::Empty));
                 let mut res = R::Empty;
+                let mut param_locals = Vec::new();
+                let mut acc = None;
                 let nodes = self.sub(|me| {
-                    for p in params {
+                    for (pos, p) in params.iter().enumerate() {
                         if let Name::Ident(n) = &p.name {
                             let v = me.declare(n);
+                            let pt = me.var_ty(v);
+                            let Var::Local(l) = v else { continue };
+                            param_locals.push(l);
+                            // Passed straight to a built-in, a parameter is an element of
+                            // what it works on, or `fold`'s running result; otherwise what
+                            // the lambda's caller passed.
+                            let src = match &elems {
+                                Some((_, name, others)) if name == "fold" && pos == 0 => {
+                                    acc = Some(v);
+                                    others.clone()
+                                }
+                                Some((el, ..)) if matches!(pt, Ty::Ref(_)) => el.clone(),
+                                Some((el, ..)) if me.an.holds_refs(&pt) => R::stored(el.clone()),
+                                Some(_) => R::Empty,
+                                None if me.an.holds_refs(&pt) => R::Root(Root {
+                                    var: Var::Arg(l),
+                                    part: None,
+                                    whole: Analysis::whole_ref(&pt),
+                                }),
+                                None => R::Empty,
+                            };
+                            me.ev(Ev::Store {
+                                dst: R::root(v),
+                                src,
+                                cell: true,
+                                span: n.span,
+                            });
                             me.ev(Ev::Def(v));
                         }
                     }
@@ -2825,6 +3613,13 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                     }
                     let returned = me.lambda_rets.pop().map_or(R::Empty, |(_, r)| r);
                     res = R::union(std::mem::replace(&mut res, R::Empty), returned);
+                    // `fold` passes what one call returns to the next.
+                    if let Some(a) = acc {
+                        me.ev(Ev::Carry {
+                            dst: R::root(a),
+                            src: res.clone(),
+                        });
+                    }
                     // Only a built-in uses what the lambda returns before the end of the
                     // statement, so anywhere else it can't be a temporary (DESIGN §9.3).
                     if !to_builtin && !matches!(res, R::Empty) {
@@ -2838,10 +3633,30 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 self.lambda_res.insert(key(e.span), res);
                 self.pop_scope();
                 self.lambda_depth -= 1;
-                self.emit(Node::Block {
-                    body: nodes,
-                    defers: Vec::new(),
-                });
+                match elems {
+                    // A built-in calls it once for each element, or not at all, while it
+                    // works through them, as a for-each does.
+                    Some((el, ..)) => self.emit(Node::Loop(Box::new(Loop {
+                        label: None,
+                        pre: Vec::new(),
+                        body: nodes,
+                        post: Vec::new(),
+                        exit: Exit::Pre,
+                        holder: Some((el, e.span)),
+                    }))),
+                    None => {
+                        if !to_builtin {
+                            self.an
+                                .lambdas
+                                .borrow_mut()
+                                .push((self.fn_id, param_locals));
+                        }
+                        self.emit(Node::Block {
+                            body: nodes,
+                            defers: Vec::new(),
+                        })
+                    }
+                }
                 if self.an.facts.capturing.contains(&key(e.span)) {
                     Val::refs(R::temp(TempKind::Lambda, e.span))
                 } else {
@@ -2866,9 +3681,14 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                     (Some(x), Some(y)) => Some(R::union(x, y)),
                     _ => None,
                 };
+                // Each arm as the whole expression's type: an array arm of a `string`
+                // `?:` is a view of that array.
+                let ct = self.ty(e);
+                let ra = self.convert(&a, &self.ty(then), &ct, then.span);
+                let rb = self.convert(&b, &self.ty(els), &ct, els.span);
                 Val {
                     cell,
-                    refs: R::union(a.refs, b.refs),
+                    refs: R::union(R::union(a.refs, b.refs), R::union(ra, rb)),
                     elems: None,
                 }
             }
@@ -2877,11 +3697,14 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                     let lv = self.expr(lhs);
                     let lt = self.ty(lhs);
                     let dst = self.storage(&lt, &lv, lhs.span);
-                    if lt.elem().is_some_and(|el| self.an.prog.link_bearing(el)) && is_new(rhs) {
+                    if lt.elem().is_some_and(|el| self.in_place_ty(el)) && is_new(rhs) {
                         self.new_into = Some(R::Elems(Box::new(dst.clone())));
                     }
                     let rv = self.expr(rhs);
                     self.new_into = None;
+                    self.ev(Ev::Grow {
+                        target: R::Elems(Box::new(dst.clone())),
+                    });
                     let rt = self.ty(rhs);
                     if moves(&lt) {
                         let sym = match op {
@@ -3104,9 +3927,15 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 || matches!(&declared, Ty::Nullable(x) if matches!(**x, Ty::Ref(_)));
             let binds = self.an.facts.binds.contains(&key(span));
             if op == ast::AssignOp::Assign && is_ref && !binds {
-                // `=` writes through a reference.
+                // `=` writes through a reference, replacing what it refers to.
                 self.ev(Ev::Use(var));
                 let deref = declared.unref().clone();
+                self.replaces(
+                    R::stored(R::root(var)),
+                    &deref,
+                    span,
+                    format!("assigning through `{}`", self.var_name(var)),
+                );
                 let src = self.convert(&vv, &vt, &deref, value.span);
                 self.ev(Ev::Store {
                     dst: R::stored(R::root(var)),
@@ -3116,16 +3945,11 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 });
                 return Val::none();
             }
-            // V2: assigning a variable-size value rebuilds it (REFERENCES §6).
-            if op == ast::AssignOp::Assign
-                && (matches!(declared, Ty::Array(..) | Ty::Map(..) | Ty::Set(..))
-                    || self.an.prog.variable_size(&declared))
-            {
-                self.ev(Ev::Remove {
-                    target: R::root(var),
-                    span,
-                    what: format!("assigning `{}`", self.var_name(var)),
-                });
+            // V2: assigning a variable-size value rebuilds it (REFERENCES §6), and any
+            // whole value replaces what its parts held.
+            if op == ast::AssignOp::Assign {
+                let what = format!("assigning `{}`", self.var_name(var));
+                self.replaces(R::root(var), &declared, span, what);
             }
             let src = self.convert(&vv, &vt, &declared, value.span);
             self.ev(Ev::Store {
@@ -3143,17 +3967,19 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             return Val::none();
         }
         if let Some(cell) = tv.cell.clone() {
-            if op == ast::AssignOp::Assign
-                && matches!(tt.unref(), Ty::Array(..) | Ty::Map(..) | Ty::Set(..))
-            {
-                self.ev(Ev::Remove {
-                    target: cell.clone(),
-                    span,
-                    what: "this assignment".into(),
-                });
-            }
             let is_ref = matches!(tt, Ty::Ref(_))
                 || matches!(&tt, Ty::Nullable(x) if matches!(**x, Ty::Ref(_)));
+            if op == ast::AssignOp::Assign {
+                // A reference field written through replaces what it refers to.
+                let replaced = if is_ref && !self.an.facts.binds.contains(&key(span)) {
+                    R::stored(cell.clone())
+                } else {
+                    cell.clone()
+                };
+                if !is_ref || !self.an.facts.binds.contains(&key(span)) {
+                    self.replaces(replaced, &tt, span, "this assignment".into());
+                }
+            }
             // `=` on a reference field writes through it, unless it binds it in a constructor.
             let through =
                 op == ast::AssignOp::Assign && is_ref && !self.an.facts.binds.contains(&key(span));
@@ -3292,6 +4118,11 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
     fn local_ty(&self, v: Var) -> Option<Ty> {
         match v {
             Var::Local(i) => Some(self.locals[i as usize].ty.clone()),
+            Var::Param(i) => self
+                .param_spans
+                .get(i as usize)
+                .and_then(|s| self.an.facts.locals.get(&key(*s)))
+                .cloned(),
             _ => None,
         }
     }
@@ -3362,14 +4193,53 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 }
                 Val::none()
             }
+            // It may run any lambda with as many parameters: their summaries decide what
+            // it does to the arguments, and its result is rooted at them (REFERENCES §4.3).
             Origin::Value => {
-                let mut r = R::Empty;
-                for a in args {
-                    r = R::union(r, self.expr(&a.expr).refs);
+                self.collect.push(Vec::new());
+                let mut arg_rs = Vec::new();
+                for (k, a) in args.iter().enumerate() {
+                    let v = self.expr(&a.expr);
+                    let at = self.ty(&a.expr);
+                    let p = fact.params.get(k).cloned().unwrap_or(Ty::Unknown);
+                    arg_rs.push(self.convert(&v, &at, &p, a.expr.span));
                 }
-                Val::refs(r)
+                let uses = self.collect.pop().unwrap_or_default();
+                let call = Rc::new(CallR {
+                    callees: Vec::new(),
+                    recv: None,
+                    recv_held: None,
+                    args: arg_rs,
+                    into: None,
+                    value: Some(args.len()),
+                });
+                let in_scope = self.resizable_in_scope();
+                self.ev(Ev::Call(CallEv {
+                    call: call.clone(),
+                    span: e.span,
+                    name: fact.name.clone(),
+                    uses,
+                    in_scope,
+                    by_value: Vec::new(),
+                    is_new: false,
+                }));
+                Val::refs(R::Call(call, 0))
             }
             Origin::Method(..) | Origin::Ctor(..) => {
+                // `g.split(...)`: a free function given the receiver as a slice, which
+                // makes a ring or gap buffer one block.
+                if fact.recv_arg
+                    && moves(&recv_ty)
+                    && matches!(fact.params.first(), Some(Ty::Slice(_) | Ty::View(_)))
+                    && let Some(r) = &recv
+                {
+                    self.ev(Ev::Change {
+                        target: R::Elems(Box::new(r.clone())),
+                        span: e.span,
+                        what: format!("`{}`", fact.name),
+                        kind: Change::Rearrange,
+                    });
+                }
                 let ret = self.ty(e);
                 match self.user_call_with(e.span, recv, recv_held, args, fact, false, None) {
                     Some(c) => match &ret {
@@ -3434,17 +4304,9 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 let ci = &prog.classes[*c];
                 if ci.kind == ClassKind::Interface {
                     // Every class that implements it (REFERENCES §4.3).
-                    let m = &ci.methods[*i];
                     let mut v = Vec::new();
-                    for (k, kc) in prog.classes.iter().enumerate() {
-                        if kc
-                            .implements
-                            .iter()
-                            .any(|t| matches!(t, Ty::Class(x, _) if x == c))
-                            && let Some(j) = kc
-                                .methods
-                                .iter()
-                                .position(|x| x.name == m.name && x.params.len() == m.params.len())
+                    for k in 0..prog.classes.len() {
+                        if let Some(j) = prog.implementation(k, *c, *i)
                             && let Some(f) = self.an.fn_of.get(&(k, false, j))
                         {
                             v.push(*f);
@@ -3490,6 +4352,20 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             let v = self.expr(&a.expr);
             let at = self.ty(&a.expr);
             let p = fact.params.get(k + shift).cloned().unwrap_or(Ty::Unknown);
+            // The function is compiled again for this layout (DESIGN §4.3), but checked
+            // for its own, whose elements stay where they are.
+            if moves(&at) && matches!(p.unref(), Ty::Array(..)) && !moves(&p) {
+                let prog = self.an.prog;
+                self.ev(Ev::Refuse {
+                    span: a.expr.span,
+                    msg: {
+                        let shown = prog.show(at.unref());
+                        let want = prog.show(&p);
+                        format!("{} `{}` can't be passed to `{}`, which takes {} `{}`: an insert, a sort or a slice can move this one's elements, and the function is checked for an array whose elements stay where they are", crate::check::article(&shown), shown, fact.name, crate::check::article(&want), want)
+                    },
+                    help: "pass a slice of it, or give the parameter the buffer's own type (DESIGN §4.3, REFERENCES §5.4)".into(),
+                });
+            }
             if self.an.resizable_ty(&p) {
                 by_value.push(a.expr.span);
             }
@@ -3502,6 +4378,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             recv_held,
             args: arg_rs,
             into,
+            value: None,
         });
         let in_scope = self.resizable_in_scope();
         self.ev(Ev::Call(CallEv {
@@ -3550,13 +4427,23 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             && recv_ty
                 .unref()
                 .elem()
-                .is_some_and(|el| self.an.prog.link_bearing(el));
+                .is_some_and(|el| self.in_place_ty(el));
+        let mut others = R::Empty;
         for a in args {
             if in_place && is_new(&a.expr) {
                 self.new_into = recv.clone().map(|r| R::Elems(Box::new(r)));
             }
             self.lambda_to_builtin = lambda_of(&a.expr).is_some();
+            if self.lambda_to_builtin {
+                self.lambda_elems = Some((
+                    R::Elems(Box::new(recv.clone().unwrap_or(R::Empty))),
+                    name.to_string(),
+                    others.clone(),
+                ));
+            }
             let v = self.expr(&a.expr);
+            self.lambda_elems = None;
+            others = R::union(others, v.refs.clone());
             self.lambda_to_builtin = false;
             self.new_into = None;
             vals.push((v, self.ty(&a.expr), a.expr.span));
@@ -3573,6 +4460,11 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 None => R::Empty,
             }
         };
+        // Converting an argument to a slice can make a ring or gap buffer one block, so
+        // every argument is converted, whether its roots are used or not.
+        for k in 0..vals.len() {
+            arg(k, self);
+        }
         let all_args = |me: &Self| (0..vals.len()).fold(R::Empty, |r, k| R::union(r, arg(k, me)));
         // What the built-in gives back from its arguments: a lambda's result rather than
         // the lambda, which a built-in only calls.
@@ -3595,6 +4487,27 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
         };
         let span = e.span;
         let recv = R::Elems(Box::new(recv));
+        let grows = match recv_ty.unref() {
+            Ty::Array(..) => matches!(
+                name,
+                "push"
+                    | "pushFront"
+                    | "insert"
+                    | "insertAt"
+                    | "pushAll"
+                    | "append"
+                    | "appendUtf8"
+                    | "heapPush"
+            ),
+            Ty::Map(..) => matches!(name, "put" | "getOrAdd"),
+            Ty::Set(_) | Ty::Pool(_) => name == "add",
+            _ => false,
+        };
+        if grows {
+            self.ev(Ev::Grow {
+                target: recv.clone(),
+            });
+        }
         let store = |me: &mut Self, src: R| {
             me.ev(Ev::Store {
                 dst: recv.clone(),
@@ -3612,14 +4525,22 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
         };
         let rt = recv_ty.unref();
         if moves(rt) {
+            // Inserts can move the elements of a ring or gap buffer; anything that works on
+            // it as one slice, a sort or a text method, makes it one block first. Only
+            // what goes element by element leaves it as it is.
             let first_string = params.first().is_some_and(|p| p.is_string());
             let kind = match name {
-                "push" | "pushFront" | "insert" | "insertAt" | "pushAll" => Some(Change::Move),
-                "sort" | "stableSort" | "sortDescending" | "sortBy" | "stableSortBy" => {
-                    Some(Change::Rearrange)
-                }
+                "push" | "pushFront" | "insert" | "insertAt" | "pushAll" | "heapPush"
+                | "append" | "appendUtf8" => Some(Change::Move),
+                // A text method takes its receiver as one string.
                 _ if crate::builtins::slice_receiver(name, first_string) => Some(Change::Rearrange),
-                _ => None,
+                "pop" | "popFront" | "removeBefore" | "removeAfter" | "removeAt" | "clear"
+                | "truncate" | "dedup" | "retain" | "seek" | "seekStart" | "seekFromEnd"
+                | "move" | "get" | "getOr" | "fill" | "swap" | "reverse" | "shuffle"
+                | "contains" | "indexOf" | "sum" | "min" | "max" | "isSorted" | "isSortedBy"
+                | "count" | "all" | "any" | "findIndex" | "findAny" | "filter" | "map" | "fold"
+                | "sortedIndexes" | "sortedIndexesBy" => None,
+                _ => Some(Change::Rearrange),
             };
             if let Some(kind) = kind {
                 self.ev(Ev::Change {
@@ -3629,6 +4550,35 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                     kind,
                 });
             }
+        }
+        // Moving whole values between slots replaces each one: references into their
+        // own storage end, as an assignment ends them.
+        if let Some(el) = rt.elem()
+            && matches!(
+                name,
+                "swap"
+                    | "sort"
+                    | "stableSort"
+                    | "sortDescending"
+                    | "sortBy"
+                    | "stableSortBy"
+                    | "sortByDescending"
+                    | "radixSort"
+                    | "radixSortBy"
+                    | "partialSort"
+                    | "partialSortBy"
+                    | "selectNth"
+                    | "selectNthBy"
+                    | "reverse"
+                    | "shuffle"
+                    | "fill"
+                    | "heapify"
+                    | "heapPush"
+                    | "heapPop"
+            )
+        {
+            let el = el.clone();
+            self.replaces(recv.clone(), &el, span, format!("`{}`", name));
         }
         match rt {
             Ty::Array(..) | Ty::Slice(_) | Ty::View(_) => match name {
@@ -3738,5 +4688,30 @@ fn lambda_of(e: &Expr) -> Option<&Expr> {
         E::Lambda { .. } => Some(e),
         E::Paren(x) => lambda_of(x),
         _ => None,
+    }
+}
+
+/// Each class type a value of `t` holds by value: itself, or in its elements, keys,
+/// values or tuple parts. Behind a reference or a view a value holds references anyway.
+fn classes_in(t: &Ty, f: &mut impl FnMut(ClassId, &[Ty])) {
+    match t {
+        Ty::Class(c, a) => f(*c, a),
+        Ty::Array(e, _) | Ty::Set(e) | Ty::Pool(e) => classes_in(e, f),
+        Ty::Map(k, v) => {
+            classes_in(k, f);
+            classes_in(v, f);
+        }
+        Ty::Tuple(ts) => ts.iter().for_each(|t| classes_in(t, f)),
+        _ => {}
+    }
+}
+
+/// A variable's name for a message: in backticks, unless it is a description of one the
+/// code doesn't name.
+fn quoted(name: &str) -> String {
+    if name.contains(' ') {
+        name.to_string()
+    } else {
+        format!("`{}`", name)
     }
 }

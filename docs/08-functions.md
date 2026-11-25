@@ -792,7 +792,9 @@ help: a captured variable never changes after it's initialized; copy it into a n
 A lambda passed to a built-in, such as `sort`, `filter`, `map`, `fold`, `count`, `any`,
 `all`, `findIndex` or `retain`, is compiled into that built-in's loop, its parameters
 pointing at the elements. It costs what a handwritten loop would, and it may capture
-anything in scope. [Arrays](04-arrays.md) lists the built-ins that take one.
+anything in scope. [Arrays](04-arrays.md) lists the built-ins that take one. It is checked
+as that loop: removing from the array the built-in works on, inside the lambda, is an
+error, as it is inside a for-each over it.
 
 What such a lambda returns is part of what the built-in gives, so it may return text built
 for the statement, which the statement then uses:
@@ -860,7 +862,15 @@ item 8
   reports it as not supported.
 - **Such a lambda can't return text built for the statement**, since the function it goes
   to may keep the result past it: `each(words, (string s) => "<${s}>")` with a
-  `func(string => string)` parameter is an error. Only a built-in can take one.
+  `func(string => string)` parameter is an error. Only a built-in can take one. Nor can it
+  return a view of a buffer it captures, for the same reason; a captured view of a string
+  literal is fine.
+- **Its parameters are what the function passes it**, which may last only for the call:
+  the lambda's own locals can keep them, and nothing outside it can.
+- **Calling a function value does what the lambdas it may be do**: a call `f(xs)` through a
+  `func(i64[..~]& => void)` counts as removing from `xs` when any lambda with one parameter
+  in the program removes from its parameter, so a reference into `xs` can't be used after
+  it.
 - **Not yet**: a lambda that captures, passed to a constructor or to a method called through
   an interface. The C backend says so; a lambda that captures nothing works there
   ([What isn't there yet](15-not-yet.md)).

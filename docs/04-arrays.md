@@ -1164,6 +1164,10 @@ void main() {
   double-ended array gets a copy of the function in which the parameter has its own type,
   as do the functions it passes the parameter on to. In a copy for a capped array, a push
   can fail with `FULL`, and stops the program unless something reads its status.
+- **Except a capped ring or gap buffer**, such as `i64[~8]` or `i64[~.~4]`, for a parameter
+  whose elements stay where they are, such as `i64[..>]&`: an insert, a sort or a slice
+  can move the buffer's elements, and the function is checked for its parameter's type.
+  Pass a slice, or give the parameter the buffer's type.
 - **Not yet** in such a copy: binding a reference to the parameter, assigning it, or
   capturing it in a lambda passed to a function of the program's (one passed to a built-in
   method, as `sort`'s comparator, is fine). Each is reported where it is written. A library

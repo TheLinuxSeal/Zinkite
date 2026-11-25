@@ -509,6 +509,11 @@ a,b,c
 
 ### Limits
 
+- **A capped ring or gap buffer passed to a parameter whose elements stay where they are**,
+  such as an `i64[~8]` given to an `i64[..>]&`, is refused: the function would be checked
+  for its parameter's type, and an insert or a sort can move the buffer's elements. Pass a
+  slice, or give the parameter the buffer's type
+  ([Arrays as parameters](04-arrays.md#arrays-as-parameters)).
 - **A for-each over a temporary array** is refused as a reference into a temporary, which is
   released at the end of its statement. Keep the array in a variable, or use the lazy form:
 

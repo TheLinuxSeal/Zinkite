@@ -796,15 +796,19 @@ example.zn:15:14: error: `->` removes from what `stack` refers to while `top` ma
   `retain` and `dedup`, and the operators `->`, `-<`, `-^` and `^-`;
 - assigning a whole array, and rebuilding a variable-size value
   ([rule V](#rule-v-variable-size-values));
+- replacing a value whose fields hold an array that can lose elements, such as a class
+  with an `i32[..~8]` field: assigning it, directly or through a reference, or moving such
+  values between slots with `swap`, a sort or `fill`;
 - `remove` and `clear` on a `hashmap`, whose entries never move on insert, so `put` and
   `getOrAdd` end nothing;
-- calling a function whose summary says it does any of these to an argument.
+- calling a function whose summary says it does any of these to an argument, or a
+  function value when any lambda with as many parameters does.
 
-A deferred statement runs at the end of its block, so a reference it uses is live until
-then.
+A deferred statement runs at the end of its block, the last one first, and also when a
+`break` or `continue` leaves the block, so a reference it uses is live until then.
 
-Writes, `sort`, `reverse`, `swap` and `fill` aren't removals: a reference keeps its slot,
-which may then hold another element's value of the same type.
+Otherwise writes, `sort`, `reverse`, `swap` and `fill` aren't removals: a reference keeps
+its slot, which may then hold another element's value of the same type.
 
 ```java
 class Item { i64 n; }
@@ -905,9 +909,13 @@ void main() {
 
 Two kinds do move elements: a **ring**, a capped array that changes at both ends
 (`T[~.~4]`), which wraps, and a **gap buffer**, a capped array with a cursor (`u8[~8]`),
-which moves elements on every edit. An insert into one counts as a removal, and so does a
-slice, sort or comparison of one, which may first make it one block. Slices taken since
-its last change agree with each other, since nothing moves until the next change.
+which moves elements on every edit. An insert into one counts as a removal, and so does
+anything that uses it as one slice, which may first make it one block: a slice, a sort, a
+comparison, a text method, or passing it where a slice or `string` goes. Going element by
+element, as indexing, `contains` or `${}` do, doesn't. Slices taken since its last change
+agree with each other, since nothing moves until the next change. A ring or gap buffer
+can't be passed to a parameter whose elements stay where they are, such as a
+`T[..>]&` ([Arrays as parameters](04-arrays.md#arrays-as-parameters)).
 
 ```java
 void main() {
@@ -1084,13 +1092,17 @@ A variable-size value, a `T[.]` or `T[.*]` array or a record with such a field, 
 out by its contents, so changing its size in place would overwrite what follows it.
 **Rule V** is that it is written once, when it is built:
 
-- **V1**: a variable-size field can't be assigned. Its fixed-size fields can.
+- **V1**: a variable-size field can't be assigned, and neither can a variable-size value
+  through a reference, as `for (Item& it : items) { it = ...; }` would. Its fixed-size
+  fields can.
 - **V2**: a variable holding a variable-size value can be assigned as a whole. That
   rebuilds the value on its data stack, and counts as a removal under rule R.
 - **V3**: an array of variable-size values is added to at its end, looped over by
   reference and cleared. It can't be indexed, sliced, popped, sorted or given a cursor.
 - **V4**: a record built in an array whose building can grow that array, as in
   `items.push(make(items))`, is built aside and moved to the array's end, so it compiles.
+  A constructor building a value in place, as `new` does there, can't grow, move or remove
+  from that array, nor can anything it calls.
 - **V5**: a constructor writes the record from its start, so it assigns each
   variable-size field at most once, in declaration order, by a statement of its own.
 
