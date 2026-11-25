@@ -2150,3 +2150,63 @@ fn simd_goes_on_functions() {
     rejects("simd void main() {}\n", "`simd` can't go on `main`");
     rejects("class C { i64 v; simd new(i64 v) { this.v = v; } }\nvoid main() {}\n", "not constructors");
 }
+
+// ---------------------------------------------------------------- threads (STDLIB §10.3)
+
+/// What a spawned lambda takes with it, and what a queue holds, is copied between threads,
+/// so it must be flat: no views, references, growable arrays, Files or `this`.
+#[test]
+fn workers_take_only_flat_values() {
+    let t = "import zink.thread.*;\nimport zink.io.*;\nclass Named { string name; i64 n; }\nclass Pair { i64 a; i64[..~4] b; }\n";
+    ok(&format!(
+        "{}void main() {{\n    Pair p = new Pair(1, [1, 2]);\n    queue<Pair> q = [];\n    for (i64 i = 0; i < 3; i++) {{\n        Worker w = thread.spawn(() => q.put(new Pair(i, p.b)));\n        w.join();\n    }}\n}}\n",
+        t
+    ));
+    rejects(
+        &format!(
+            "{}void main() {{\n    string s = \"x\";\n    Worker w = thread.spawn(() => println(s));\n}}\n",
+            t
+        ),
+        "a worker can't take `s` with it: `string` is a view into this thread's memory",
+    );
+    rejects(
+        &format!(
+            "{}void main() {{\n    u8[..>] b = [];\n    Worker w = thread.spawn(() => println(\"${{b.len}}\"));\n}}\n",
+            t
+        ),
+        "a worker can't take `b` with it: `u8[..>]` is on one of this thread's data stacks",
+    );
+    rejects(
+        &format!(
+            "{}void main() {{\n    File f = stdout;\n    Worker w = thread.spawn(() => f.println(\"x\"));\n}}\n",
+            t
+        ),
+        "a `File` belongs to the thread that opened it",
+    );
+    rejects(
+        &format!("{}void main() {{\n    queue<Named> q = [];\n}}\n", t),
+        "a queue's values must be flat, and `Named`'s field `name`: `string` is a view",
+    );
+    rejects(
+        &format!(
+            "{}class S {{\n    i64 port;\n    void start() {{\n        Worker w = thread.spawn(() => println(\"${{port}}\"));\n    }}\n}}\nvoid main() {{}}\n",
+            t
+        ),
+        "a worker can't take `this` with it",
+    );
+    rejects(
+        &format!(
+            "{}void main() {{\n    Worker w = thread.spawn(main);\n}}\n",
+            t
+        ),
+        "`thread.spawn` takes one lambda with no parameters",
+    );
+    rejects(
+        "void main() { queue<i64> q = []; }\n",
+        "`queue` is a type of `zink.thread`",
+    );
+    rejects(
+        "import zink.thread.*;\nclass queue { }\nvoid main() {}\n",
+        "`queue` is a built-in name",
+    );
+}

@@ -1,0 +1,14 @@
+package zink.thread;
+
+// Threads (STDLIB §10.3). A worker shares no memory with the thread that started it: it
+// has data stacks and statics of its own, and takes flat values with it and through
+// queues. `thread.spawn(() => ...)` is built into the compiler, which copies what the
+// lambda captures, and the program's statics, to the new thread.
+public class thread {
+    private static extern("zr_thread_cores") i64 cCores();
+
+    // How many processors the system has online, for sizing a pool of workers.
+    public static i64 cores() {
+        return cCores();
+    }
+}

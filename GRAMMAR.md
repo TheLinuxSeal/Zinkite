@@ -44,7 +44,7 @@ The unused keywords are reserved so the compiler can explain why they aren't ava
 
 `root` and `packed` are keywords only at the start of a type declaration (`root Parser { ... }`, DESIGN §6.6; `packed Node { ... }`, DESIGN §6.1), so variables and fields may still be named `root` or `packed`. `simd` is one only as a modifier (DESIGN §12.8): where a declaration's modifiers are read, followed by a keyword, `<`, `(`, or a type that isn't directly followed by `;`, `=`, `,` or `(`. So `simd i64 f()` and `simd Vec f()` mark a function, while `simd x;` declares a field of a class named `simd`, and `simd f()` a function returning one.
 
-`hashmap`, `hashset` and `pool` are built-in generic type names (DESIGN §4.14, `STDLIB.md` §7), and `sint`, `uint`, `int`, `float`, `number`, `ordered` and `hashable` are built-in generic bounds (DESIGN §10.1). They aren't keywords, but no declaration may reuse them. `int` and `float` used as a type are errors that suggest `i64` and `f64`.
+`hashmap`, `hashset` and `pool` are built-in generic type names (DESIGN §4.14, `STDLIB.md` §7), as is `queue` for a file that imports `zink.thread` (DESIGN §12.9), and `sint`, `uint`, `int`, `float`, `number`, `ordered` and `hashable` are built-in generic bounds (DESIGN §10.1). They aren't keywords, but no declaration may reuse them. `int` and `float` used as a type are errors that suggest `i64` and `f64`.
 
 ### 1.4 Literals
 ```

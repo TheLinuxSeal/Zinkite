@@ -28,6 +28,31 @@
 #define ZR_NORETURN __attribute__((noreturn))
 #define ZR_UNUSED __attribute__((unused))
 
+/* Threads (STDLIB §10.3). A program that imports zink.thread is compiled with ZR_THREADS:
+ * each thread then has data stacks, a scratch stack, a failure trail, `@@` records and
+ * open Files of its own, as if it were a program of its own, and output and the
+ * environment are locked. A program that doesn't is compiled as before. */
+/* ThreadSanitizer doesn't model flockfile, which guards stdout's buffer; built with it,
+ * output goes through fwrite, which it does model, so it reports no false races. */
+#if defined(__SANITIZE_THREAD__)
+#define ZR_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define ZR_TSAN 1
+#endif
+#endif
+
+#ifdef ZR_THREADS
+#include <pthread.h>
+#define ZR_TLS __thread
+#define ZR_OUT_LOCK() flockfile(stdout)
+#define ZR_OUT_UNLOCK() funlockfile(stdout)
+#else
+#define ZR_TLS
+#define ZR_OUT_LOCK() ((void)0)
+#define ZR_OUT_UNLOCK() ((void)0)
+#endif
+
 /* i128 and u128 (DESIGN §9.1): GCC's and Clang's 128-bit integers, on 64-bit targets.
  * C has no 128-bit literals, so the limits are built from shifts. */
 typedef __int128 zr_i128;
@@ -151,10 +176,10 @@ static const char *zr_status_name(uint8_t s);
 typedef struct { const zr_site *site; uint8_t code; uint8_t unread; } zr_trail_entry;
 #define ZR_TRAIL 32
 #define ZR_TRAIL_HEAD 24
-static zr_trail_entry zr_trail[ZR_TRAIL];
-static int64_t zr_trail_n;          /* entries added, counting those dropped */
-static uint64_t zr_trail_gen;       /* which trail it is */
-static int zr_trail_live;           /* the latest failure added to it, and nothing has read it */
+static ZR_TLS zr_trail_entry zr_trail[ZR_TRAIL];
+static ZR_TLS int64_t zr_trail_n;          /* entries added, counting those dropped */
+static ZR_TLS uint64_t zr_trail_gen;       /* which trail it is */
+static ZR_TLS int zr_trail_live;           /* the latest failure added to it, and nothing has read it */
 
 static void zr_trail_add(const zr_site *s, uint8_t code, int unread, int fresh) {
     if (fresh) {
@@ -239,8 +264,8 @@ static void zr_trail_print(int64_t upto, uint8_t st) {
  * defers of the functions it abandons. Each `@@`, and each defer while one is active, is a
  * record on this stack. */
 typedef struct zr_catch { struct zr_catch *prev; char *scratch; jmp_buf jb; uint8_t st; } zr_catch;
-static zr_catch *zr_catch_top;
-static char *zr_scratch_top;
+static ZR_TLS zr_catch *zr_catch_top;
+static ZR_TLS char *zr_scratch_top;
 
 static ZR_UNUSED void zr_catch_enter(zr_catch *k) {
     k->prev = zr_catch_top;
@@ -299,7 +324,7 @@ static ZR_NORETURN ZR_UNUSED void zr_fail_text(const char *file, int line, zr_sl
 /* Each stack is a reservation of address space; pages are committed as they are touched. */
 #define ZR_STACK_BYTES ((size_t)8 << 30)
 
-static void *zr_stacks[4096];
+static ZR_TLS void *zr_stacks[4096];
 
 static ZR_UNUSED void *zr_stack(int site) {
     if (zr_stacks[site]) return zr_stacks[site];
@@ -311,7 +336,7 @@ static ZR_UNUSED void *zr_stack(int site) {
 
 /* The scratch stack holds temporaries, such as interpolated text passed to a function,
  * which are released at the end of their statement (DESIGN §4.11). */
-static char *zr_scratch_base;
+static ZR_TLS char *zr_scratch_base;
 
 static ZR_UNUSED int64_t zr_sm(void) {
     if (!zr_scratch_base) zr_scratch_base = zr_scratch_top = (char *)zr_stack(0);
@@ -708,7 +733,7 @@ static ZR_UNUSED char *zr_ring_span(char *e, size_t sz, int64_t k, int64_t *h, i
  * C, and stdout is flushed before anything goes to stderr, so the two interleave in order. */
 static int zr_out_failed;
 
-#if defined(__GLIBC__)
+#if defined(__GLIBC__) && !defined(ZR_THREADS)
 #define zr_fwrite fwrite_unlocked /* a program is one thread */
 #else
 #define zr_fwrite fwrite
@@ -745,15 +770,20 @@ static void zr_out_slow(int fd, const void *p, size_t n) {
 static FILE *zr_stdout;
 
 static inline void zr_out(int fd, const void *p, size_t n) {
-#if defined(__GLIBC__)
+#if defined(__GLIBC__) && !defined(ZR_TSAN)
     /* Straight into stdio's buffer while it has room, as glibc's own putc_unlocked does
      * through the same fields. Only when fully buffered: a terminal's line buffering
      * needs stdio to see each newline. */
     FILE *f = zr_stdout;
-    if (fd == 1 && f && (size_t)(f->_IO_write_end - f->_IO_write_ptr) >= n) {
-        memcpy(f->_IO_write_ptr, p, n);
-        f->_IO_write_ptr += n;
-        return;
+    if (fd == 1 && f) {
+        ZR_OUT_LOCK();
+        if ((size_t)(f->_IO_write_end - f->_IO_write_ptr) >= n) {
+            memcpy(f->_IO_write_ptr, p, n);
+            f->_IO_write_ptr += n;
+            ZR_OUT_UNLOCK();
+            return;
+        }
+        ZR_OUT_UNLOCK();
     }
 #endif
     zr_out_slow(fd, p, n);
@@ -1264,11 +1294,22 @@ static ZR_UNUSED int64_t zr_num_prefix(zr_slice s, int32_t is_float) {
 extern char **environ;
 static uint8_t zr_errno(void);
 
+#ifdef ZR_THREADS
+static pthread_mutex_t zr_env_mu = PTHREAD_MUTEX_INITIALIZER;
+#define ZR_ENV_LOCK() pthread_mutex_lock(&zr_env_mu)
+#define ZR_ENV_UNLOCK() pthread_mutex_unlock(&zr_env_mu)
+#else
+#define ZR_ENV_LOCK() ((void)0)
+#define ZR_ENV_UNLOCK() ((void)0)
+#endif
+
 /* A view of the variable's value, which the runtime never frees, even after env.set
  * replaces it; p is NULL when it isn't set. */
 static ZR_UNUSED zr_slice zr_env_get(zr_slice name) {
     int64_t m = zr_sm();
+    ZR_ENV_LOCK();
     const char *v = getenv(zr_cstr(name));
+    ZR_ENV_UNLOCK();
     zr_sr(m);
     zr_slice s = {(void *)v, v ? (int64_t)strlen(v) : 0};
     return s;
@@ -1279,7 +1320,10 @@ static ZR_UNUSED uint8_t zr_env_set(zr_slice name, zr_slice value, int32_t unset
     if (name.n == 0 || memchr(name.p, '=', (size_t)name.n)) return 22;
     int64_t m = zr_sm();
     const char *n = zr_cstr(name);
-    int r = unset ? unsetenv(n) : setenv(n, zr_cstr(value), 1);
+    const char *v = unset ? NULL : zr_cstr(value);
+    ZR_ENV_LOCK();
+    int r = unset ? unsetenv(n) : setenv(n, v, 1);
+    ZR_ENV_UNLOCK();
     uint8_t s = r < 0 ? zr_errno() : 0;
     zr_sr(m);
     return s;
@@ -1287,9 +1331,12 @@ static ZR_UNUSED uint8_t zr_env_set(zr_slice name, zr_slice value, int32_t unset
 
 /* The i-th "name=value" of the environment, or an empty view past the end. */
 static ZR_UNUSED zr_slice zr_env_entry(int64_t i) {
-    for (int64_t k = 0; k < i; k++)
-        if (!environ[k]) { zr_slice none = {NULL, 0}; return none; }
-    const char *e = environ[i];
+    ZR_ENV_LOCK();
+    const char *e = NULL;
+    int64_t k = 0;
+    while (k < i && environ[k]) k++;
+    if (k == i) e = environ[i];
+    ZR_ENV_UNLOCK();
     zr_slice s = {(void *)e, e ? (int64_t)strlen(e) : 0};
     return s;
 }
@@ -1938,8 +1985,8 @@ static uint8_t zr_errno(void) { return (uint8_t)(errno > 0 && errno < 192 ? errn
  * and for a File or a Dir, a generation that each close bumps, so a copy of a closed one
  * can't reach whatever reuses its descriptor (DESIGN §6.4). A Dir keeps its DIR here. */
 typedef struct { uint8_t *b; size_t pos, len; uint32_t gen; uint8_t open; DIR *dir; uint8_t *wb; size_t wn; } zr_inbuf;
-static zr_inbuf *zr_ins;
-static int zr_nins;
+static ZR_TLS zr_inbuf *zr_ins;
+static ZR_TLS int zr_nins;
 
 static zr_inbuf *zr_in_entry(int fd) {
     if (fd >= zr_nins) {
@@ -2136,8 +2183,10 @@ static ZR_UNUSED uint8_t zr_io_write_line(int64_t h, zr_slice s) {
     int fd = zr_io_fd(h);
     if (fd < 0) return 9;
     if (fd == 1 || fd == 2) {
+        ZR_OUT_LOCK();
         zr_out(fd, s.p, (size_t)s.n);
         zr_end_line(fd);
+        ZR_OUT_UNLOCK();
         return 0;
     }
     uint8_t e = zr_wput(fd, s.p, (size_t)s.n);
@@ -2383,7 +2432,7 @@ static ZR_UNUSED uint8_t zr_fs_copy(zr_slice from, zr_slice to) {
                 continue;
             }
         } else {
-            static char buf[1 << 16];
+            static ZR_TLS char buf[1 << 16];
             r = read(in, buf, sizeof buf);
             if (r > 0) {
                 zr_slice piece = {buf, r};
@@ -2900,6 +2949,220 @@ static ZR_UNUSED void zr_map_clear(zr_map *m) {
     if (m->cap) memset(m->ix, 0, (size_t)(m->mask + 1) * (size_t)m->w);
 }
 
+#ifdef ZR_THREADS
+/* ------------------------------------------------------------ threads (STDLIB §10.3) */
+
+/* Workers by id, from 1: whether each has ended, and the status its function returned.
+ * A record is kept for the whole run, 2 bytes, so a Worker can be joined any number of
+ * times, from any thread. */
+typedef struct { uint8_t done, status; } zr_wrec;
+static pthread_mutex_t zr_wk_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t zr_wk_cv = PTHREAD_COND_INITIALIZER;
+static zr_wrec *zr_wk;
+static int64_t zr_wk_n, zr_wk_cap;
+
+typedef struct { uint8_t (*run)(void *); void *packet; int64_t id; } zr_wstart;
+
+/* What a thread leaves when it ends: the Files it opened are written out and closed, since
+ * no other thread can reach them, and its data stacks go back to the system. */
+static void zr_thread_release(void) {
+    for (int fd = 3; fd < zr_nins; fd++)
+        if (zr_ins[fd].open) zr_io_close(((int64_t)zr_ins[fd].gen << 32) | (int64_t)fd);
+    for (int fd = 0; fd < zr_nins; fd++) { free(zr_ins[fd].b); free(zr_ins[fd].wb); }
+    free(zr_ins);
+    zr_ins = NULL;
+    zr_nins = 0;
+    for (int i = 0; i < 4096; i++)
+        if (zr_stacks[i]) { munmap(zr_stacks[i], ZR_STACK_BYTES); zr_stacks[i] = NULL; }
+}
+
+static void *zr_thread_main(void *arg) {
+    zr_wstart w = *(zr_wstart *)arg;
+    free(arg);
+    /* stdin, stdout and stderr are Files in every thread (STDLIB §2.1). */
+    for (int fd = 0; fd < 3; fd++) zr_in_entry(fd)->open = 1;
+    uint8_t st = w.run(w.packet);
+    free(w.packet);
+    zr_thread_release();
+    pthread_mutex_lock(&zr_wk_mu);
+    zr_wk[w.id - 1].done = 1;
+    zr_wk[w.id - 1].status = st;
+    pthread_cond_broadcast(&zr_wk_cv);
+    pthread_mutex_unlock(&zr_wk_mu);
+    return NULL;
+}
+
+/* Starts `run` on a thread of its own with `packet`, which it frees: the worker's id, or
+ * 0 with errno set when the system can't start one. */
+static ZR_UNUSED int64_t zr_thread_spawn(uint8_t (*run)(void *), void *packet) {
+    pthread_mutex_lock(&zr_wk_mu);
+    if (zr_wk_n == zr_wk_cap) {
+        int64_t cap = zr_wk_cap ? zr_wk_cap * 2 : 64;
+        zr_wrec *t = (zr_wrec *)realloc(zr_wk, (size_t)cap * sizeof *t);
+        if (!t) zr_fail("zink runtime", 0, "out of memory for a worker");
+        zr_wk = t;
+        zr_wk_cap = cap;
+    }
+    int64_t id = ++zr_wk_n;
+    zr_wk[id - 1].done = 0;
+    zr_wk[id - 1].status = 0;
+    pthread_mutex_unlock(&zr_wk_mu);
+    zr_wstart *w = (zr_wstart *)malloc(sizeof *w);
+    if (!w) zr_fail("zink runtime", 0, "out of memory for a worker");
+    w->run = run;
+    w->packet = packet;
+    w->id = id;
+    pthread_attr_t a;
+    pthread_attr_init(&a);
+    pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+    pthread_t t;
+    int e = pthread_create(&t, &a, zr_thread_main, w);
+    pthread_attr_destroy(&a);
+    if (e) {
+        free(w);
+        free(packet);
+        pthread_mutex_lock(&zr_wk_mu);
+        zr_wk[id - 1].done = 1;
+        zr_wk[id - 1].status = (uint8_t)e;
+        pthread_mutex_unlock(&zr_wk_mu);
+        errno = e;
+        return 0;
+    }
+    return id;
+}
+
+/* Waits for a worker to end: the status its function returned, or INVALID for a Worker
+ * spawn never gave (a failed spawn's zero value). */
+static ZR_UNUSED uint8_t zr_thread_join(int64_t id) {
+    pthread_mutex_lock(&zr_wk_mu);
+    if (id <= 0 || id > zr_wk_n) {
+        pthread_mutex_unlock(&zr_wk_mu);
+        return 22;
+    }
+    while (!zr_wk[id - 1].done) pthread_cond_wait(&zr_wk_cv, &zr_wk_mu);
+    uint8_t st = zr_wk[id - 1].status;
+    pthread_mutex_unlock(&zr_wk_mu);
+    return st;
+}
+
+static ZR_UNUSED int64_t zr_thread_cores(void) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int64_t)n : 1;
+}
+
+/* ---- queues: values copied in by put and out by get, a node each, under a mutex, with a
+ * condition variable for the threads waiting to get. A queue lasts for the whole run. A
+ * queue that is a zero value, NULL, fails each call with INVALID. */
+typedef struct zr_qnode { struct zr_qnode *next; max_align_t data[]; } zr_qnode;
+typedef struct zr_queue {
+    pthread_mutex_t m;
+    pthread_cond_t c;
+    zr_qnode *head, *tail;
+    int64_t n, limit, size;
+    int closed;
+} zr_queue;
+
+static ZR_UNUSED zr_queue *zr_q_new(int64_t size) {
+    zr_queue *q = (zr_queue *)calloc(1, sizeof *q);
+    if (!q) zr_fail("zink runtime", 0, "out of memory for a queue");
+    pthread_mutex_init(&q->m, NULL);
+    pthread_condattr_t ca;
+    pthread_condattr_init(&ca);
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    pthread_cond_init(&q->c, &ca);
+    pthread_condattr_destroy(&ca);
+    q->size = size;
+    return q;
+}
+
+/* FULL at the queue's limit, END once it's closed; nothing is queued then. */
+static ZR_UNUSED uint8_t zr_q_put(zr_queue *q, const void *v) {
+    if (!q) return 22;
+    zr_qnode *n = (zr_qnode *)malloc(sizeof *n + (size_t)q->size);
+    if (!n) zr_fail("zink runtime", 0, "out of memory for a queued value");
+    memcpy(n->data, v, (size_t)q->size);
+    n->next = NULL;
+    pthread_mutex_lock(&q->m);
+    uint8_t st = q->closed ? 194 : q->limit > 0 && q->n >= q->limit ? 193 : 0;
+    if (st == 0) {
+        if (q->tail) q->tail->next = n; else q->head = n;
+        q->tail = n;
+        q->n++;
+        pthread_cond_signal(&q->c);
+    }
+    pthread_mutex_unlock(&q->m);
+    if (st) free(n);
+    return st;
+}
+
+/* Takes the oldest value into `out`, waiting up to `ms` milliseconds for one (forever
+ * when negative). EMPTY when there was none to take without waiting, TIMEOUT when the
+ * wait ran out, END once the queue is closed and empty; `out` is zeroed then. */
+static ZR_UNUSED uint8_t zr_q_get(zr_queue *q, void *out, int64_t ms) {
+    if (!q) return 22;
+    struct timespec until;
+    if (ms > 0) {
+        clock_gettime(CLOCK_MONOTONIC, &until);
+        until.tv_sec += ms / 1000;
+        until.tv_nsec += (ms % 1000) * 1000000;
+        if (until.tv_nsec >= 1000000000) { until.tv_sec++; until.tv_nsec -= 1000000000; }
+    }
+    uint8_t st = 0;
+    pthread_mutex_lock(&q->m);
+    while (!q->head) {
+        if (q->closed) { st = 194; break; }
+        if (ms == 0) { st = 192; break; }
+        if (ms < 0) {
+            pthread_cond_wait(&q->c, &q->m);
+        } else if (pthread_cond_timedwait(&q->c, &q->m, &until) == ETIMEDOUT && !q->head) {
+            st = q->closed ? 194 : 110;
+            break;
+        }
+    }
+    zr_qnode *n = NULL;
+    if (!st) {
+        n = q->head;
+        q->head = n->next;
+        if (!q->head) q->tail = NULL;
+        q->n--;
+    }
+    pthread_mutex_unlock(&q->m);
+    if (n) {
+        memcpy(out, n->data, (size_t)q->size);
+        free(n);
+    } else {
+        memset(out, 0, (size_t)q->size);
+    }
+    return st;
+}
+
+/* No more puts: they fail with END, and gets do once what's queued has been taken. */
+static ZR_UNUSED void zr_q_close(zr_queue *q) {
+    if (!q) return;
+    pthread_mutex_lock(&q->m);
+    q->closed = 1;
+    pthread_cond_broadcast(&q->c);
+    pthread_mutex_unlock(&q->m);
+}
+
+/* At most n values queued, or no limit for 0; INVALID for a negative n. */
+static ZR_UNUSED uint8_t zr_q_limit(zr_queue *q, int64_t n) {
+    if (!q || n < 0) return 22;
+    pthread_mutex_lock(&q->m);
+    q->limit = n;
+    pthread_mutex_unlock(&q->m);
+    return 0;
+}
+
+static ZR_UNUSED int64_t zr_q_len(zr_queue *q) {
+    if (!q) return 0;
+    pthread_mutex_lock(&q->m);
+    int64_t n = q->n;
+    pthread_mutex_unlock(&q->m);
+    return n;
+}
+#endif
+
 static ZR_UNUSED void zr_start(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
     /* glibc ignores the size unless it's given the buffer too. */
@@ -2936,7 +3199,7 @@ static const char *zr_status_names[256];
 
 /* The names of DESIGN §7.7 and STDLIB §1.4; codegen::STATUS_NAMES is the same list. */
 static const char *zr_status_name(uint8_t s) {
-    static char buf[8];
+    static ZR_TLS char buf[8];
     switch (s) {
         case 0: return "OK";
         case 1: return "FAILED";
@@ -2977,7 +3240,7 @@ static const char *zr_status_name(uint8_t s) {
 }
 
 static ZR_UNUSED zr_slice zr_status_message(uint8_t s) {
-    static char buf[32];
+    static ZR_TLS char buf[32];
     const char *m = NULL;
     switch (s) {
         case 0: m = "OK"; break;

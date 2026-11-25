@@ -25,7 +25,7 @@ Five rules cover the rest:
 | **L, links** | A link always lands inside the array it belongs to | 7 |
 | **G, growth** | Each growable value is alone on top of its data stack, so growing never runs into another value | 8 |
 
-There are **no aliasing or exclusivity rules**: two references to the same element can both read and write it. Without shared-memory threads, aliasing alone can't break type safety (Goose §9.1). Programs are single-threaded (threads are Open, §12).
+There are **no aliasing or exclusivity rules**: two references to the same element can both read and write it. Without shared-memory threads, aliasing alone can't break type safety (Goose §9.1). Threads share no memory (DESIGN §12.9): a worker gets copies of flat values and of the program's statics, so no reference crosses a thread, and every rule here holds per thread.
 
 ---
 
@@ -454,4 +454,4 @@ Goose marks the entry to a recursive cycle with `recursive fn`. Zinkite finds cy
 - **Links between two parameters' arrays**: L1 rejects them whenever the compiler can't tell the arrays apart.
 - **Saving and loading** values with links as bytes, with a check that rejects malformed links (Goose's `from_bytes`).
 - **The host API**: references an embedding host holds into a script's data, and how long they stay valid.
-- **Threads**: Goose gives each worker its own memory and passes flat values between them through queues, so no reference crosses a thread.
+- **Threads that share memory**: workers that read the parent's arrays in place while it waits, as Goose's research note on child threads proposes. Today's workers share nothing (DESIGN §12.9).

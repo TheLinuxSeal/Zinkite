@@ -9,7 +9,8 @@
 > There is no compiler yet, so they are checked by hand against the grammar and the rules, not compiled.
 >
 > Section 5 covers a second batch of four, written on 2026-11-19. Sections 6 and 7 cover
-> two larger programs, written and run on 2026-11-24 with the compiler.
+> two larger programs, written and run on 2026-11-24 with the compiler, and section 8 the
+> first program with threads.
 
 ---
 
@@ -251,3 +252,35 @@ Also clarified: generic code may cast a `T` to any number type (DESIGN §10.1), 
   and dispatch is a switch on the name.
 - **A test that edits each line of each example** grows with the square of an
   example's length, so for a long one it now edits about 200 lines spread through it.
+
+---
+
+## 8. hashtree: threads
+
+> `hashtree.zn`, about 150 lines: the SHA-256 of every file under a directory, by a pool of
+> workers (DESIGN §12.9), written the day threads were. It matches `sha256sum` on the
+> 12,103 files of `/usr/include`, in 0.69 s with one worker and 0.10 s with 18, and
+> ThreadSanitizer finds nothing in it.
+
+### 8.1 What worked
+- **Workers as lambdas.** `thread.spawn(() => work(jobs, results))` takes the two queues
+  along; nothing else had to be declared to be shared.
+- **Closing a queue ends the workers.** `while (Job j : jobs.get())` stops at `END` once
+  the queue is closed and empty, so no quit message is needed.
+- **A limit keeps the walk from running ahead.** `jobs.limit(4 * workers)`, and while a
+  `put` fails with `FULL` the main thread collects results, so it never waits on a full
+  queue while the workers wait on it.
+- **Each worker opens its own Files**, and the incremental `Sha2_256` hashes a file 64 KB
+  at a time, with one buffer per worker.
+
+### 8.2 Fixed in the compiler while writing it
+- **`append` on a capped array** wasn't generated. It now builds the text at the top of the
+  scratch stack and copies it in whole, or fails with `FULL` and appends nothing, which is
+  how a path goes into a message: `j.path.append(e.path)`.
+
+### 8.3 What it ran into
+- **Text isn't flat.** A path is a view into the walker's buffer, so it travels in a
+  `u8[..~4096]`, 4 KB per message whatever its length. Variable-size records through
+  queues would carry just the bytes (DESIGN §17).
+- **A sort key that is a writable view isn't `ordered`.** `rows.sortBy` needed a helper,
+  `nameOf`, taking the names as a `string`, so the key is a read-only view.

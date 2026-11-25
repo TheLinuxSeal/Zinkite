@@ -57,6 +57,8 @@ lib! {
     "zink.os", "zink/os/Child.zn";
     "zink.os", "zink/os/Command.zn";
     "zink.os", "zink/os/term.zn";
+    "zink.thread", "zink/thread/thread.zn";
+    "zink.thread", "zink/thread/Worker.zn";
     "zink.random", "zink/random/Rng.zn";
     "zink.random", "zink/random/random.zn";
     "zink.hash", "zink/hash/hash.zn";

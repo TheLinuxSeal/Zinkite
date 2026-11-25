@@ -57,6 +57,7 @@ Left out to stay light: inheritance, exceptions, destructors, reflection, dynami
 | Literals | An integer literal is an `i64` and a float literal an `f64` unless where it is used says otherwise; Rust-style suffixes (`255u8`, `1.5f32`) | Decided | 9.1 |
 | Casts | `(u8) n` stops when the value doesn't fit; `(u8%) n` wraps and `(u8\|) n` saturates; `u8.from(n)` fails with `RANGE` instead | Decided | 9.1 |
 | `simd` functions | Compiled also for AVX2 and AVX-512, with the widest the CPU has chosen at run time; same results, since floats aren't contracted | Decided (2026-11-23) | 12.8 |
+| Threads | Workers share no memory, as in Goose: `thread.spawn(() => ...)` copies what the lambda captures, which must be flat, and the program's statics; `queue<T>` values carry flat values between threads | Decided (2026-11-24) | 12.9 |
 | Integer overflow | `+`, `-` and `*` wrap, in every build; `+#`, `-#` and `*#` fail with `RANGE`; division by zero fails with `DOMAIN` | Decided (2026-11-22) | 9.2 |
 | Mixed integer types | Allowed when one type holds every value of the other, and the result has that type; otherwise a cast; comparisons between any two integer types are exact | Decided | 9.2 |
 | Generic bounds | Built in: `sint`, `uint`, `int`, `float`, `number`, `ordered`, `hashable`, combined with `&`; a class is `ordered` by declaring `compareTo` | Decided | 10.1 |
@@ -1547,6 +1548,31 @@ writeBytes(1, msg, (u64) msg.len);
 - **`simd` is a keyword only as a modifier**, before a method's return type or type parameters, so it can still name a variable or a class, as `root` can (GRAMMAR §1.3). It goes on functions and methods with a body: not on fields, constructors, `extern` functions, or `main`.
 - **Why**: matmul ran 1.1 times as long as Goose's, which marks its kernel `simd fn` and so runs it with AVX-512 here; with `simd`, Zinkite's does too, and is within 4% (`bench/compare`).
 
+### 12.9 Threads (Decided 2026-11-24)
+Goose's model: a worker shares no memory with the thread that started it, so no reference ever crosses a thread, and the reference rules need nothing new. The library is `zink.thread` (`STDLIB.md` §10.3).
+
+```
+import zink.thread.*;
+
+queue<Job> jobs = [];
+queue<Row> rows = [];
+Worker[..>] pool = [];
+for (i64 i = 0; i < thread.cores(); i++) {
+    pool +> thread.spawn(() => {
+        while (Job j : jobs.get()) { rows.put(render(j)); }   // END once jobs is closed and empty
+    });
+}
+```
+
+- **`thread.spawn` takes a lambda with no parameters** and runs it on a thread of its own. What the lambda uses from outside is copied into the new thread when it starts: a loop's counter gives each worker the value it had then, and may change afterwards, unlike what other lambdas capture (§9.3). Method references being undecided, a lambda is the only way to name the work.
+- **What crosses must be flat**: numbers, `bool`, enums, queues, capped arrays, and classes made only of those. A view, a reference, an array on a data stack, a map, a pool, `this` and a `File` can't, each a compile error that names what refers into the thread's memory. A `File` belongs to the thread that opened it, which writes it out and closes it when it ends.
+- **Statics are copied too.** A new thread gets a copy of each static whose type allows it: flat values, views of string literals, and arrays on data stacks of those, elements included, which go on data stacks of the new thread's own. What it changes stays its own. A worker that reaches any other static, a map or a view into an array, directly or through anything it calls, is a compile error; such a static would start empty there.
+- **`queue<T>`** is a built-in type, made with `[]`, of a flat `T`. It is a handle: copies share the queue, so a worker takes one along like any flat value. `put` copies a value in, failing with `FULL` at a limit `limit(n)` sets and with `END` once the queue is closed; `get` waits for the oldest value, and fails with `END` once the queue is closed and empty, which ends a repeat loop; `get(timeout)` fails with `TIMEOUT` and `poll` with `EMPTY`. A queue lasts for the whole run.
+- **Failures follow §7.6 per thread.** A failure nothing reads in a worker stops the program, as in `main`; a worker that should survive its own failures puts `@@` around its work. `w.join()` waits and fails with the status the lambda ended with.
+- **Output stays whole**: one thread's `println` is written as one line, never mixed with another's.
+- **Implementation**: a program that imports `zink.thread` is compiled with `ZR_THREADS`, which makes the runtime's per-thread state, the data stacks, the scratch stack, the failure trail, `@@` records and open Files, and the program's statics, thread-local (`__thread`), and locks output and the environment. Each spawned lambda becomes a C function that unpacks its captures and the statics from a packet the spawning thread filled, then runs the body. A program that doesn't import it compiles to the same C as before.
+- **Why share nothing**: the language then needs no locks, no atomics and no rules about data races, and every reference rule holds unchanged per thread. Goose found the cost on kernels that split one large array, where copying it into messages and back was slower than one core (its `docs/design/child_threads.md`); its answer, workers that read the parent's arrays in place while the parent waits, is a research note there, and Open here (§17).
+
 ---
 
 ## 13. Embedding in other programs (Open)
@@ -1755,7 +1781,8 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 - **Reference rules**: the open questions in `REFERENCES.md` §12, such as following roots per program point and choosing data stacks at run time.
 - **Removing elements inside a for-each by value** over the same array (§9.4).
 - **Enforcing `#max_memory_mb`** when growth never checks a capacity (§3.1, §8.2): commit memory in chunks from the page-fault handler and stop at the ceiling, which costs nothing on the fast path, or size each stack's reservation.
-- **Threads**: Goose compiles each worker as a separate program with its own memory and typed queues between them.
+- **Threads that read the parent's arrays in place**: Goose's research note on fork-join child threads and `par for` (its `docs/design/child_threads.md`), for kernels that split one large array, where copying through queues costs more than it gains (§12.9).
+- **Variable-size values through queues**, such as a record with a `u8[.]` field, which is one run of bytes and so could be copied whole.
 
 **Arrays**
 - **Hash map literals** with entries (`["a": 1]`), and `m[key]` indexing (`GRAMMAR.md` §8).
@@ -1986,6 +2013,9 @@ Measured on 2026-11-17 with hand-written C models of both designs (`bench/record
 **Speed without changing results** (§12.8, §14.2)
 137. A counted loop whose indexes are in range runs without their checks, and one whose indexes go out of range stops at the same iteration, after the same output, as without the test; a loop whose bound a reference could change, or whose array a removal or a call could shrink, keeps its checks.
 138. A `simd` function gives the same results as without `simd`, `0.1 * 10.0 - 1.0` being 0 in every version; `simd` on a field, a constructor or `main` is a compile error, and `simd` still names a variable or a class.
+139. Four workers taking jobs from a queue until it's closed give the same sums as one thread; a worker's change to a static isn't seen by `main`, and `main`'s change after the spawn isn't seen by the worker.
+140. A spawned lambda that uses a `string`, an array on a data stack, a `File` or `this` from outside it, a `queue` of a class with a `string` field, and a worker that reaches a static `hashmap` through a method it calls are compile errors; a loop's counter captured by a spawned lambda isn't.
+141. Eight workers printing lines at once never mix two lines; a failure nothing reads in a worker stops the program with exit status 1.
 
 ---
 
@@ -2062,4 +2092,3 @@ Most common types are spelled the same either way (`T[..>]`, `T[..~]`, `T[.~.]`,
 
 ### A.14 A one-bit status
 The pasted notes gave every call a one-bit side output, 0 or 1, read as a `bool`. Replaced on 2026-11-18 by a `u8` status (§7), so a failed call can also say why: "no such file" or "permission denied", which CLI tools need for their messages. The value `u8 main` returns becomes the exit status. To keep `if (failed)` working, unsigned integers became usable as conditions (§9.4). A separate `status` type with that one property was considered and found unnecessary.
-

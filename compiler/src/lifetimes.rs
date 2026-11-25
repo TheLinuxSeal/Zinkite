@@ -357,6 +357,7 @@ pub fn check(prog: &Program, facts: &Facts, sources: &[SourceFile]) -> Vec<(usiz
     an.build();
     an.solve();
     an.report();
+    an.worker_statics();
     an.diags
 }
 
@@ -1122,6 +1123,124 @@ impl<'p, 'a> Analysis<'p, 'a> {
         }
     }
 
+    /// Threads (STDLIB §10.3): a new thread has statics of its own, copies of those the
+    /// code generator can copy (`Program::thread_copyable`); the others start empty. So
+    /// a spawned lambda, and everything it may call, may reach only the copied ones, and of
+    /// those that hold views only ones pointing at string literals, which every thread
+    /// shares. A view into a static array would point into the spawning thread's copy.
+    /// A call through a function value may reach any lambda.
+    fn worker_statics(&mut self) {
+        let prog = self.prog;
+        let facts = self.facts;
+        let mut spawns: Vec<(usize, &Expr)> = Vec::new();
+        let mut lambdas: Vec<(usize, &Expr)> = Vec::new();
+        for c in &prog.classes {
+            for m in &c.methods {
+                if let Some(b) = &m.decl.body {
+                    for s in &b.stmts {
+                        visit_stmt(s, &mut |e| {
+                            find_spawns(facts, prog, c.file, e, &mut spawns, &mut lambdas)
+                        });
+                    }
+                }
+            }
+            for k in &c.ctors {
+                if let Some(d) = k.decl {
+                    for s in &d.body.stmts {
+                        visit_stmt(s, &mut |e| {
+                            find_spawns(facts, prog, c.file, e, &mut spawns, &mut lambdas)
+                        });
+                    }
+                }
+            }
+        }
+        for (file, lam) in spawns {
+            let mut seen: HashSet<(ClassId, bool, usize)> = HashSet::new();
+            let mut work: Vec<(usize, &Expr)> = vec![(file, lam)];
+            let mut stmts: Vec<(usize, &Stmt)> = Vec::new();
+            let mut reached: Vec<(u32, usize, Span)> = Vec::new();
+            let mut all_lambdas = false;
+            loop {
+                let mut calls: Vec<(ClassId, bool, usize)> = Vec::new();
+                let mut value_call = false;
+                let mut note = |file: usize, e: &Expr, reached: &mut Vec<(u32, usize, Span)>| {
+                    if let Some(id) = static_named(facts, prog, &self.static_of, e)
+                        && !reached.iter().any(|r| r.0 == id)
+                    {
+                        reached.push((id, file, e.span));
+                    }
+                    if let E::Call { .. } | E::New { .. } = &e.kind
+                        && let Some(f) = facts.calls.get(&key(e.span))
+                    {
+                        match f.origin {
+                            Origin::Method(c, i) => callees(prog, c, i, &mut calls),
+                            Origin::Ctor(c, i) => calls.push((c, true, i)),
+                            Origin::Value => value_call = true,
+                            _ => {}
+                        }
+                    }
+                };
+                if let Some((f, e)) = work.pop() {
+                    visit_expr(e, &mut |x| note(f, x, &mut reached));
+                } else if let Some((f, s)) = stmts.pop() {
+                    visit_stmt(s, &mut |x| note(f, x, &mut reached));
+                } else {
+                    break;
+                }
+                if value_call && !all_lambdas {
+                    all_lambdas = true;
+                    work.extend(lambdas.iter().copied());
+                }
+                for (c, ctor, i) in calls {
+                    if !seen.insert((c, ctor, i)) {
+                        continue;
+                    }
+                    let ci = &prog.classes[c];
+                    if ctor {
+                        if let Some(d) = ci.ctors.get(i).and_then(|k| k.decl) {
+                            stmts.extend(d.body.stmts.iter().map(|s| (ci.file, s)));
+                        }
+                        // A new object's fields are initialized as it's built.
+                        for f in ci.fields.iter().filter(|f| !f.is_static) {
+                            if let Some(init) = f.init {
+                                work.push((ci.file, init));
+                            }
+                        }
+                    } else if let Some(b) = ci.methods.get(i).and_then(|m| m.decl.body.as_ref()) {
+                        stmts.extend(b.stmts.iter().map(|s| (ci.file, s)));
+                    }
+                }
+            }
+            let at = self.line(file, lam.span);
+            for (id, file, span) in reached {
+                let (c, i) = self.statics[id as usize];
+                let f = &prog.classes[c].fields[i];
+                let name = &f.name;
+                let shown = prog.show(&f.ty);
+                if !prog.thread_copyable(&f.ty) {
+                    self.error(
+                        file,
+                        span,
+                        format!("the worker spawned on line {} can't use the static `{}`: a new thread doesn't get a copy of a `{}`, so it would start empty there", at, name, shown),
+                        "pass the worker what it needs when it's spawned or through a queue, or keep it in a static of numbers, classes of them, or an array of those (STDLIB §10.3)".into(),
+                    );
+                } else if self.holds_refs(&f.ty)
+                    && self
+                        .static_rs
+                        .get(&id)
+                        .is_some_and(|rs| rs.iter().any(|r| r.var != Var::Literal))
+                {
+                    self.error(
+                        file,
+                        span,
+                        format!("the worker spawned on line {} can't use the static `{}`: it holds views that may point into the spawning thread's memory", at, name),
+                        "only views of string literals are shared between threads; copy the text into a capped array (STDLIB §10.3)".into(),
+                    );
+                }
+            }
+        }
+    }
+
     fn report(&mut self) {
         let sccs = self.cycles();
         let mut statics = self.static_rs.clone();
@@ -1787,6 +1906,112 @@ impl LiveCtx {
 }
 
 /// Whether `e` is `new C(...)`, through any parentheses.
+/// Each expression in `e`, `e` first, including those in lambdas' and switch arms' blocks.
+fn visit_expr<'e>(e: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
+    f(e);
+    match &e.kind {
+        E::Lambda { body, .. } => {
+            if let LambdaBody::Block(b) = body.as_ref() {
+                b.stmts.iter().for_each(|s| visit_stmt(s, f));
+            }
+        }
+        E::Switch(sw) => {
+            for r in &sw.rules {
+                if let SwitchBody::Block(b) = &r.body {
+                    b.stmts.iter().for_each(|s| visit_stmt(s, f));
+                }
+            }
+        }
+        _ => {}
+    }
+    for x in crate::check::expr_children(e) {
+        visit_expr(x, f);
+    }
+}
+
+fn visit_stmt<'e>(s: &'e Stmt, f: &mut impl FnMut(&'e Expr)) {
+    let (ss, es) = crate::check::stmt_children(s);
+    es.into_iter().for_each(|e| visit_expr(e, f));
+    ss.into_iter().for_each(|s| visit_stmt(s, f));
+}
+
+/// `thread.spawn(lambda)` calls, by their lambda, and every lambda, for the calls through
+/// function values a worker may make.
+fn find_spawns<'e>(
+    facts: &Facts,
+    prog: &Program,
+    file: usize,
+    e: &'e Expr,
+    spawns: &mut Vec<(usize, &'e Expr)>,
+    lambdas: &mut Vec<(usize, &'e Expr)>,
+) {
+    if let E::Lambda { .. } = &e.kind {
+        lambdas.push((file, e));
+    }
+    if let E::Call { callee, args } = &e.kind
+        && let E::Member { expr, name } = &callee.kind
+        && name.name == "spawn"
+        && args.len() == 1
+        && let Some(Ty::TypeName(t)) = facts.types.get(&key(expr.span))
+        && let Ty::Class(c, _) = &**t
+        && prog.classes[*c].name == "thread"
+        && prog.classes[*c].package == "zink.thread"
+    {
+        spawns.push((file, &args[0].expr));
+    }
+}
+
+/// The static an expression names: a bare name, or `Class.name`.
+fn static_named(
+    facts: &Facts,
+    prog: &Program,
+    static_of: &HashMap<(ClassId, usize), u32>,
+    e: &Expr,
+) -> Option<u32> {
+    match &e.kind {
+        E::Ident(_) => match facts.names.get(&key(e.span)) {
+            Some(NameRes::Field(c, i)) => static_of.get(&(*c, *i)).copied(),
+            _ => None,
+        },
+        E::Member { expr, name } => match facts.types.get(&key(expr.span)) {
+            Some(Ty::TypeName(t)) => match &**t {
+                Ty::Class(c, _) => prog.classes[*c]
+                    .fields
+                    .iter()
+                    .position(|f| f.is_static && f.name == name.name)
+                    .and_then(|i| static_of.get(&(*c, i)).copied()),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// What a call of method `i` of class `c` may run: the method, or for an interface's,
+/// each implementation of it.
+fn callees(prog: &Program, c: ClassId, i: usize, out: &mut Vec<(ClassId, bool, usize)>) {
+    let ci = &prog.classes[c];
+    if ci.kind != ClassKind::Interface {
+        out.push((c, false, i));
+        return;
+    }
+    let name = &ci.methods[i].name;
+    for (k, kc) in prog.classes.iter().enumerate() {
+        if kc
+            .implements
+            .iter()
+            .any(|t| matches!(t, Ty::Class(x, _) if *x == c))
+        {
+            for (j, m) in kc.methods.iter().enumerate() {
+                if &m.name == name {
+                    out.push((k, false, j));
+                }
+            }
+        }
+    }
+}
+
 fn is_new(e: &Expr) -> bool {
     match &e.kind {
         E::Paren(x) => is_new(x),

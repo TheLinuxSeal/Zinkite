@@ -1,0 +1,138 @@
+#!/usr/bin/env zink
+// hashtree: the SHA-256 of every file under a directory, worked out by a pool of threads.
+// usage: hashtree [-j N] [dir]
+//
+// Prints a line per file, as sha256sum does, `digest  path`, sorted by path. Files that
+// can't be read are reported on stderr, and make the exit status 1.
+//
+// The main thread walks the tree and puts each file's path in a queue; each worker takes
+// paths, reads and hashes the files, and puts what it found in a second queue, which the
+// main thread collects. Workers share no memory with it (STDLIB §10.3): a path goes
+// through the queue as a copy, in a capped array, since a `string` is a view into the
+// walker's buffer, which only the main thread has. Each worker opens its own Files.
+
+import zink.cli.*;
+import zink.hash.*;
+import zink.io.*;
+import zink.thread.*;
+
+// Paths longer than this are reported and skipped. Linux's own limit is 4096 bytes.
+class Job {
+    u8[..~4096] path;
+}
+
+class Result {
+    u8[..~4096] path;
+    u8[.32] digest;
+    u8 err;                 // 0, or why the file couldn't be read
+}
+
+// Takes paths until the queue is closed and empty, and hashes each file a piece at a time.
+void work(queue<Job> jobs, queue<Result> results) {
+    u8[..>] piece = [];
+    while (Job j : jobs.get()) {
+        Result r = new Result(j.path, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0);
+        File f @openErr = File.open(j.path);
+        if (openErr != 0) {
+            r.err = openErr;
+            results.put(r);
+            continue;
+        }
+        Sha2_256 h = new Sha2_256();
+        while (true) {
+            piece.clear();
+            i64 n @readErr = f.read(piece, 1 << 16);
+            if (readErr == status.END) { break; }
+            if (readErr != 0) {
+                r.err = readErr;
+                break;
+            }
+            h.update(piece);
+        }
+        @_ = f.close();
+        if (r.err == 0) { r.digest = h.finish(); }
+        results.put(r);
+    }
+}
+
+// Where a result's path is in `names`, so the results can be sorted by it.
+class Row {
+    i64 start;
+    i64 len;
+    u8[.32] digest;
+    u8 err;
+}
+
+u8 main(string[.] args) {
+    Args cli = new Args("hashtree", "The SHA-256 of every file under a directory, by a pool of threads.");
+    cli.option('j', "jobs", "N", "how many threads hash files (as many as there are processors)");
+    cli.positional("dir", "the directory to walk (.)");
+    u8 code @stop = cli.parseOrStop(args);
+    if (stop) { return code; }
+    i64 workers @bad = cli.getI64("jobs", thread.cores());
+    if (bad || workers < 1 || workers > 1024) { return cli.usageError("--jobs takes a number from 1 to 1024"); }
+    string root = cli.get("dir", ".");
+
+    queue<Job> jobs = [];
+    queue<Result> results = [];
+    jobs.limit(4 * workers);                    // the walk stays a little ahead of the hashing
+    Worker[..>] pool = [];
+    for (i64 i = 0; i < workers; i++) {
+        pool +> thread.spawn(() => work(jobs, results));
+    }
+
+    // Walk the tree, queueing each file. While the queue is full, collect results.
+    u8[..>] names = [];
+    Row[..>] rows = [];
+    i64 queued = 0;
+    bool failed = false;
+    u8[..~] buf = [];
+    Walker w = fs.walk(root, buf);
+    while (WalkEntry e : w.next()) {
+        if (e.err != 0) {
+            errprintln("hashtree: ${e.path}: ${status.message(e.err)}");
+            failed = true;
+            continue;
+        }
+        if (e.isDir || e.isLink) { continue; }
+        Job j = new Job([]);
+        if (@j.path.append(e.path) != 0) {
+            errprintln("hashtree: ${e.path}: path too long");
+            failed = true;
+            continue;
+        }
+        while (@jobs.put(j) == status.FULL) {
+            failed = collect(results, names, rows) || failed;
+            queued--;
+        }
+        queued++;
+    }
+    jobs.close();
+    for (i64 i = 0; i < queued; i++) {
+        failed = collect(results, names, rows) || failed;
+    }
+    for (Worker& t : pool) { t.join(); }
+
+    rows.sortBy((Row r) => nameOf(names, r));
+    for (Row& r : rows) {
+        if (r.err == 0) { println("${r.digest.hex()}  ${nameOf(names, r)}"); }
+    }
+    return failed ? 1 : 0;
+}
+
+string nameOf(string names, Row r) { return names[r.start:r.start + r.len]; }
+
+// Takes one result, waiting for it: its path goes into `names` and a row for it into
+// `rows`. True if its file couldn't be read.
+bool collect(queue<Result> results, u8[..>]& names, Row[..>]& rows) {
+    Result r = results.get();
+    i64 start = names.len;
+    names.append(r.path);
+    rows +> new Row(start, r.path.len, r.digest, r.err);
+    if (r.err != 0) {
+        errprintln("hashtree: ${r.path}: ${status.message(r.err)}");
+        return true;
+    }
+    return false;
+}

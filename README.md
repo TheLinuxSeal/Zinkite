@@ -110,6 +110,7 @@ L of `REFERENCES.md`). It generates C for:
 - records stored inline, with their text and nested arrays in one block;
 - every kind of array, hash maps, sets and pools;
 - statuses;
+- threads that share no memory, with queues between them;
 - calling C.
 
 The standard library's first tier is written, in Zinkite on a small C layer, and
@@ -119,7 +120,7 @@ random numbers, hashing, hex and base64, CSV, and JSON, read as events or into a
 and written back. Only `hash.xxh3` is missing from it. TOML and YAML come next, into
 the same tree.
 
-All nine programs in `examples/` run. The two largest are:
+All ten programs in `examples/` run. The two largest are:
 - [`examples/quarry`](examples/quarry), a voxel sandbox in a window, drawn with OpenGL
   through SDL2's C headers;
 - [`examples/lisp.zn`](examples/lisp.zn), a Scheme-like interpreter with a garbage

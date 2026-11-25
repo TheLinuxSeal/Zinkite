@@ -26,7 +26,8 @@
 | `zink.toml` | `TomlParser`, `toml` | later | 9.5 |
 | `zink.yaml` | `YamlParser`, `yaml` | later | 9.6 |
 | `zink.glob`, `zink.regex` | `glob`, `Regex` | later | 9.9 |
-| `zink.net`, `zink.compress`, `zink.thread`, `zink.bigint`, `zink.test` | networking, gzip, workers, big integers, tests | later | 10 |
+| `zink.thread` | `thread`, `Worker`, and the built-in `queue<T>` | v1 | 10.3 |
+| `zink.net`, `zink.compress`, `zink.bigint`, `zink.test` | networking, gzip, big integers, tests | later | 10 |
 | `vendor.glfw`, `vendor.sdl3`, `vendor.gl`, `vendor.vulkan` | windows, input and the GPU, through GLFW, SDL3, OpenGL and Vulkan; separate packages, not the standard library | later | 10.6 |
 
 - **v1** is what the first release ships: enough for the four example programs and for typical CLI tools.
@@ -1460,12 +1461,51 @@ u8[.] re.replaceAll(string s, string with) // $1 in `with` refers to group 1
 - Streaming forms for large files.
 - zstd after that.
 
-### 10.3 Threads: `zink.thread`
-Follows Goose:
-- each worker is compiled as a separate program, with its own data stacks;
-- workers exchange flat values, with no references, through typed queues.
+### 10.3 Threads: `zink.thread` (v1)
+Workers share no memory, as in Goose (DESIGN §12.9): each has data stacks, statics and Files of its own, and takes flat values with it and through queues, so no reference ever crosses a thread.
 
-So no reference ever crosses a thread (REFERENCES §12).
+```
+Worker thread.spawn(func(void => void) work)   // AGAIN when the system can't start a thread
+i64 thread.cores()                             // processors online, for sizing a pool
+void w.join()                                  // waits; fails with the status work ended with
+
+queue<T> q = [];                               // T flat
+void q.put(T value)                            // FULL at the limit; END once closed
+T q.get()                                      // waits; END once closed and empty
+T q.get(Duration timeout)                      // TIMEOUT
+T q.poll()                                     // EMPTY when there's nothing to take now
+void q.close()
+void q.limit(i64 n)                            // at most n queued, 0 for no limit; INVALID below 0
+i64 q.len                                      // how many are queued now
+```
+
+```
+import zink.thread.*;
+
+class Job { i64 row; }
+class Row { i64 row; u8[..~80] cells; }
+
+queue<Job> jobs = [];
+queue<Row> rows = [];
+Worker[..>] pool = [];
+for (i64 i = 0; i < thread.cores(); i++) {
+    pool +> thread.spawn(() => {
+        while (Job j : jobs.get()) { rows.put(render(j.row)); }
+    });
+}
+for (i64 y = 0; y < 36; y++) { jobs.put(new Job(y)); }
+jobs.close();
+for (i64 y = 0; y < 36; y++) { Row r = rows.get(); ... }
+for (Worker& w : pool) { w.join(); }
+```
+
+- **The lambda's captures are copied** into the new thread when it starts, and must be flat: numbers, `bool`, enums, queues, capped arrays, and classes made only of those. Text goes in a capped array, as `u8[..~4096] path` does in `examples/hashtree.zn`. A loop's counter gives each worker the value it had at its spawn.
+- **Statics are copied too**: those of flat types, views of string literals, and arrays on data stacks of those, with their elements. Reaching any other static from a worker is a compile error.
+- **A `Worker` is flat**, so it can be put in a queue and joined from any thread, any number of times. A failed spawn's zero value fails `join` with `INVALID`.
+- **A queue is a handle**: copies share the queue, and it lasts for the whole run, so make queues once, not one per message. A queue that is a zero value fails every call with `INVALID`. `put` never waits.
+- **Failures**: a failure nothing reads in a worker stops the program, with its trail, as in `main`. `@@` in the worker's lambda keeps a failure inside it.
+- **Files**: a worker's own Files are written out and closed when it ends. `stdin`, `stdout` and `stderr` work in every thread, and one thread's `println` is one whole line. Workers still running when `main` returns are stopped with the program, and what their Files hold unwritten is lost: join them first.
+- **Later**: variable-size values through queues, and workers that read the parent's arrays in place for kernels over one large array (DESIGN §17).
 
 ### 10.4 Big integers: `zink.bigint`
 - **`BigInt` is variable-size**, with its digits inline, so it follows rule V. Each result is a new value, built in place: `BigInt c = a.plus(b);`.
@@ -1590,7 +1630,7 @@ while (running) {
   - OpenGL reports errors on request, not per call: `@gl.checkError()` fails with `GPU` and `gl.lastError()` gives the `GLenum`. With OpenGL 4.3 or `KHR_debug`, `gl.debugToStderr()` prints the driver's messages as they happen;
   - Vulkan's validation layers are enabled by naming them in `VkInstanceCreateInfo`, as in C, and their messages go to stderr.
 - **Shaders**: OpenGL compiles GLSL text at run time, and `gl.getShaderInfoLog` gives the compiler's messages. Vulkan takes SPIR-V, compiled ahead of time from GLSL or HLSL with `glslc` or `glslangValidator` and read with `File.readAll`. Embedding the `.spv` file into the binary at compile time is open (DESIGN §17).
-- **One thread**: OpenGL contexts, GLFW windows and SDL windows belong to the main thread, which is where a single-threaded Zinkite program runs anyway.
+- **One thread**: OpenGL contexts, GLFW windows and SDL windows belong to the main thread. Workers (§10.3) can build meshes and textures as flat values and hand them back through a queue.
 - **Per-frame memory is free.** What a frame allocates lives on data stacks and is released when the frame's block ends. There is no garbage collector to pause a frame, and no frame arena to write by hand.
 - **Platforms**: Linux first, on X11 and Wayland through GLFW 3.4 and SDL3, then Windows. On macOS, OpenGL stops at 4.1, and Vulkan runs through MoltenVK.
 

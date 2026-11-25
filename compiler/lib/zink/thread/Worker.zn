@@ -1,0 +1,16 @@
+package zink.thread;
+
+// A thread that thread.spawn started (STDLIB §10.3). It's flat, so it can be copied, put in
+// a queue and joined from any thread, any number of times.
+public class Worker {
+    private i64 id;
+
+    private static extern("zr_thread_join") u8 cJoin(i64 id);
+
+    // Waits until the worker has ended, and fails with the status its lambda ended with.
+    // INVALID for the zero value a failed spawn gives.
+    public void join() {
+        u8 st = cJoin(id);
+        return #st;
+    }
+}

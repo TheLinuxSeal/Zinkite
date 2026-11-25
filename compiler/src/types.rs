@@ -38,6 +38,8 @@ pub enum Ty {
     Set(Box<Ty>),
     Pool(Box<Ty>),
     Handle(Box<Ty>),
+    /// `queue<T>` (STDLIB §10.3): a handle to a queue of flat values that threads share.
+    Queue(Box<Ty>),
     /// What a for-each over a `hashmap` gives: `key` and `value`.
     MapEntry(Box<Ty>, Box<Ty>),
     /// A class or number type named as a value, before `.`: `Kind.OBJECT`, `File.open`.
@@ -280,6 +282,7 @@ impl Ty {
             Ty::Set(e) => Ty::Set(s(e)),
             Ty::Pool(e) => Ty::Pool(s(e)),
             Ty::Handle(e) => Ty::Handle(s(e)),
+            Ty::Queue(e) => Ty::Queue(s(e)),
             Ty::MapEntry(k, v) => Ty::MapEntry(s(k), s(v)),
             Ty::TypeName(e) => Ty::TypeName(s(e)),
             _ => self.clone(),
@@ -298,6 +301,7 @@ impl Ty {
             | Ty::Set(e)
             | Ty::Pool(e)
             | Ty::Handle(e)
+            | Ty::Queue(e)
             | Ty::TypeName(e) => e.mentions_param(),
             Ty::Func(ps, r) => ps.iter().any(Ty::mentions_param) || r.mentions_param(),
             Ty::Tuple(ts) => ts.iter().any(Ty::mentions_param),

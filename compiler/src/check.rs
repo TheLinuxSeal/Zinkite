@@ -145,6 +145,8 @@ struct Local {
     captured: bool,
     reassigned: bool,
     final_reported: bool,
+    /// Captured by a spawned lambda and checked flat, so it's reported once.
+    captured_flat: bool,
 }
 
 /// Why something can't be changed here, and what to do instead.
@@ -240,6 +242,9 @@ struct Checker<'p, 'a> {
     pub facts: Facts,
     /// Enclosing lambdas: the index of each one's `FnCtx`, and whether it captures.
     lambdas: Vec<(usize, bool)>,
+    /// Enclosing lambdas given to `thread.spawn`: how many functions enclosed each. What
+    /// one captures from outside it is copied to another thread, so it must be flat.
+    spawns: Vec<usize>,
     /// Set just before typing the value that initializes a named local or static, where
     /// a root may be created (DESIGN §6.6).
     root_new_ok: bool,
@@ -291,6 +296,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             writing: false,
             facts: Facts::default(),
             lambdas: Vec::new(),
+            spawns: Vec::new(),
             root_new_ok: false,
             last_call_mut: false,
             huge_lits: HashMap::new(),
@@ -363,6 +369,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             captured: false,
             reassigned: false,
             final_reported: false,
+            captured_flat: false,
         });
         self.scopes.last_mut().expect("a scope").push(id);
         id
@@ -977,6 +984,16 @@ impl<'p, 'a> Checker<'p, 'a> {
             Ty::Ref(e) | Ty::Nullable(e) | Ty::Slice(e) | Ty::View(e) | Ty::Handle(e) => {
                 self.type_rules(e, span)
             }
+            Ty::Queue(e) => {
+                if let Some(why) = self.not_flat(e) {
+                    self.err_help(
+                        span,
+                        format!("a queue's values must be flat, and {}", why),
+                        "a queue copies its values from one thread to another: numbers, bool, enums, queues, capped arrays, and classes made only of those (STDLIB §10.3)",
+                    );
+                }
+                self.type_rules(e, span);
+            }
             Ty::Func(ps, r) => {
                 for p in ps {
                     self.type_rules(p, span);
@@ -1010,6 +1027,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             | (Set(x), Set(y))
             | (Pool(x), Pool(y))
             | (Handle(x), Handle(y))
+            | (Queue(x), Queue(y))
             | (TypeName(x), TypeName(y)) => self.same(x, y),
             (Func(p1, r1), Func(p2, r2)) => all(p1, p2) && self.same(r1, r2),
             (Tuple(x), Tuple(y)) => all(x, y),
@@ -1225,6 +1243,64 @@ impl<'p, 'a> Checker<'p, 'a> {
             }
             Ty::Param(n) => self.tparam(n).is_some_and(|tp| tp.has(BoundKind::Hashable)),
             _ => false,
+        }
+    }
+
+    /// Why a value of type `t` can't be copied to another thread, or None when it can
+    /// (STDLIB §10.3): it's flat, holding nothing that refers into this thread's memory.
+    /// Numbers, `bool`, enums, queues, capped arrays and classes made only of those are.
+    fn not_flat(&self, t: &Ty) -> Option<String> {
+        self.not_flat_in(t, &mut Vec::new())
+    }
+
+    fn not_flat_in(&self, t: &Ty, seen: &mut Vec<ClassId>) -> Option<String> {
+        let shown = format!("`{}`", self.show(t));
+        match t {
+            Ty::Prim(_) | Ty::IntLit { .. } | Ty::FloatLit | Ty::Unknown | Ty::Queue(_) => None,
+            Ty::Array(e, k) if k.cap == CapKind::Capped => self.not_flat_in(e, seen),
+            Ty::Array(..) | Ty::Map(..) | Ty::Set(_) | Ty::Pool(_) => {
+                Some(format!("{} is on one of this thread's data stacks", shown))
+            }
+            Ty::Slice(_) | Ty::View(_) => {
+                Some(format!("{} is a view into this thread's memory", shown))
+            }
+            Ty::Ref(_) | Ty::Nullable(_) => {
+                Some(format!("{} refers into this thread's memory", shown))
+            }
+            Ty::Handle(_) => Some(format!(
+                "{} names a slot of one of this thread's pools",
+                shown
+            )),
+            Ty::Func(..) => Some(format!("{} is a function value", shown)),
+            Ty::CHandle(_) => Some(format!("{} is a C pointer", shown)),
+            Ty::Param(_) => Some(format!(
+                "{} is a type parameter, which could be anything",
+                shown
+            )),
+            Ty::Class(id, args) => {
+                let c = &self.prog.classes[*id];
+                if c.kind == ClassKind::Enum || seen.contains(id) {
+                    return None;
+                }
+                if c.package == "zink.io" && (c.name == "File" || c.name == "Dir") {
+                    return Some(format!(
+                        "a `{}` belongs to the thread that opened it",
+                        c.name
+                    ));
+                }
+                if c.kind != ClassKind::Class {
+                    return Some(format!("{} isn't a plain class", shown));
+                }
+                seen.push(*id);
+                let map = self.class_subst(*id, args);
+                let why = c.fields.iter().filter(|f| !f.is_static).find_map(|f| {
+                    self.not_flat_in(&f.ty.subst(&map), seen)
+                        .map(|why| format!("{}'s field `{}`: {}", shown, f.name, why))
+                });
+                seen.pop();
+                why
+            }
+            _ => Some(format!("{} can't be copied to another thread", shown)),
         }
     }
 
@@ -3057,6 +3133,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             | Ty::Pool(_)
             | Ty::Func(..)
             | Ty::MapEntry(..)
+            | Ty::Queue(_)
             | Ty::Handle(_) => self.err(x.span, format!("{} can't be printed", self.show(&t))),
             Ty::TypeName(_) | Ty::Namespace(_) => self.err(
                 x.span,
@@ -3214,7 +3291,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             let f = &prog.classes[cls].fields[i];
             self.facts.names.insert(key(span), NameRes::Field(cls, i));
             if !f.is_static {
-                self.note_this_capture();
+                self.note_this_capture(span);
             }
             if !f.is_static && self.fn_static() {
                 let fname = self.fns.last().map(|f| f.name.clone()).unwrap_or_default();
@@ -3265,15 +3342,23 @@ impl<'p, 'a> Checker<'p, 'a> {
         );
     }
 
-    /// A lambda uses `this`: every enclosing lambda captures it.
-    fn note_this_capture(&mut self) {
+    /// A lambda uses `this`: every enclosing lambda captures it. A worker can't: `this` is
+    /// a reference into the spawning thread's memory.
+    fn note_this_capture(&mut self, span: Span) {
         for l in &mut self.lambdas {
             l.1 = true;
+        }
+        if self.spawns.iter().any(|&d| self.fns.len() > d) {
+            self.err_help(
+                span,
+                "a worker can't take `this` with it: it refers into the spawning thread's memory",
+                "copy the fields the worker needs into flat locals before `thread.spawn` (STDLIB §10.3)",
+            );
         }
     }
 
     fn this_ty(&mut self, span: Span) -> Ty {
-        self.note_this_capture();
+        self.note_this_capture(span);
         match self.class {
             Some(c) if !self.fn_static() && self.prog.classes[c].kind != ClassKind::Script => {
                 Ty::Ref(Box::new(self.self_type(c)))
@@ -3415,7 +3500,13 @@ impl<'p, 'a> Checker<'p, 'a> {
                 }
                 Ty::i64()
             }
-            Ty::Array(..) | Ty::Slice(_) | Ty::View(_) | Ty::Map(..) | Ty::Set(_) | Ty::Pool(_)
+            Ty::Array(..)
+            | Ty::Slice(_)
+            | Ty::View(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Pool(_)
+            | Ty::Queue(_)
                 if n == "len" =>
             {
                 Ty::i64()
@@ -3488,6 +3579,15 @@ impl<'p, 'a> Checker<'p, 'a> {
             Ty::Map(k, v) => builtins::map_method(k, v, n),
             Ty::Set(e) => builtins::set_method(e, n),
             Ty::Pool(e) => builtins::pool_method(e, n),
+            Ty::Queue(e) => {
+                let duration = self
+                    .prog
+                    .classes
+                    .iter()
+                    .position(|c| c.name == "Duration" && c.package == "zink.time")
+                    .map(|d| Ty::Class(d, Vec::new()));
+                builtins::queue_method(e, n, duration)
+            }
             _ => Vec::new(),
         }
     }
@@ -4472,8 +4572,8 @@ impl<'p, 'a> Checker<'p, 'a> {
                     return bad();
                 }
                 match a {
-                    Func(..) | Map(..) | Set(_) | Pool(_) | TypeName(_) | Namespace(_)
-                    | Tuple(_) | Void => bad(),
+                    Func(..) | Map(..) | Set(_) | Pool(_) | Queue(_) | TypeName(_)
+                    | Namespace(_) | Tuple(_) | Void => bad(),
                     _ => Ok(()),
                 }
             }
@@ -4587,9 +4687,9 @@ impl<'p, 'a> Checker<'p, 'a> {
                 }
                 t
             }
-            Some(t @ (Ty::Map(..) | Ty::Set(_) | Ty::Pool(_))) => {
+            Some(t @ (Ty::Map(..) | Ty::Set(_) | Ty::Pool(_) | Ty::Queue(_))) => {
                 if let Some(first) = items.first() {
-                    self.err_help(first.span, "only `[]` creates a hashmap, a hashset or a pool", "start with `[]` and add the entries (hash map literals are undecided, GRAMMAR §8)");
+                    self.err_help(first.span, "only `[]` creates a hashmap, a hashset, a pool or a queue", "start with `[]` and add the entries (hash map literals are undecided, GRAMMAR §8)");
                 }
                 t
             }
@@ -4855,6 +4955,36 @@ impl<'p, 'a> Checker<'p, 'a> {
         }
     }
 
+    /// `thread.spawn(() => ...)` (STDLIB §10.3): the lambda runs on a thread of its own,
+    /// with copies of what it captures, which must be flat (`note_capture`). It gives a
+    /// `Worker`, and fails with AGAIN when the system can't start a thread.
+    fn spawn(&mut self, args: &[ast::Arg], span: Span, consumed: bool) -> Ty {
+        let worker = self
+            .prog
+            .classes
+            .iter()
+            .position(|c| c.name == "Worker" && c.package == "zink.thread");
+        let ret = worker.map_or(Ty::Unknown, |w| Ty::Class(w, Vec::new()));
+        let lambda = args.len() == 1
+            && matches!(&strip_parens(&args[0].expr).kind, E::Lambda { params, .. } if params.is_empty());
+        if !lambda {
+            self.type_args(args);
+            self.err_help(
+                span,
+                "`thread.spawn` takes one lambda with no parameters",
+                "write `thread.spawn(() => work(a, b))`: what the lambda uses from outside is copied to the new thread (STDLIB §10.3)",
+            );
+            self.last_can_fail = Some(true);
+            return ret;
+        }
+        let mut sig = Sig::new("spawn", vec![Ty::Func(Vec::new(), Box::new(Ty::Void))], ret);
+        sig.can_fail = true;
+        self.spawns.push(self.fns.len());
+        let t = self.resolve_call("thread.spawn", vec![sig], None, args, span, consumed);
+        self.spawns.pop();
+        t
+    }
+
     fn method_call(
         &mut self,
         bt: &Ty,
@@ -4902,6 +5032,13 @@ impl<'p, 'a> Checker<'p, 'a> {
                 Ty::Unknown
             }
             Ty::TypeName(inner) => match &**inner {
+                Ty::Class(id, _)
+                    if n == "spawn"
+                        && prog.classes[*id].name == "thread"
+                        && prog.classes[*id].package == "zink.thread" =>
+                {
+                    self.spawn(args, span, consumed)
+                }
                 Ty::Class(id, _) => {
                     let c = &prog.classes[*id];
                     let ms: Vec<&MethodInfo> = c.methods.iter().filter(|m| m.name == n).collect();
@@ -5024,7 +5161,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             }
             Ty::Slice(e) => self.seq_call(&t, e, SeqKind::Slice, base, name, args, span, consumed),
             Ty::View(e) => self.seq_call(&t, e, SeqKind::View, base, name, args, span, consumed),
-            Ty::Map(..) | Ty::Set(_) | Ty::Pool(_) => {
+            Ty::Map(..) | Ty::Set(_) | Ty::Pool(_) | Ty::Queue(_) => {
                 let sigs = self.methods_of(&t, n);
                 if sigs.is_empty() {
                     return self.ufcs(&t, base, name, args, span, consumed);
@@ -6181,10 +6318,28 @@ impl<'p, 'a> Checker<'p, 'a> {
     /// A lambda reads local `id`, which it captures.
     fn note_capture(&mut self, id: usize, span: Span) {
         let depth = self.locals[id].depth;
+        // A spawned lambda takes a copy of what it uses from outside, when it's spawned, so
+        // the variable may change after that, as a loop's counter does.
+        let copied = self.spawns.iter().any(|&d| depth <= d);
+        if copied && !self.locals[id].captured_flat {
+            self.locals[id].captured_flat = true;
+            let t = self.locals[id].ty.clone();
+            if let Some(why) = self.not_flat(&t) {
+                let name = self.locals[id].name.clone();
+                self.err_help(
+                    span,
+                    format!("a worker can't take `{}` with it: {}", name, why),
+                    "what a spawned lambda uses from outside is copied to the new thread, so it must be flat: numbers, bool, enums, queues, capped arrays, and classes made only of those (STDLIB §10.3)",
+                );
+            }
+        }
         for l in &mut self.lambdas {
             if l.0 >= depth {
                 l.1 = true;
             }
+        }
+        if copied {
+            return;
         }
         let l = &mut self.locals[id];
         l.captured = true;
@@ -6409,9 +6564,10 @@ impl<'p, 'a> Checker<'p, 'a> {
                 self.unify_infer(k, xk, names, binds)?;
                 self.unify_infer(v, xv, names, binds)
             }
-            (Set(p), Set(x)) | (Pool(p), Pool(x)) | (Handle(p), Handle(x)) => {
-                self.unify_infer(p, x, names, binds)
-            }
+            (Set(p), Set(x))
+            | (Pool(p), Pool(x))
+            | (Handle(p), Handle(x))
+            | (Queue(p), Queue(x)) => self.unify_infer(p, x, names, binds),
             (Tuple(ps), Tuple(xs)) if ps.len() == xs.len() => pair(self, ps, xs, binds),
             _ => Ok(()),
         }

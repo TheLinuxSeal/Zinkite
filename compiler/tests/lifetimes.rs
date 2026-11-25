@@ -837,3 +837,45 @@ fn what_a_lambda_returns_lives_long_enough() {
         "`filter`'s result is still being built during this call, which can recurse back into `depth`",
     );
 }
+
+// ---------------------------------------------------------------- threads (STDLIB §10.3)
+
+/// A worker gets copies of the statics a thread can copy, so it may reach only those,
+/// through its lambda and everything that calls, and of those with views, only views of
+/// string literals.
+#[test]
+fn workers_reach_only_statics_they_get_copies_of() {
+    let t = "import zink.thread.*;\nhashmap<string, i64> CACHE = [];\nu8[..>] BUF = [];\nstring FIRST = \"\";\nstring GREETING = \"hello\";\ni64[..>] PRIMES = [];\nclass Lookup { i64 find(string k) { i64 v @_ = CACHE.get(k); return v; } }\ninterface Shape { i64 area(); }\nclass Sq implements Shape { i64 area() { return CACHE.len; } }\n";
+    ok(&format!(
+        "{}void main() {{\n    PRIMES +> 2;\n    Worker w = thread.spawn(() => println(\"${{GREETING}} ${{PRIMES}}\"));\n    w.join();\n    println(\"${{CACHE.len}}\");\n}}\n",
+        t
+    ));
+    rejects(
+        &format!(
+            "{}void main() {{\n    Worker w = thread.spawn(() => println(\"${{CACHE.len}}\"));\n}}\n",
+            t
+        ),
+        "the worker spawned on line 11 can't use the static `CACHE`: a new thread doesn't get a copy of a `hashmap<string, i64>`",
+    );
+    rejects(
+        &format!(
+            "{}void main() {{\n    Worker w = thread.spawn(() => {{\n        Lookup l = new Lookup();\n        i64 v = l.find(GREETING);\n        println(\"${{v}}\");\n    }});\n}}\n",
+            t
+        ),
+        "can't use the static `CACHE`",
+    );
+    rejects(
+        &format!(
+            "{}i64 measure(Shape& s) {{ return s.area(); }}\nvoid main() {{\n    Worker w = thread.spawn(() => {{\n        Sq q = new Sq();\n        println(\"${{measure(q)}}\");\n    }});\n}}\n",
+            t
+        ),
+        "can't use the static `CACHE`",
+    );
+    rejects(
+        &format!(
+            "{}void main() {{\n    BUF.append(\"abc\");\n    FIRST = BUF[0:2];\n    Worker w = thread.spawn(() => println(FIRST));\n}}\n",
+            t
+        ),
+        "can't use the static `FIRST`: it holds views that may point into the spawning thread's memory",
+    );
+}

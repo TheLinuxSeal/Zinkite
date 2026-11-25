@@ -362,7 +362,7 @@ impl<'a> Program<'a> {
                             continue;
                         }
                         if BoundKind::from_name(&name.name).is_some()
-                            || ["hashmap", "hashset", "pool"].contains(&name.name.as_str())
+                            || ["hashmap", "hashset", "pool", "queue"].contains(&name.name.as_str())
                         {
                             prog.diags.push((fi, Diagnostic::error(name.span, format!("`{}` is a built-in name and can't be declared (GRAMMAR §1.3)", name.name))));
                         }
@@ -839,6 +839,69 @@ impl<'a> Program<'a> {
         Lookup::NotFound
     }
 
+    /// Whether a new thread gets a copy of a static of this type (STDLIB §10.3): its bytes,
+    /// and for an array on a data stack that changes only at its end, its elements too.
+    /// A view is copied as it is, so the lifetimes pass lets a worker reach one only when
+    /// it points at static data. The code generator copies exactly these.
+    pub fn thread_copyable(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Array(e, k)
+                if k.cap == CapKind::None
+                    && !k.has_cursor()
+                    && !k.push_front()
+                    && !k.pop_front() =>
+            {
+                !self.variable_size(e) && self.copyable_bytes(e)
+            }
+            _ => self.copyable_bytes(t),
+        }
+    }
+
+    fn copyable_bytes(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Prim(_) | Ty::Queue(_) | Ty::Slice(_) | Ty::Func(..) => true,
+            Ty::Array(e, k) if k.cap == CapKind::Capped => self.copyable_bytes(e),
+            Ty::Class(id, args) => {
+                let c = &self.classes[*id];
+                if c.kind == ClassKind::Enum {
+                    return true;
+                }
+                if c.kind != ClassKind::Class
+                    || self.variable_size(t)
+                    || c.package == "zink.io" && (c.name == "File" || c.name == "Dir")
+                {
+                    return false;
+                }
+                let map: Vec<(String, Ty)> = c
+                    .type_params
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .zip(args.iter().cloned())
+                    .collect();
+                c.fields
+                    .iter()
+                    .filter(|f| !f.is_static)
+                    .all(|f| self.copyable_bytes(&f.ty.subst(&map)))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a file imports `zink.thread`, all of it or a class of it, or is part of it:
+    /// `queue<T>` is that package's (STDLIB §10.3).
+    pub fn imports_thread(&self, file: usize) -> bool {
+        let f = &self.files[file];
+        f.package == "zink.thread"
+            || f.ast.imports.iter().any(|imp| {
+                let parts = &imp.path.parts;
+                let pkg = match imp.kind {
+                    ast::ImportKind::Wildcard => parts.len(),
+                    _ => parts.len().saturating_sub(1),
+                };
+                pkg == 2 && parts[0].name == "zink" && parts[1].name == "thread"
+            })
+    }
+
     /// Resolves a type that names an interface, after `implements`.
     fn resolve_interface(&mut self, t: &ast::Type, scope: &Scope) -> Ty {
         let mut diags = Vec::new();
@@ -993,6 +1056,20 @@ impl<'a> Program<'a> {
                 "hashset" if arity(1, diags) => return Ty::Set(Box::new(args[0].clone())),
                 "pool" if arity(1, diags) => return Ty::Pool(Box::new(args[0].clone())),
                 "Handle" if arity(1, diags) => return Ty::Handle(Box::new(args[0].clone())),
+                // A queue between threads is zink.thread's, so it needs the import.
+                "queue" if self.imports_thread(scope.file) => {
+                    if arity(1, diags) {
+                        return Ty::Queue(Box::new(args[0].clone()));
+                    }
+                    return Ty::Unknown;
+                }
+                "queue" => {
+                    diags.push(
+                        Diagnostic::error(t.span, "`queue` is a type of `zink.thread`")
+                            .with_help("add `import zink.thread.*;` (STDLIB §10.3)"),
+                    );
+                    return Ty::Unknown;
+                }
                 "hashmap" | "hashset" | "pool" | "Handle" => return Ty::Unknown,
                 _ => {}
             }
@@ -1220,6 +1297,7 @@ impl<'a> Program<'a> {
             Ty::Set(e) => format!("hashset<{}>", self.show(e)),
             Ty::Pool(e) => format!("pool<{}>", self.show(e)),
             Ty::Handle(e) => format!("Handle<{}>", self.show(e)),
+            Ty::Queue(e) => format!("queue<{}>", self.show(e)),
             Ty::MapEntry(k, v) => {
                 format!("an entry of hashmap<{}, {}>", self.show(k), self.show(v))
             }

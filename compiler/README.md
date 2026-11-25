@@ -84,6 +84,13 @@ Done:
   all. A root can't be copied, passed or returned by value, or be a temporary
   (DESIGN §6.6).
 
+- threads (DESIGN §12.9): what a spawned lambda uses from outside it, and what a
+  `queue` holds, is flat, checked with the reason when it isn't; a loop's counter may
+  change after a spawn captures it, since the worker has a copy. After the lifetimes
+  pass, the code a worker may run, its lambda and everything that calls, through
+  interfaces and, conservatively, function values, may reach only the statics a new
+  thread gets copies of, and of those with views only ones of string literals.
+
 - rule V (variable-size values, `REFERENCES.md` §6): a variable-size field isn't
   assigned once its record is built (V1), though a fixed-size field of it can be;
   assigning a whole variable-size variable is a removal under rule R (V2); an array
@@ -138,10 +145,27 @@ failed and its trail through the program's own functions, with exit status 1. Th
 check is one predictable branch after a call that can fail. `@@` and `@@@` catch such a
 failure deep inside too: a `setjmp` at the `@@`, which the stop jumps back to instead,
 through a catch record for each `defer` on the way; the trail is a fixed buffer of 32
-entries that each failing `return` writes to. All nine
-examples run: `cachesim`, `csvsort`, `dirwalk`, `jsonfmt`, `linebuf`, `lisp`,
-`sortlines`, `stats` and `wordfreq`. So does `quarry/quarry.zn`, a voxel sandbox drawn
-with OpenGL through SDL2, which the tests build where their headers are installed.
+entries that each failing `return` writes to. All ten
+examples run: `cachesim`, `csvsort`, `dirwalk`, `hashtree`, `jsonfmt`, `linebuf`,
+`lisp`, `sortlines`, `stats` and `wordfreq`. So does `quarry/quarry.zn`, a voxel
+sandbox drawn with OpenGL through SDL2, which the tests build where their headers are
+installed.
+
+Threads (DESIGN §12.9, `codegen/threads.rs`): a program that imports zink.thread is
+compiled with `ZR_THREADS`. The runtime's per-thread state, the data stacks' table, the
+scratch stack, the trail, `@@` records and the open Files' table, and the program's
+statics, are `__thread` then, so each worker is the program over again; output takes
+stdout's lock, a statement's line at a time, after its parts are worked out, and the
+environment a mutex. A spawned lambda is a C function, `ztN`, given a packet the
+spawning thread fills with its captures' bytes and the statics' (an array's elements
+too), which it unpacks into its own; workers are detached pthreads with a record each
+that `join` waits on. A queue is a mutex, a condition variable on the monotonic clock,
+and a list of nodes, each one value's bytes. A worker's data stacks are unmapped, and
+its Files written out and closed, when it ends: 300 workers in turn that each fill 8 MB
+peak at 10 MB. ThreadSanitizer finds nothing in the tests' programs, built with it, which
+send output through `fwrite`, as it doesn't model `flockfile`. A program that doesn't
+import zink.thread compiles to the same C as before. `hashtree` hashes `/usr/include`,
+152 MB in 12,103 files, in 0.69 s with one worker and 0.10 s with 18.
 
 Variable-size records (DESIGN §3.2, §11): a class with a `T[.*]` or `T[.]` field, or
 a field that is such a class, is one run of bytes. Its fixed-size fields come first,
@@ -289,6 +313,8 @@ representations as they are. Written so far:
   algorithms; they agree with Python's `datetime` over 5,000 random instants;
 - `zink.random`: `Rng`, xoshiro256** seeded through SplitMix64, with Lemire's
   unbiased `range` for every integer type, and the kernel's bytes for secrets;
+- `zink.thread`: `thread` (`cores`; `spawn` is the compiler's) and `Worker` (`join`),
+  besides the built-in `queue<T>`;
 - `zink.hash`: FNV-1a, CRC-32, all of SHA-2 and SHA-3, and SHAKE, one-shot and
   incremental, in the runtime's C, with one state for every SHA algorithm and an
   unrolled Keccak; they agree with Python's `zlib` and `hashlib` at every padding and
@@ -390,7 +416,7 @@ stops the program, as a cast that doesn't fit does (DESIGN §9.1).
 | `src/flow.rs` | the state definite assignment tracks: what is assigned on every path, and on some |
 | `src/lifetimes.rs` | roots and lifetimes: rules S and R, function summaries, recursion |
 | `src/codegen.rs` | the C backend, with the copy of a function's base case that its calls to itself make (DESIGN §14.2) |
-| `src/codegen/` | its parts for lambdas, hash maps, sorting, generics and interfaces, and `versions.rs`, which runs counted loops without their index checks when a test before them shows every index in range (DESIGN §14.2) |
+| `src/codegen/` | its parts for lambdas, hash maps, sorting, generics, interfaces and threads, and `versions.rs`, which runs counted loops without their index checks when a test before them shows every index in range (DESIGN §14.2) |
 | `src/cheader.rs` | reading C headers with clang, and caching what it finds |
 | `src/driver.rs` | compiling the C, with jumps kept off 32-byte boundaries on x86-64 (DESIGN §12.5), the cache, and running the result |
 | `src/stdlib.rs` | the standard library's files, built into `zink`, and which a program needs |

@@ -134,7 +134,7 @@ pub(super) struct BoundCopy {
 }
 
 /// The local declarations a lambda's body names from outside it, in order, once each.
-fn outer_names(facts: &Facts, lam: &Expr) -> Vec<(u32, u32)> {
+pub(super) fn outer_names(facts: &Facts, lam: &Expr) -> Vec<(u32, u32)> {
     fn expr(facts: &Facts, e: &Expr, lam: Span, out: &mut Vec<(u32, u32)>) {
         if let E::Ident(_) = &e.kind
             && let Some(NameRes::Local(d)) = facts.names.get(&key(e.span))
@@ -403,9 +403,14 @@ impl<'p, 'a> Gen<'p, 'a> {
         name
     }
 
-    /// Generates the C functions for lambdas used as values, including any they use.
+    /// Generates the C functions for lambdas used as values, including any they use, and
+    /// for spawned lambdas (`threads.rs`), which may make more of either.
     pub(super) fn drain_lambdas(&mut self) {
-        while let Some(l) = self.pending_lambdas.pop() {
+        while !self.pending_lambdas.is_empty() || !self.pending_spawns.is_empty() {
+            self.drain_spawns();
+            let Some(l) = self.pending_lambdas.pop() else {
+                continue;
+            };
             self.file = l.file;
             let saved_subst = std::mem::replace(&mut self.subst, l.subst.clone());
             let saved_cargs = std::mem::replace(&mut self.cur_cargs, l.cargs.clone());

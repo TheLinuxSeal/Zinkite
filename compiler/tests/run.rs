@@ -6176,3 +6176,227 @@ void main(string[.] args) {
         "prog.zn:50: `sort` failed with INVALID, and nothing read its status\n    `lambda` returned it at prog.zn:50\n"
     );
 }
+
+/// `append` on a capped `u8` array (STDLIB §3.6): all of the text or none of it, FULL
+/// without room, interpolated or not, on a ring buffer too.
+#[test]
+fn append_to_capped_arrays() {
+    prints(
+        r#"void main() {
+    u8[..~16] a = [];
+    a.append("hello");
+    i64 n = 42;
+    a.append(" n=${n}!");
+    u8 full = @a.append(" this is too long");
+    println("[${a}] ${a.len} ${status.name(full)}");
+    u8[~.~8] ring = [];
+    ring.append("abc");
+    ring +< 'z';
+    ring.append("de");
+    println("[${ring}]");
+    string s = "xyz";
+    u8[..~4] b = [];
+    b.append(s);
+    u8 f2 = @b.append(s);
+    println("[${b}] ${status.name(f2)}");
+}
+"#,
+        "[hello n=42!] 11 FULL\n[zabcde]\n[xyz] FULL\n",
+    );
+}
+
+// ---------------------------------------------------------------- threads
+
+/// zink.thread (STDLIB §10.3): workers spawned from lambdas, with copies of what they
+/// capture, a loop's counter at each spawn included; queues between them, closed to end
+/// the workers' loops; workers that spawn workers; join giving the status a worker's
+/// lambda ended with; `@@` inside a worker; and a worker's growable locals on data
+/// stacks of its own.
+#[test]
+fn workers_and_queues() {
+    prints(
+        r#"import zink.thread.*;
+
+class Job { i64 n; }
+class Done { i64 n; i64 square; }
+
+i64 total(i64 n) {
+    i64[..>] xs = [];
+    for (i64 i = 0; i < n; i++) { xs +> i; }
+    i64 s = 0;
+    for (i64 x : xs) { s += x; }
+    return s;
+}
+
+i64 seventh(i64[..>]& xs) { return xs[7]; }
+
+void failing(i64 code) {
+    if (code > 0) { return #status.NOT_FOUND; }
+}
+
+void main() {
+    queue<Job> jobs = [];
+    queue<Done> done = [];
+    Worker[..>] ws = [];
+    for (i64 w = 0; w < 4; w++) {
+        ws +> thread.spawn(() => {
+            while (Job j : jobs.get()) { done.put(new Done(j.n, j.n * j.n + total(w) * 0)); }
+        });
+    }
+    for (i64 i = 1; i <= 100; i++) { jobs.put(new Job(i)); }
+    jobs.close();
+    i64 sum = 0;
+    for (i64 i = 0; i < 100; i++) { sum += done.get().square; }
+    for (Worker& w : ws) { w.join(); }
+    println("squares ${sum}");
+
+    queue<i64> sums = [];
+    Worker boss = thread.spawn(() => {
+        Worker[..>] kids = [];
+        for (i64 j = 1; j <= 4; j++) { kids +> thread.spawn(() => sums.put(total(j * 10))); }
+        for (Worker& k : kids) { k.join(); }
+        sums.close();
+    });
+    i64 all = 0;
+    while (i64 s : sums.get()) { all += s; }
+    boss.join();
+    println("nested ${all}");
+
+    Worker f = thread.spawn(() => { return ## failing(1); });
+    Worker g = thread.spawn(() => { return ## failing(0); });
+    u8 st = @f.join();
+    u8 st2 = @g.join();
+    Worker c = thread.spawn(() => {
+        i64[..>] xs = [1, 2, 3];
+        u8 caught = @@seventh(xs);
+        println("caught ${status.name(caught)}");
+    });
+    c.join();
+    println("joined ${status.name(st)} ${status.name(st2)}, cores ${thread.cores() > 0}");
+}
+"#,
+        "squares 338350\nnested 1450\ncaught RANGE\njoined NOT_FOUND OK, cores true\n",
+    );
+}
+
+/// A queue's statuses: EMPTY from poll, TIMEOUT from a get that waits, FULL at its limit,
+/// END for a put once it's closed and for a get once it's empty too, and INVALID from a
+/// queue that is a zero value, as a failed get of a class holding one gives.
+#[test]
+fn queue_statuses() {
+    prints(
+        r#"import zink.thread.*;
+import zink.time.*;
+
+class Pipe { queue<i64> q; }
+
+void main() {
+    queue<i64> q = [];
+    i64 v @e1 = q.poll();
+    i64 w @e2 = q.get(Duration.ms(20));
+    q.limit(1);
+    q.put(5);
+    u8 e3 = @q.put(6);
+    println("waiting ${q.len}");
+    q.close();
+    u8 e4 = @q.put(7);
+    i64 a @e5 = q.get();
+    i64 b @e6 = q.get();
+    println("${status.name(e1)} ${status.name(e2)} ${status.name(e3)} ${status.name(e4)} ${a} ${status.name(e5)} ${status.name(e6)} ${v + w + b}");
+    queue<Pipe> pipes = [];
+    Pipe none @_ = pipes.poll();
+    u8 e7 = @none.q.put(1);
+    println("${status.name(e7)}");
+}
+"#,
+        "waiting 1\nEMPTY TIMEOUT FULL END 5 OK END 0\nINVALID\n",
+    );
+}
+
+/// A worker gets a copy of the program's statics when it's spawned: numbers, and arrays
+/// with their elements, views of string literals included. What it changes stays its
+/// own, and what the spawning thread changes afterwards doesn't reach it.
+#[test]
+fn workers_get_copies_of_statics() {
+    prints(
+        r#"import zink.thread.*;
+
+class Kind { string name; i64 weight; }
+
+i64 counter = 10;
+Kind[..>] KINDS = [];
+i64[..>] PRIMES = [];
+
+void main() {
+    KINDS +> new Kind("stone", 3) +> new Kind("dirt", 1);
+    PRIMES +> 2 +> 3 +> 5;
+    counter = 42;
+    queue<i64> back = [];
+    Worker w = thread.spawn(() => {
+        counter += 1;
+        PRIMES +> 7;
+        back.put(counter);
+        back.put(PRIMES.len);
+        println("${KINDS[0].name} ${KINDS[1].weight} ${PRIMES}");
+    });
+    i64 theirs = back.get();
+    i64 len = back.get();
+    w.join();
+    println("${counter} ${theirs} ${PRIMES.len} ${len}");
+}
+"#,
+        "stone 1 [2, 3, 5, 7]\n42 43 3 4\n",
+    );
+}
+
+/// A failure nothing reads in a worker stops the program, as in main; and lines from many
+/// workers come out whole.
+#[test]
+fn worker_failures_and_output() {
+    let exe = build(
+        r#"import zink.thread.*;
+
+i64 parse(string s) { return i64.parse(s); }
+
+void main(string[.] args) {
+    if (args[0] == "fail") {
+        Worker w = thread.spawn(() => {
+            i64 n = parse("nope");
+            println("not reached ${n}");
+        });
+        w.join();
+        println("not reached either");
+        return;
+    }
+    Worker[..>] ws = [];
+    for (i64 t = 0; t < 8; t++) {
+        ws +> thread.spawn(() => {
+            for (i64 k = 0; k < 500; k++) { println("worker ${t} line ${k} ------------------------------ end"); }
+        });
+    }
+    for (Worker& w : ws) { w.join(); }
+}
+"#,
+    );
+    let r = exec(&exe, &["fail"]);
+    assert_eq!(r.code, 1);
+    assert_eq!(r.stdout, "");
+    assert!(
+        r.stderr
+            .contains("prog.zn:3: `parse` failed with INVALID, and nothing read its status"),
+        "{}",
+        r.stderr
+    );
+    let r = exec(&exe, &["lines"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let lines: Vec<&str> = r.stdout.lines().collect();
+    assert_eq!(lines.len(), 4000);
+    for l in &lines {
+        let parts: Vec<&str> = l.split(' ').collect();
+        assert!(
+            parts.len() == 6 && parts[0] == "worker" && parts[2] == "line" && parts[5] == "end",
+            "{:?}",
+            l
+        );
+    }
+}

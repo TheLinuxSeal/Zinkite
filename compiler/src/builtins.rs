@@ -697,6 +697,26 @@ pub fn pool_method(e: &Ty, name: &str) -> Vec<Sig> {
     }
 }
 
+/// Methods on `queue<T>` (STDLIB §10.3). None is `mut`: a queue is a handle, so a
+/// worker's read-only copy of one puts and gets as well as the original. `duration` is
+/// zink.time's `Duration`, when the program has it, for `get` with a timeout.
+pub fn queue_method(e: &Ty, name: &str, duration: Option<Ty>) -> Vec<Sig> {
+    match name {
+        "put" => vec![Sig::new(name, vec![e.clone()], Ty::Void).fails()],
+        "get" => {
+            let mut v = vec![Sig::new(name, vec![], e.clone()).fails()];
+            if let Some(d) = duration {
+                v.push(Sig::new(name, vec![d], e.clone()).fails());
+            }
+            v
+        }
+        "poll" => vec![Sig::new(name, vec![], e.clone()).fails()],
+        "close" => vec![Sig::new(name, vec![], Ty::Void)],
+        "limit" => vec![Sig::new(name, vec![Ty::i64()], Ty::Void).fails()],
+        _ => Vec::new(),
+    }
+}
+
 /// Methods on a `u8` array that take it as a `string`, converting it to a slice: a capped
 /// ring or gap buffer is made one block for them (DESIGN §4.10). The code generator and
 /// the lifetimes pass both follow this list.
