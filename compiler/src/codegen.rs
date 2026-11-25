@@ -29,6 +29,7 @@ use crate::types::*;
 mod generics;
 mod interfaces;
 mod lambdas;
+mod layouts;
 mod maps;
 mod pools;
 mod records;
@@ -185,6 +186,21 @@ struct Gen<'p, 'a> {
     /// For the copy `method_version` is about to generate: its bound parameters and the
     /// C parameters it takes for them.
     copy_for: Option<(BoundParams, Vec<String>)>,
+    /// Copies of functions for the array layouts passed to them (`layouts.rs`): by the
+    /// function and the layouts, the copy's name; and those waiting to be generated.
+    layout_copies: HashMap<String, String>,
+    layout_queue: Vec<layouts::LayoutCopy>,
+    /// For the copy being generated: the parameters it changes, and the call it was made
+    /// for.
+    layout_for: Option<(layouts::Over, (usize, Span))>,
+    /// In such a copy: each name of a changed parameter, with its type there; the pushes
+    /// into one, which can fail; and the call it was made for.
+    layout_over: HashMap<(u32, u32), Ty>,
+    extra_unchecked: HashMap<(u32, u32), String>,
+    layout_origin: Option<(usize, Span)>,
+    /// The next expression is an argument for a method's plain parameter, a read-only
+    /// copy for the call: one with a growable field may share its storage.
+    borrow_arg: bool,
     /// Inlined lambda block bodies being generated: result, end label, result type.
     inline_ret: Vec<(String, String, Ty)>,
     /// Where a status that the lambda being inlined returns goes (DESIGN §9.3).
@@ -338,6 +354,15 @@ fn is_ref(t: &Ty) -> bool {
     matches!(t, Ty::Ref(_)) || matches!(t, Ty::Nullable(x) if matches!(**x, Ty::Ref(_)))
 }
 
+/// The type a `switch` compares its value as: an array of text as a view of it, which
+/// the cases' strings are.
+fn switch_ty(t: Ty) -> Ty {
+    match t {
+        Ty::Array(e, _) => Ty::Slice(e),
+        t => t,
+    }
+}
+
 /// A literal's type once nothing else decides it.
 fn settle(t: &Ty) -> Ty {
     match t {
@@ -409,6 +434,13 @@ impl<'p, 'a> Gen<'p, 'a> {
             bound_copies: HashMap::new(),
             copy_queue: Vec::new(),
             copy_for: None,
+            layout_copies: HashMap::new(),
+            layout_queue: Vec::new(),
+            layout_for: None,
+            layout_over: HashMap::new(),
+            extra_unchecked: HashMap::new(),
+            layout_origin: None,
+            borrow_arg: false,
             inline_ret: Vec::new(),
             lambda_fail: Vec::new(),
             call_names: Vec::new(),
@@ -752,6 +784,9 @@ impl<'p, 'a> Gen<'p, 'a> {
 
     /// The type the checker recorded at a span, in the current instantiation.
     fn ty_at(&self, span: Span) -> Ty {
+        if let Some(t) = self.layout_over.get(&key(span)) {
+            return t.clone();
+        }
         match self.facts.types.get(&key(span)) {
             Some(t) => self.sb(t),
             None => Ty::Unknown,
@@ -832,6 +867,17 @@ impl<'p, 'a> Gen<'p, 'a> {
                     ));
                 }
                 name
+            }
+            // Variable-size records in tuples, maps, sets and pools aren't supported yet:
+            // each is one run of bytes of its own length, which these keep at a fixed size.
+            Ty::Tuple(ts) if ts.iter().any(|t| self.vs_class(t)) => {
+                self.unsupported(span, "a variable-size record in a tuple")
+            }
+            Ty::Map(k, v) if self.vs_class(k) || self.vs_class(v) => {
+                self.unsupported(span, "variable-size records in a hash map")
+            }
+            Ty::Set(e) | Ty::Pool(e) if self.vs_class(e) => {
+                self.unsupported(span, "variable-size records in a set or a pool")
             }
             Ty::Tuple(ts) => {
                 let cs: Vec<String> = ts.iter().map(|t| self.cty(t, span)).collect();
@@ -929,6 +975,9 @@ impl<'p, 'a> Gen<'p, 'a> {
 
     fn program(&mut self) {
         let prog = self.prog;
+        if !self.one_main() {
+            return;
+        }
         (self.aliased, self.owned_arrays) = self.alias_scan();
         // Struct definitions for every class.
         for (id, c) in prog.classes.iter().enumerate() {
@@ -1020,7 +1069,11 @@ impl<'p, 'a> Gen<'p, 'a> {
             self.drain_lib();
             self.drain_insts();
             self.drain_copies();
-            if self.lib_queue.is_empty() && self.inst_queue.is_empty() && self.copy_queue.is_empty()
+            self.drain_layouts();
+            if self.lib_queue.is_empty()
+                && self.inst_queue.is_empty()
+                && self.copy_queue.is_empty()
+                && self.layout_queue.is_empty()
             {
                 break;
             }
@@ -1070,6 +1123,9 @@ impl<'p, 'a> Gen<'p, 'a> {
         self.is_main = false;
         self.locals.clear();
         self.lam_binds.clear();
+        self.layout_over.clear();
+        self.extra_unchecked.clear();
+        self.layout_origin = None;
         self.out.clear();
         self.indent = 1;
         self.defers.clear();
@@ -1205,12 +1261,28 @@ impl<'p, 'a> Gen<'p, 'a> {
             let st = self.cty(&self.this_class(), span);
             params.push(format!("{}* self", st));
         }
-        let ptys: Vec<Ty> = m.params.iter().map(|t| self.sb(t)).collect();
+        let mut ptys: Vec<Ty> = m.params.iter().map(|t| self.sb(t)).collect();
+        // A copy for the array layouts it's given: those parameters have the arguments'
+        // types (DESIGN §4.3, `layouts.rs`).
+        let layout = self.layout_for.take();
+        if let Some((over, _)) = &layout {
+            for (k, t) in over {
+                if let Some(p) = ptys.get_mut(*k) {
+                    *p = t.clone();
+                }
+            }
+        }
         params.extend(self.params_c(&m.decl.params, &ptys));
+        if let Some((over, origin)) = &layout
+            && let Some(body) = &m.decl.body
+        {
+            self.layout_origin = Some(*origin);
+            self.layout_body(m, over, body);
+        }
         // A copy for lambdas: its bound parameters aren't passed, and what the lambdas
         // read is (DESIGN §9.3).
         let copy = self.copy_for.take();
-        let is_copy = copy.is_some();
+        let is_copy = copy.is_some() || layout.is_some();
         if let Some((bound, extra)) = copy {
             let off = params.len() - m.decl.params.len();
             for (k, b) in bound.iter().rev() {
@@ -2235,7 +2307,68 @@ impl<'p, 'a> Gen<'p, 'a> {
         })
     }
 
-    /// An empty array on data stacks of its own: one, or two for a cursor array.    /// An empty array on data stacks of its own: one, or two for a cursor array.
+    /// Whether the program has the one `main` it starts from: a top-level function of one
+    /// of its files (DESIGN §6.1). It's reported when it has none, or more than one.
+    fn one_main(&mut self) -> bool {
+        let prog = self.prog;
+        let mut mains = Vec::new();
+        let mut in_class = None;
+        for c in &prog.classes {
+            if crate::stdlib::reserved(&prog.files[c.file].package) {
+                continue;
+            }
+            for m in c.methods.iter().filter(|m| m.name == "main") {
+                if c.kind == ClassKind::Script {
+                    mains.push((c.file, m.decl.name.span));
+                } else if in_class.is_none() {
+                    in_class = Some((c.file, m.decl.name.span, c.name.clone()));
+                }
+            }
+        }
+        let help = "write `void main() { ... }` outside any class (DESIGN §6.1)";
+        match mains.as_slice() {
+            [_] => true,
+            [] => {
+                let d = match &in_class {
+                    Some((file, span, class)) => (
+                        *file,
+                        Diagnostic::error(
+                            *span,
+                            format!("this program has no `main`: `{}.main` is a method of a class, not where a program starts", class),
+                        )
+                        .with_help(help),
+                    ),
+                    None => (
+                        0,
+                        Diagnostic::error(Span::default(), "this program has no `main` to start from")
+                            .with_help(help),
+                    ),
+                };
+                self.errs.push(d);
+                false
+            }
+            [(f0, s0), rest @ ..] => {
+                let (line, _) = self.sources[*f0].line_col(s0.start as usize);
+                let first = format!("{}:{}", self.sources[*f0].name, line);
+                for (f, s) in rest {
+                    self.errs.push((
+                        *f,
+                        Diagnostic::error(
+                            *s,
+                            "a program starts from one `main`, and this is another",
+                        )
+                        .with_help(format!(
+                            "the first is at {}; give this one another name",
+                            first
+                        )),
+                    ));
+                }
+                false
+            }
+        }
+    }
+
+    /// An empty array on data stacks of its own: one, or two for a cursor array.
     fn stack_init(&mut self, ty: &Ty) -> String {
         if matches!(ty, Ty::Map(..) | Ty::Set(_)) {
             let a = self.site();
@@ -2844,7 +2977,7 @@ impl<'p, 'a> Gen<'p, 'a> {
     }
 
     fn switch_stmt(&mut self, sw: &ast::Switch) {
-        let st = settle(self.ty(&sw.scrutinee).unref());
+        let st = switch_ty(settle(self.ty(&sw.scrutinee).unref()));
         let v = self.expr(&sw.scrutinee, &st);
         let t = self.tmp("sw");
         let ct = self.cty(&st, sw.span);
@@ -2960,6 +3093,20 @@ impl<'p, 'a> Gen<'p, 'a> {
 
     /// A C expression for `e`, converted to type `want`.
     fn expr(&mut self, e: &Expr, want: &Ty) -> String {
+        // A value with a growable field can't be copied yet: the copy would share the
+        // field's storage with the original, as `logs +> a` once did. A method's plain
+        // parameter may share it, since it's a read-only copy for the call.
+        let borrow = std::mem::take(&mut self.borrow_arg);
+        if !borrow
+            && matches!(
+                strip_paren(e).kind,
+                E::Ident(_) | E::Member { .. } | E::Index { .. }
+            )
+            && !is_ref(want)
+            && self.holds_growable(&settle(want))
+        {
+            return self.unsupported(e.span, "copying a value with a growable field");
+        }
         match &e.kind {
             E::Int {
                 value,
@@ -3018,6 +3165,17 @@ impl<'p, 'a> Gen<'p, 'a> {
                     && self.growable_fields(*id) > 0
                 {
                     return self.unsupported(e.span, "a temporary value with a growable field");
+                }
+                // A constructor that can fail: a failure nothing reads stops the program,
+                // as a function's does (DESIGN §7.6).
+                if matches!(self.facts.calls.get(&key(e.span)), Some(f) if matches!(f.origin, Origin::Ctor(c, i) if self.prog.classes[c].ctors[i].can_fail))
+                {
+                    let c = self.call_any(e);
+                    return if c.fails {
+                        format!("({}).v", c.code)
+                    } else {
+                        c.code
+                    };
                 }
                 let t = self.tmp("new");
                 let st = self.construct(&t, args, e.span);
@@ -3218,6 +3376,23 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
             (Ty::Prim(_) | Ty::IntLit { .. } | Ty::FloatLit, Ty::Prim(p)) => {
                 format!("(({}){})", prim_c(*p), code)
+            }
+            // A fixed or capped array copied from an array of another layout takes its
+            // elements through a slice, so it stops the program when they don't fit.
+            (Ty::Array(fe, _), Ty::Array(..))
+                if cap_of(to) > 0 && self.cty(from, span) != self.cty(to, span) =>
+            {
+                let st = Ty::Slice(fe.clone());
+                let s = self.conv(code, from, &st, span);
+                self.conv(&s, &st, to, span)
+            }
+            (Ty::Array(..), Ty::Array(..)) if self.cty(from, span) != self.cty(to, span) => {
+                let what = format!(
+                    "copying a {} into a {}",
+                    self.prog.show(from),
+                    self.prog.show(to)
+                );
+                self.unsupported(span, &what)
             }
             (Ty::Class(..), Ty::Class(..))
             | (Ty::Tuple(_), Ty::Tuple(_))
@@ -4431,6 +4606,29 @@ impl<'p, 'a> Gen<'p, 'a> {
             let el = lu.elem().cloned().unwrap_or(Ty::u8());
             let a = self.expr(l, &Ty::Slice(Box::new(el.clone())));
             let b = self.expr(r, &Ty::Slice(Box::new(el.clone())));
+            // Elements whose bytes aren't their value, as text views and floats, are
+            // compared one by one with `==`.
+            if matches!(op, BinOp::Eq | BinOp::Ne) && !self.bytes_are_value(&el) {
+                let ec = self.cty(&el, span);
+                let Some(each) = self.elem_eq("_xa", "_xb", &el, span) else {
+                    return self.unsupported(
+                        span,
+                        &format!("comparing arrays of {}", self.prog.show(&el)),
+                    );
+                };
+                let eq = format!(
+                    "({{ zr_slice _ea = {}, _eb = {}; bool _r = _ea.n == _eb.n; for (int64_t _i = 0; _r && _i < _ea.n; _i++) {{ {ec} _xa = (({ec} *)_ea.p)[_i], _xb = (({ec} *)_eb.p)[_i]; _r = {}; }} _r; }})",
+                    a,
+                    b,
+                    each,
+                    ec = ec
+                );
+                return if op == BinOp::Ne {
+                    format!("(!{})", eq)
+                } else {
+                    eq
+                };
+            }
             let sz = self.elem_size(&el, span);
             return match op {
                 BinOp::Eq => format!("zr_eq({}, {}, {})", a, b, sz),
@@ -4469,6 +4667,36 @@ impl<'p, 'a> Gen<'p, 'a> {
                 let b = self.expr(r, &common);
                 format!("({} {} {})", a, sym, b)
             }
+        }
+    }
+
+    /// Whether two values of this type are equal exactly when their bytes are: integers,
+    /// `bool` and enums. Not floats (`-0.0 == 0.0`, and a NaN equals nothing), views (equal
+    /// text in two places) or classes (padding).
+    fn bytes_are_value(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Prim(p) => !p.is_float(),
+            Ty::Class(c, _) => self.prog.classes[*c].kind == ClassKind::Enum,
+            _ => false,
+        }
+    }
+
+    /// `==` on two elements of type `el`, held in the C variables `a` and `b`, or None when
+    /// that comparison isn't generated.
+    fn elem_eq(&mut self, a: &str, b: &str, el: &Ty, span: Span) -> Option<String> {
+        match el {
+            t if self.bytes_are_value(t) => Some(format!("{} == {}", a, b)),
+            Ty::Prim(p) if p.is_float() => Some(format!("{} == {}", a, b)),
+            Ty::Slice(e) | Ty::View(e) => {
+                let e = (**e).clone();
+                if self.bytes_are_value(&e) {
+                    let sz = self.elem_size(&e, span);
+                    Some(format!("zr_eq({}, {}, {})", a, b, sz))
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
@@ -4687,7 +4915,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             end: end.clone(),
             ty: want.clone(),
         });
-        let st = settle(self.ty(&sw.scrutinee).unref());
+        let st = switch_ty(settle(self.ty(&sw.scrutinee).unref()));
         let v = self.expr(&sw.scrutinee, &st);
         let t = self.tmp("sw");
         let sct = self.cty(&st, sw.span);
@@ -4990,7 +5218,13 @@ impl<'p, 'a> Gen<'p, 'a> {
     }
 
     fn check_unread(&mut self, mut c: CallOut, span: Span) -> CallOut {
-        let Some(name) = self.facts.unchecked.get(&key(span)).cloned() else {
+        let Some(name) = self
+            .facts
+            .unchecked
+            .get(&key(span))
+            .or_else(|| self.extra_unchecked.get(&key(span)))
+            .cloned()
+        else {
             return c;
         };
         if !c.fails {
@@ -5175,6 +5409,37 @@ impl<'p, 'a> Gen<'p, 'a> {
                     cargs.push("self".into());
                 }
                 let runtime_c = m.c_name.as_deref().filter(|n| n.starts_with("zr_"));
+                // C fills only the array it was declared with: an array on a data stack.
+                if m.c_name.is_some()
+                    && let Some((k, t)) = self.layout_needs(args, rest, 0).first().cloned()
+                {
+                    let (given, takes) = (
+                        self.prog.show(t.unref()),
+                        self.prog.show(settle(&rest[k]).unref()),
+                    );
+                    let what = format!(
+                        "passing a `{}` to `{}`, whose C takes a `{}`",
+                        given, m.name, takes
+                    );
+                    let lib = (
+                        format!(
+                            "this call can't take a `{}` yet: the library's C fills only a `{}`",
+                            given, takes
+                        ),
+                        format!(
+                            "pass a `{}` and copy what you need from it (DESIGN §4.3)",
+                            takes
+                        ),
+                    );
+                    let u = self.layout_unsupported(args[k].expr.span, &what, Some(lib));
+                    {
+                        return CallOut {
+                            code: u,
+                            ret,
+                            fails: false,
+                        };
+                    }
+                }
                 if runtime_c.is_some() {
                     // The runtime's own C takes Zinkite's representations as they are.
                     for (a, p) in args.iter().zip(rest) {
@@ -5194,8 +5459,11 @@ impl<'p, 'a> Gen<'p, 'a> {
                     }
                 } else {
                     // A lambda that captures goes to a copy of the function made for it
-                    // (DESIGN §9.3), as does one this copy was given, passed on.
+                    // (DESIGN §9.3), as does one this copy was given, passed on. An array
+                    // of another layout than its parameter's goes to a copy for that
+                    // layout (DESIGN §4.3).
                     let shift = usize::from(recv_arg);
+                    let over = self.layout_needs(args, rest, shift);
                     let mut bound = Vec::new();
                     for (k, (a, p)) in args.iter().zip(rest).enumerate() {
                         if matches!(settle(p), Ty::Func(..))
@@ -5204,12 +5472,32 @@ impl<'p, 'a> Gen<'p, 'a> {
                             bound.push((k + shift, b));
                             continue;
                         }
+                        let p = over
+                            .iter()
+                            .find(|(j, _)| *j == k + shift)
+                            .map_or(p, |(_, t)| t);
+                        self.borrow_arg = true;
                         cargs.push(self.arg_code(&a.expr, p));
+                        self.borrow_arg = false;
+                    }
+                    if !bound.is_empty() && !over.is_empty() {
+                        let u = self.unsupported(
+                            e.span,
+                            "a call passing both a lambda that captures and an array of another layout than its parameter's",
+                        );
+                        return CallOut {
+                            code: u,
+                            ret,
+                            fails: false,
+                        };
                     }
                     if !bound.is_empty() {
                         let (name, extra) = self.bound_copy(c, i, &fname, &map, &bound, e.span);
                         fname = name;
                         cargs.extend(extra);
+                    }
+                    if !over.is_empty() {
+                        fname = self.layout_copy(c, i, &fname, &map, over, e.span);
                     }
                 }
                 // A call to itself copies its base case first (DESIGN §14.2).
@@ -5417,15 +5705,23 @@ impl<'p, 'a> Gen<'p, 'a> {
                         let t = params.first().cloned().unwrap_or(ret.clone());
                         let vs: Vec<String> = (0..args.len()).map(|k| arg(self, k)).collect();
                         let ct = self.cty(&t, span);
+                        // In their natural order, so a NaN counts as the largest float
+                        // (STDLIB §2.4).
                         let code = match f.as_str() {
-                            "min" => format!(
-                                "({{ {} _a = {}, _b = {}; _b < _a ? _b : _a; }})",
-                                ct, vs[0], vs[1]
-                            ),
-                            "max" => format!(
-                                "({{ {} _a = {}, _b = {}; _a < _b ? _b : _a; }})",
-                                ct, vs[0], vs[1]
-                            ),
+                            "min" => {
+                                let less = self.natural_less("_b", "_a", &t, span);
+                                format!(
+                                    "({{ {} _a = {}, _b = {}; {} ? _b : _a; }})",
+                                    ct, vs[0], vs[1], less
+                                )
+                            }
+                            "max" => {
+                                let less = self.natural_less("_a", "_b", &t, span);
+                                format!(
+                                    "({{ {} _a = {}, _b = {}; {} ? _b : _a; }})",
+                                    ct, vs[0], vs[1], less
+                                )
+                            }
                             // INVALID, and 0, when the range is empty.
                             "clamp" => {
                                 let rt = self.result_ty(&t, span);
@@ -5566,7 +5862,7 @@ impl<'p, 'a> Gen<'p, 'a> {
         }
         if let Ty::Namespace(ns) = &bt {
             if *ns == "extern" && name == "errno" {
-                return ok("((uint8_t)errno)".into(), Ty::u8());
+                return ok("zr_errno_status(errno)".into(), Ty::u8());
             }
             if *ns == "status" && name == "message" {
                 return ok(format!("zr_status_message({})", arg(self, 0)), Ty::string());
@@ -6164,20 +6460,25 @@ impl<'p, 'a> Gen<'p, 'a> {
                     el,
                 )
             }
-            "min" | "max" if matches!(el, Ty::Prim(_)) => {
+            "min" | "max" if matches!(el, Ty::Prim(_)) || el.is_string() => {
                 let rt = res(self);
-                let cmp = if m == "min" { "<" } else { ">" };
+                // In their natural order, which puts a NaN last (STDLIB §7.1).
+                let at = arr.at("_i");
+                let less = if m == "min" {
+                    self.natural_less(&at, "_r.v", &el, span)
+                } else {
+                    self.natural_less("_r.v", &at, &el, span)
+                };
                 fail(
                     format!(
-                        "({{ {} {} _r = {{0, 192}}; if ({}) {{ _r.v = {}; _r.s = 0; for (int64_t _i = 1; _i < {}; _i++) if ({} {} _r.v) _r.v = {}; }} _r; }})",
+                        "({{ {} {} _r = {{0, 192}}; if ({}) {{ _r.v = {}; _r.s = 0; for (int64_t _i = 1; _i < {}; _i++) if ({}) _r.v = {}; }} _r; }})",
                         ptr,
                         rt,
                         len,
                         arr.at("0"),
                         len,
-                        arr.at("_i"),
-                        cmp,
-                        arr.at("_i")
+                        less,
+                        at
                     ),
                     el,
                 )

@@ -1208,8 +1208,8 @@ squares (7): [1, 4, 9, 16], last 16
 
 - **A variable-size local lives on a data stack of its own**, so it falls under the
   [recursion rule](#recursion).
-- **Not yet**: variable-size values in hash maps, pools and tuples
-  ([What isn't there yet](15-not-yet.md)).
+- **Not yet**: variable-size values in hash maps, sets, pools and tuples, which the C
+  backend refuses ([What isn't there yet](15-not-yet.md)).
 - The reasons are in [REFERENCES §6](../REFERENCES.md#6-variable-size-values-rule-v).
 
 ## Rule L: links
@@ -1485,9 +1485,10 @@ example.zn:12:5: error: hashmap values can't grow
 help: use a composite key, or values that are indexes into one shared array (DESIGN §4.14)
 ```
 
-**Not yet**: copying a value with a growable field (`Log c = a;`), a temporary one
-(`logs +> new Log(0)`) and a static one pass `zink check`, and the C backend reports that
-it doesn't support them yet. Nor is there yet a check that nothing grows an array while text is being
+**Not yet**: copying a value with a growable field (`Log c = a;`, `logs +> a`, or
+returning it), a temporary one (`logs +> new Log(0)`) and a static one pass `zink check`,
+and the C backend reports that it doesn't support them yet. Passing one to a function's
+plain parameter works: the parameter is a read-only copy for the call. Nor is there yet a check that nothing grows an array while text is being
 built in it. The reasons for the rule are in
 [REFERENCES §8](../REFERENCES.md#8-data-stacks-rule-g).
 
@@ -1965,7 +1966,7 @@ Designed and not implemented yet; [What isn't there yet](15-not-yet.md) collects
 - copying a value with a growable field, a temporary one, and a static one (a static
   root included), in the C backend;
 - rule G's check that nothing grows an array while text is being built in it;
-- variable-size values in hash maps, pools and tuples;
+- variable-size values in hash maps, sets, pools and tuples;
 - on an array of links, `push`, the removals that give an element back, slices, and
   passing it whole; and constructors that can fail, for a value with self-relative links;
 - leaving out L4's width check when an array's reservation is small enough for the width.

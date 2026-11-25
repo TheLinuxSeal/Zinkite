@@ -251,8 +251,10 @@ help: `(i32%) x` wraps and `(i32|) x` saturates, if that's what you want (DESIGN
 
 - **A signed type's minimum can be written after `-`**: `i8 lo = -128;` and
   `i64 m = -9223372036854775808;` compile, as in Java, though `128` alone doesn't fit an
-  `i8`. With a suffix, `-128i8`, the compiler rejects it today; write the type on the
-  variable instead, or `i8.MIN`.
+  `i8`, and so does `-128i8` with a suffix.
+- **A literal with nothing to give it a type is an `i64`**, so `var m =
+  9223372036854775808;` is an error that says to write the type: `u64 m =
+  9223372036854775808;`.
 - **A literal above `i128.MAX` is a `u128`**, the only type that holds it:
   `var all = 0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff;` is `u128.MAX`.
 
@@ -707,9 +709,8 @@ example.zn:4:13: error: `T` would be both u8 and i32 here; no conversion is appl
 ```
 
 - **`clamp(x, lo, hi)` fails with `INVALID`** when `lo > hi`, and gives 0.
-- **With a NaN**, `min` and `max` give what `<` decides today, so the result depends on the
-  order of the arguments: `min(f64.NAN, 1.0)` is NaN and `min(1.0, f64.NAN)` is 1.0. The
-  design puts NaN last, as sorting does
+- **NaN counts as the largest float** in `min` and `max`, as in sorting, whatever the order
+  of the arguments: `min(f64.NAN, 1.0)` is 1.0, and `max(1.0, f64.NAN)` is NaN
   ([DESIGN §10.1](../DESIGN.md#101-built-in-bounds-decided)).
 - **`abs` of a type's minimum overflows**, which stops the program: `abs(i64.MIN)`.
 - `x.compareTo(y)` gives -1, 0 or 1, as an `i32`.
@@ -1293,6 +1294,6 @@ example.zn:1:4: error: `main` takes no parameters, or `string[.] args` (DESIGN �
 ```
 
 A file with no `main` passes `zink check`, which checks a file whether or not it is a whole
-program; running or building it fails when the C is linked, with an error that blames
-`zink`. The reasons for all of this are in
+program; running or building it is an error, `this program has no `main` to start from`,
+and so is a second `main`. The reasons for all of this are in
 [DESIGN §8.6](../DESIGN.md#86-script-files-decided).

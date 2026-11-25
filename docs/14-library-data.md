@@ -311,8 +311,8 @@ void base64.decodeUrl(string text, u8[..>]& out)   // appended; padding is optio
   zeros, so `((u8) 10).hex()` is `a` ([Text](03-text.md#formatting-numbers)). On a `u8` array or a string it
   encodes each byte as two digits, so `"hi".hex()` is `6869`. `hex()` is in `zink.lang`;
   only `hex.decode` needs the import.
-- **`hex.decode` takes either case.** It appends as it goes, so on a bad digit `out` keeps
-  the bytes decoded before it.
+- **`hex.decode` takes either case, and is all or nothing.** It checks the text before it
+  appends, so on a bad digit `out` is as it was.
 - **base64 decoding is strict, and all or nothing.** `INVALID` is a character outside the
   alphabet, whitespace included, a length that can't be base64, padding that's missing or
   out of place, or leftover bits that aren't zero (RFC 4648 §3.5, so `"QR=="` is

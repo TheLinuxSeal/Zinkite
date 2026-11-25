@@ -2210,3 +2210,104 @@ fn workers_take_only_flat_values() {
         "`queue` is a built-in name",
     );
 }
+
+// ---------------------------------------------------------------- bugs the documentation found
+
+/// A field initializer runs before the constructor, in declaration order, so it reads
+/// only fields set before it, by their own initializers or by starting empty; and it
+/// can't use `this` or call the class's methods, which could read the rest. One once read
+/// such a field before anything set it.
+#[test]
+fn field_initializers_read_only_fields_set_before_them() {
+    ok(
+        "class C { i64 a = 1; i64 b = a + 1; u8[..>] t; i64 n = t.len; i64 k = this.a; }\nvoid main() { }\n",
+    );
+    rejects(
+        "class D { i64 w; i64 area = w * 2; }\nvoid main() { }\n",
+        "`w` can't be read in `area`'s initializer: it has no initializer, so it isn't set until the constructor runs",
+    );
+    rejects(
+        "class D { i64 x = this.y; i64 y = 5; }\nvoid main() { }\n",
+        "`y` can't be read in `x`'s initializer: it is declared after `x`",
+    );
+    rejects(
+        "class E { i64 x = 1; i64 twice() { return x * 2; } i64 y = twice(); }\nvoid main() { }\n",
+        "`twice` can't be called in `y`'s initializer, which runs before the constructor",
+    );
+}
+
+/// An integer literal nothing gives a type is an `i64`, so one too large for it is an
+/// error, not a wrapped value; and `-128i8` is `i8.MIN`, though `128i8` doesn't fit.
+#[test]
+fn literals_fit_the_type_they_take() {
+    rejects(
+        &body("var m = 9223372036854775808;"),
+        "this literal doesn't fit in i64, the type a literal takes when nothing else gives it one | write the variable's type, such as `u64`",
+    );
+    rejects(&body("var m = 18446744073709551616;"), "such as `u128`");
+    ok(&body(
+        "var a = -9223372036854775808; i8 b = -128i8; i64 c = -9223372036854775808i64; i16 d = -32768i16;",
+    ));
+    rejects(&body("i8 b = 128i8;"), "128 doesn't fit in i8");
+}
+
+/// A block-bodied lambda may return several results, as an expression body may.
+#[test]
+fn block_lambdas_return_tuples() {
+    ok(&body(
+        "func(i64 => (i64, i64)) f = (i64 x) => { if (x > 2) { return (x, 1); } return (0, x); };\n(i64 a, i64 b) = f(3);",
+    ));
+}
+
+/// An array's `len` is worked out, not stored: assigning it was accepted, and made C
+/// that didn't compile.
+#[test]
+fn built_in_properties_cant_be_assigned() {
+    rejects(
+        &body("i64[..>] a = [];\na.len = 2;"),
+        "`len` is worked out from the value, so it can't be assigned | `truncate(n)` shortens an array",
+    );
+}
+
+/// Static methods in interfaces are undecided, and refused where they're declared, not
+/// asked of every class that implements the interface.
+#[test]
+fn interfaces_have_no_static_methods() {
+    let errs = errors(
+        "interface Shape { static i64 count(); f64 area(); }\nclass Sq implements Shape { f64 s; f64 area() { return s * s; } }\nvoid main() { }\n",
+    );
+    assert_eq!(
+        errs,
+        vec!["static methods in interfaces are undecided (DESIGN §6.3, §17)".to_string()]
+    );
+}
+
+/// A capacity is at least 1.
+#[test]
+fn arrays_have_room_for_something() {
+    rejects(
+        &body("i64[..~0] a = [];"),
+        "an array's capacity is at least 1, and this one is 0",
+    );
+    rejects(
+        &body("i64[.0] a = [];"),
+        "an array's capacity is at least 1",
+    );
+}
+
+/// Messages read as they're said: "an `i64[:]`", and an enum isn't called a class value.
+#[test]
+fn messages_name_types_as_theyre_said() {
+    rejects(
+        &body("i64[:] xs = [1, 2];\nxs[0] = 3;"),
+        "an `i64[:]` is a read-only view",
+    );
+    rejects(
+        &body("u16[:] xs = [1, 2];\nxs[0] = 3;"),
+        "a `u16[:]` is a read-only view",
+    );
+    rejects(
+        "enum Color { RED }\nvoid main() { Color c = Color.RED; println(\"${c}\"); }\n",
+        "an enum value can't be printed until default formatting is decided",
+    );
+}

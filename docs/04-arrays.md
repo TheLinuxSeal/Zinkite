@@ -457,10 +457,9 @@ example.zn:15: `+>` failed with FULL, and nothing read its status
 - **A capped `u8` array is text**, with `append`, which fails with `FULL` the same way
   ([Text](03-text.md)).
 - **A cap must be at least 1**, so a full array always has a last element.
-- **Not yet:** a parameter that takes an array on a data stack by reference, such as
-  `i64[..>]& out`, doesn't accept a capped array correctly: the call compiles, and the
-  program crashes. Pass a capped array to a parameter of its own type (`i64[..~4]& out`)
-  ([What isn't there yet](15-not-yet.md)).
+- **A capped array can go to a parameter typed by what it allows**, such as
+  `i64[..>]& out`. The function gets a copy for the capped layout, in which a push can fail
+  with `FULL` ([Arrays as parameters](#arrays-as-parameters)).
 
 ## Deques and arrays that change at the start
 
@@ -910,7 +909,7 @@ void main() {
 ```
 
 ```error
-example.zn:4:5: error: can't assign to this: a `i64[:]` is a read-only view
+example.zn:4:5: error: can't assign to this: an `i64[:]` is a read-only view
 ```
 
 - **A slice can't outlive its array**, and a removal from the array can't happen while a
@@ -1160,11 +1159,15 @@ void main() {
 [0, 1, 2] [0, 1] [0] [1, 100]
 ```
 
-- **Not yet:** the compiler is meant to compile such a function once per layout passed to
-  it. Today a `T[..>]&` parameter handles arrays on data stacks without a cursor, such as
-  `T[..>]`, `T[..~]` and `T[~.~]`: a capped array passed to one crashes the program, and a
-  cursor array loses what the function appends. The checker accepts both
-  ([What isn't there yet](15-not-yet.md)).
+- **Such a function is compiled once per layout passed to it**: a capped, fixed, cursor or
+  double-ended array gets a copy of the function in which the parameter has its own type,
+  as do the functions it passes the parameter on to. In a copy for a capped array, a push
+  can fail with `FULL`, and stops the program unless something reads its status.
+- **Not yet** in such a copy: binding a reference to the parameter, assigning it, or
+  capturing it in a lambda passed to a function of the program's (one passed to a built-in
+  method, as `sort`'s comparator, is fine). Each is reported where it is written. A library
+  function whose C fills the array, such as `stdin.read`, takes only an array on a data
+  stack, and says so at the call.
 - **A plain array parameter can't be changed**, and the error says to add `&`:
 
 ```java
@@ -1449,9 +1452,9 @@ void main() {
   variable-size records, values with links, or classes with a growable field.
 - **`sum` needs numbers, and `min` and `max` `ordered` elements.** `sum` of an empty array
   is 0.
-- **Not yet:** `min()` and `max()` on strings, `minIndexBy` and `maxIndexBy`. Also, on
-  floats `min()` and `max()` don't yet put NaN last as the design says: the result depends
-  on where the NaN is ([What isn't there yet](15-not-yet.md)).
+- **On floats, `min()` and `max()` put NaN last**, as sorting does: `max()` of an array
+  holding a NaN is NaN, and `min()` is the least of the rest. On strings they compare text.
+- **Not yet:** `minIndexBy` and `maxIndexBy` ([What isn't there yet](15-not-yet.md)).
 
 ## Editing: `pushAll`, `retain`, `dedup`
 
@@ -1560,9 +1563,31 @@ example.zn:5:16: error: only strings can be ordered with `<`; these are i64[..>]
 example.zn:5:25: error: can't compare i64[..>] with u8[..>]
 ```
 
-- **Not yet:** comparing arrays of strings, or of classes with string fields, compares the
-  views rather than the text: equal text in two different buffers compares unequal. Compare
-  them element by element with `==` on the strings ([What isn't there yet](15-not-yet.md)).
+- **Elements compare with `==`**, so arrays of strings compare their text, wherever it is,
+  and arrays of floats follow IEEE 754: `[0.0] == [-0.0]`, and an array holding a NaN
+  isn't equal to itself.
+
+```java
+void main() {
+    u8[..>] one = [];
+    one.append("ab");
+    u8[..>] two = [];
+    two.append("ab");
+    string[.] xs = [one[:]];
+    string[.] ys = [two[:]];
+    f64[.] nan = [f64.NAN];
+    f64[.] zero = [0.0];
+    f64[.] negZero = [-0.0];
+    println("${xs == ys} ${nan == nan} ${zero == negZero}");
+}
+```
+
+```output
+true false true
+```
+
+- **Not yet:** `==` on arrays of classes, which the C backend refuses, as it does `==` on
+  class values ([What isn't there yet](15-not-yet.md)).
 
 ## Arrays of classes
 
@@ -1681,16 +1706,13 @@ or the compiler handles them differently from the design. Chapter 15,
 [What isn't there yet](15-not-yet.md), collects them with everything else.
 
 - `binarySearch`, `lowerBound`, `upperBound` and their `By` forms; `minIndexBy`,
-  `maxIndexBy`; `shuffle`; `min()` and `max()` on strings; `indexOf` and `contains` on
-  arrays of strings, enums and classes.
+  `maxIndexBy`; `shuffle`; `indexOf` and `contains` on arrays of strings, enums and
+  classes.
 - Heaps: `heapPush`, `heapPop` and `heapify` on `T[..~]` arrays
   ([STDLIB §7.2](../STDLIB.md#72-heaps-v1)).
 - Sorting a class by the `compareTo` of `implements ordered`.
 - Caps given by a named constant.
-- A `T[..>]&` parameter given a capped or cursor array.
-- Initializing a capped or fixed array straight from an array on a data stack, without
-  `[:]`.
-- `==` on arrays of strings, or of classes with string fields, comparing the text.
+- `==` on arrays of classes, as on classes.
 - Printing arrays of arrays, enums or classes.
 - The lint that warns about capabilities an array's type allows and the code never uses,
   such as a cursor slot never moved ([DESIGN §4.3](../DESIGN.md#43-layouts-the-compiler-picks-decided)).

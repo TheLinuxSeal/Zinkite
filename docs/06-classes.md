@@ -94,9 +94,27 @@ term 80 5,0 2
   two regions, so only a root can hold one.
 - **A variable-size field** (`u8[.*]`, `T[.]`) makes the class variable-size, with rules of
   its own ([Memory and references](05-memory.md)).
-- **An initializer shouldn't read another field**, since it runs before the constructor
-  assigns them. The compiler doesn't reject one that does yet, and the field then gets an
-  unset value.
+- **An initializer reads only the fields set before it.** Initializers run in declaration
+  order, before the constructor, so `i64 b = a + 1;` can follow `i64 a = 1;`, and a field
+  without an initializer can't be read in one, nor a later field, nor a method called:
+
+```java
+class Rect {
+    i64 w;
+    i64 area = w * 2;
+}
+
+void main() {
+    Rect r = new Rect(3);
+    println("${r.area}");
+}
+```
+
+```error
+example.zn:3:16: error: `w` can't be read in `area`'s initializer: it has no initializer, so it isn't set until the constructor runs
+help: compute it in a constructor (DESIGN §6.2)
+```
+
 
 ## Constructors
 
@@ -271,9 +289,9 @@ void main() {
   non-nullable reference (`T&`, `Shape&`), a non-nullable function, or a value that contains
   one: "`item` has no zero value, so it must be assigned even when the constructor fails". A
   nullable one has `null` as its zero value.
-- **Today a failing `new` whose status nothing reads doesn't stop the program**, as other
-  failures do ([Errors and statuses](07-errors.md)): the program goes on with the zero
-  value. Read the status with `@` wherever a constructor can fail.
+- **A failing `new` whose status nothing reads stops the program**, as other failures do
+  ([Errors and statuses](07-errors.md)). Read the status with `@` wherever a constructor
+  can fail and the program should go on.
 
 ### `new(...)` without the class name
 

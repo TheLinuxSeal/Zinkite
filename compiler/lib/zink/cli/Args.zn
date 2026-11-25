@@ -149,7 +149,8 @@ public class Args {
                 // Letters, combined: -nr, or an option's value attached: -k3.
                 for (i64 j = 1; j < a.len; j++) {
                     u8 letter = a[j];
-                    if (letter == 'h') {
+                    // -h is help unless the program declared its own.
+                    if (letter == 'h' && find("", 'h') < 0) {
                         wantHelp = true;
                         continue;
                     }
@@ -440,7 +441,11 @@ public class Args {
                 println(s.help);
             }
         }
-        print("  -h, --help");
+        if (find("", 'h') < 0) {
+            print("  -h, --help");
+        } else {
+            print("      --help");
+        }
         print(" ".repeat(width - 10 + 4));
         println("show this help and exit");
         if (version.len > 0) {

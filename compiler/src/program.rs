@@ -728,6 +728,14 @@ impl<'a> Program<'a> {
         let can_fail = m.body.as_ref().is_some_and(writes_status);
         let is_static = script || m.modifiers.contains(&Modifier::Static);
         let is_mut = m.modifiers.contains(&Modifier::Mut);
+        if self.classes[id].kind == ClassKind::Interface && m.modifiers.contains(&Modifier::Static)
+        {
+            self.error(
+                file,
+                m.name.span,
+                "static methods in interfaces are undecided (DESIGN §6.3, §17)",
+            );
+        }
         if m.name.name == "delete" {
             self.error(
                 file,
@@ -971,6 +979,17 @@ impl<'a> Program<'a> {
                     cap,
                     size,
                 };
+                if matches!(slots.cap, Some(ast::Cap::Int(0))) {
+                    diags.push(
+                        Diagnostic::error(
+                            t.span,
+                            "an array's capacity is at least 1, and this one is 0",
+                        )
+                        .with_help(
+                            "an array that never holds anything needs no array (DESIGN §4.6)",
+                        ),
+                    );
+                }
                 if cap == CapKind::Varint && !kind.is_frozen() {
                     diags.push(Diagnostic::error(t.span, "`*` is allowed only on frozen arrays, whose slots are all `.` (DESIGN §4.6)"));
                 }

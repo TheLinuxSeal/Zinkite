@@ -1462,8 +1462,9 @@ string cli.version = ""                                             // when set,
 
 - **Each declaration fails with `FULL` past 64**: the declarations sit in a capped table
   inside `Args`, and the values found go in its one growable field.
-- **`-h` and `--help` are always there.** A flag declared with the letter `h` can't be
-  reached by it: `-h` still asks for help, and `--help` lists both.
+- **`--help` is always there, and so is `-h` unless the program takes the letter.** A flag
+  or option declared with `h`, such as `-h` for `--human`, is the program's own, and the
+  help then lists `--help` alone.
 - **Positionals are optional.** A program that needs one checks `cli.has(name)` and calls
   `usageError` without it.
 

@@ -389,10 +389,10 @@ example.zn:3: `append` failed with FULL, and nothing read its status
 
 - On a `u8[..>]` or `u8[..~]` on a data stack, `append` and `+>` can't fail, so they need no
   `@`.
-- **A capped `u8` array passed to a `u8[..>]&` parameter** type-checks, but the code
-  generated for it today treats the array as one on a data stack, and the program crashes.
-  Until that is fixed, pass a `u8[..>]` or a `u8[..~]`, or append to the capped array in
-  the function that owns it ([What isn't there yet](15-not-yet.md)).
+- **A capped `u8` array passed to a `u8[..>]&` parameter** gets a copy of the function for
+  its layout, in which `append` can fail with `FULL` ([Arrays](04-arrays.md)). The
+  library's functions whose C fills the buffer, as `stdin.read` and `File.readAll`, take
+  only an array on a data stack, and say so where they are called.
 - **Not yet:** `appendUtf8(text, from, to)`, which encodes code points from a `u32[:]`,
   type-checks but has no code generated. Append each code point with
   `out.append("${c.utf8()}")` instead (below).
@@ -755,8 +755,8 @@ void main() {
 
 - **Not yet:** `equalsIgnoreCase(other)`, which compares ASCII letters without case,
   type-checks but has no code generated. Compare two `toLower()` copies instead.
-- **`min(a, b)` and `max(a, b)` on strings** type-check, but the C generated for them
-  doesn't compile today ([What isn't there yet](15-not-yet.md)). Use `a < b ? a : b`.
+- **`min(a, b)` and `max(a, b)` take strings**, in text order: `min("pear", "apple")` is
+  `apple`.
 
 ## `switch` on strings
 

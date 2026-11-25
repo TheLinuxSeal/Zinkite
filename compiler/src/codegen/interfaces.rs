@@ -261,7 +261,9 @@ impl<'p, 'a> Gen<'p, 'a> {
         let r = self.tmp("ir");
         let mut cargs = vec![format!("{}.p", r)];
         for (a, p) in args.iter().zip(params) {
+            self.borrow_arg = true;
             cargs.push(self.arg_code(&a.expr, p));
+            self.borrow_arg = false;
         }
         let m = &self.prog.classes[id].methods[i];
         let map = self.class_map(id, &iargs);

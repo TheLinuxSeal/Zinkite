@@ -630,6 +630,7 @@ ArgIterator cli.getAll(string name)            // every occurrence: -I a -I b
 ArgIterator cli.restValues()
 ```
 
+- **`--help` is always there, and `-h` unless a flag or option takes the letter**, as `du -h` does; the help then lists `--help` alone.
 - **Accepted forms**:
   - flags alone or combined (`-n`, `-nr`);
   - values after a space, attached, or after `=` (`-k 3`, `-k3`, `--column 3`, `--column=3`);
@@ -949,7 +950,7 @@ Each function has its class, named the same but capitalized (`Sha2_512_224`, `Sh
 ### 8.4 `hex` and `base64`
 ```
 u8[.] bytes.hex()                                  // on any u8 array or string: two lowercase digits per byte
-void hex.decode(string text, u8[..>]& out)         // INVALID: an odd length or a non-hex digit
+void hex.decode(string text, u8[..>]& out)         // INVALID: an odd length or a non-hex digit; out is then as it was
 u8[.] base64.encode(string bytes)                  // RFC 4648, with padding
 void base64.decode(string text, u8[..>]& out)      // INVALID
 u8[.] base64.encodeUrl(string bytes)               // the URL-safe alphabet, without padding

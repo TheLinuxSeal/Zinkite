@@ -6400,3 +6400,271 @@ void main(string[.] args) {
         );
     }
 }
+
+// ---------------------------------------------------------------- bugs the documentation found
+
+/// A `T[..>]&` parameter takes any array that can be appended to, and a plain `T[..>]`
+/// any array, each layout getting a copy of the function (DESIGN §4.3): capped, fixed,
+/// cursor and double-ended arrays, through generic functions, methods, recursion and
+/// calls that pass the parameter on, with a push past a capped array's room failing with
+/// FULL. A capped array once crashed such a function, and a cursor array lost its pushes.
+#[test]
+fn every_layout_reaches_a_capability_parameter() {
+    let text = r#"<T> void addAll(T[..>]& out, T x, i64 n) { for (i64 i = 0; i < n; i++) { out +> x; } }
+class Acc {
+    i64 seen = 0;
+    mut void take(i64[..>]& out) { out +> seen; seen++; }
+}
+void countdown(i64[..>]& out, i64 n) {
+    if (n == 0) { return; }
+    out +> n;
+    countdown(out, n - 1);
+}
+i64 sumOf(i64[:] xs) { i64 s = 0; for (i64 x : xs) { s += x; } return s; }
+i64 viaSlice(i64[..>]& out) { return sumOf(out); }
+void sorted(i64[..>]& out) { out.sort((i64 a, i64 b) => a > b); }
+i64 total(i64[..>] xs) { i64 s = 0; for (i64 x : xs) { s += x; } return s; }
+void fill(u8[..>]& buf) { buf.append("abcdefgh"); }
+void main(string[.] args) {
+    i64[..~8] a = [];
+    addAll(a, 3, 2);
+    Acc acc = new Acc();
+    acc.take(a);
+    acc.take(a);
+    countdown(a, 3);
+    sorted(a);
+    println("${a} ${viaSlice(a)}");
+    i64[~.~] dq = [];
+    addAll(dq, 5, 3);
+    i64[~] cur = [1];
+    addAll(cur, 2, 1);
+    i64[.3] f = [4, 5, 6];
+    u8[..~16] text = [];
+    fill(text);
+    println("${dq} ${cur} ${total(f)} ${total(a)} ${text}");
+    if (args.len > 0) {
+        i64[..~2] small = [];
+        addAll(small, 1, 3);
+    }
+}
+"#;
+    let exe = build(text);
+    let r = exec(&exe, &[]);
+    assert_eq!(
+        r.stdout, "[3, 3, 3, 2, 1, 1, 0] 13\n[5, 5, 5] [1, 2] 15 13 abcdefgh\n",
+        "{}",
+        r.stderr
+    );
+    let r = exec(&exe, &["full"]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("`+>` failed with FULL"), "{}", r.stderr);
+}
+
+/// What a copy for a layout can't follow its parameter through is refused, not
+/// miscompiled: a reference bound to it, a lambda that captures it and isn't inlined, and
+/// the library's C, which fills only an array on a data stack.
+#[test]
+fn what_a_layout_copy_cant_follow_is_refused() {
+    let bad = |text: &str, needle: &str| {
+        let file = SourceFile::new("prog.zn", text);
+        let (diags, c) = zink::compile_c(std::slice::from_ref(&file));
+        assert!(c.is_none());
+        let shown: String = diags[0].iter().map(|d| render(&file, d)).collect();
+        assert!(shown.contains(needle), "{}", shown);
+    };
+    bad(
+        "void bad(i64[..>]& out) { i64[..>]& b = out; b +> 1; }\nvoid main() { i64[..~4] a = []; bad(a); }\n",
+        "this use of `out`, which the call on line 2 gives a `i64[..~4]`",
+    );
+    bad(
+        "void apply(func(i64 => void) f) { f(1); }\nvoid bad(i64[..>]& out) { apply((i64 x) => println(\"${out.len} ${x}\")); }\nvoid main() { i64[..~4] a = []; bad(a); }\n",
+        "this use of `out`",
+    );
+    bad(
+        "import zink.io.*;\nvoid main() { u8[..~64] small = []; i64 n @e = stdin.read(small, 10); }\n",
+        "this call can't take a `u8[..~64]` yet: the library's C fills only a `u8[..>]`",
+    );
+}
+
+/// Copying a value with a growable field isn't supported yet: the copy would share the
+/// field's storage with the original, so `logs +> a` once made an element that appending to
+/// `a` changed, and a view kept in it could outlive what it pointed into. Each copy is now
+/// refused; a method's plain parameter, a read-only copy for the call, may still share it.
+#[test]
+fn values_with_growable_fields_arent_copied() {
+    for (text, needle) in [
+        (
+            "class Log { i64 n; u8[..>] text; }\nvoid main() { Log a = new Log(0); Log[..>] logs = []; logs +> a; }\n",
+            "2:63: error: the C backend doesn't support copying a value with a growable field",
+        ),
+        (
+            "class Log { i64 n; u8[..>] text; }\nLog pass(Log l) { return l; }\nvoid main() { Log a = new Log(0); Log b = pass(a); }\n",
+            "2:26: error: the C backend doesn't support copying a value with a growable field",
+        ),
+    ] {
+        let file = SourceFile::new("prog.zn", text);
+        let (diags, c) = zink::compile_c(std::slice::from_ref(&file));
+        assert!(c.is_none());
+        let shown: String = diags[0].iter().map(|d| render(&file, d)).collect();
+        assert!(shown.contains(needle), "{}", shown);
+    }
+    prints(
+        "class Log { i64 n; u8[..>] text; }\nvoid show(Log l) { println(\"${l.n} ${l.text}\"); }\nvoid main() { Log a = new Log(3); a.text.append(\"x\"); show(a); }\n",
+        "3 x\n",
+    );
+}
+
+/// A constructor that fails, with nothing reading its status, stops the program, as a
+/// function's failure does; it once went on with the zero value.
+#[test]
+fn an_unread_failing_constructor_stops_the_program() {
+    let text = "class C { i64 n; new(bool f) { if (f) { return #status.INVALID; } n = 1; } }\nC passOn(bool f) { return ## new C(f); }\nvoid main(string[.] args) {\n    C[..>] cs = [];\n    cs +> new C(false);\n    C ok @e = passOn(true);\n    println(\"${cs.len} ${status.name(e)}\");\n    if (args.len > 0) { C c = new C(true); println(\"after ${c.n}\"); }\n    if (args.len > 1) { cs +> new C(true); }\n}\n";
+    let exe = build(text);
+    let r = exec(&exe, &[]);
+    assert_eq!(r.stdout, "1 INVALID\n", "{}", r.stderr);
+    for args in [&["x"][..], &["x", "y"][..]] {
+        let r = exec(&exe, args);
+        assert_eq!(r.code, 1);
+        assert!(
+            r.stderr
+                .contains("`new C` failed with INVALID, and nothing read its status"),
+            "{}",
+            r.stderr
+        );
+        assert!(!r.stdout.contains("after"));
+    }
+}
+
+/// `==` on arrays compares the elements with `==`: equal text in two places is equal,
+/// `-0.0` equals `0.0`, and a NaN equals nothing. It once compared their bytes.
+#[test]
+fn arrays_compare_element_by_element() {
+    prints(
+        &body(
+            "u8[..>] b1 = [];\nb1.append(\"ab\");\nu8[..>] b2 = [];\nb2.append(\"ab\");\nstring[.] xs = [b1[:]];\nstring[.] ys = [b2[:]];\nf64[.] a = [0.0, 1.5];\nf64[.] b = [-0.0, 1.5];\nf64[.] c = [f64.NAN];\ni64[.] d = [1, 2];\ni64[..>] e = [];\ne +> 1;\ne +> 2;\nprintln(\"${xs == ys} ${xs != ys} ${a == b} ${c == c} ${d == e}\");",
+        ),
+        "true false true false true\n",
+    );
+}
+
+/// The natural order puts a NaN last (DESIGN §10.1): in `min` and `max`, both the
+/// functions and the array methods, and in sorts both ways. They once depended on where
+/// the NaN was. `min` and `max` take strings too.
+#[test]
+fn nan_is_last_in_the_natural_order() {
+    prints(
+        &body(
+            "f64 nan = f64.NAN;\nf64[.] a = [nan, 1.0, 3.0];\nf64[.] b = [1.0, nan, 3.0];\nf64[.] c = [1.0, 3.0, nan];\nf64 x1 @e1 = a.min();\nf64 x2 @e2 = b.min();\nf64 x3 @e3 = c.min();\nf64 y1 @e4 = a.max();\nf64 y2 @e5 = b.max();\nf64 y3 @e6 = c.max();\nprintln(\"${x1} ${x2} ${x3} ${y1} ${y2} ${y3}\");\nprintln(\"${min(nan, 1.0)} ${min(1.0, nan)} ${max(nan, 1.0)} ${max(1.0, nan)}\");\nprintln(\"${min(\"pear\", \"apple\")} ${max(\"pear\", \"apple\")}\");\nstring[.] s = [\"pear\", \"apple\", \"zoo\"];\nstring lo @e7 = s.min();\nstring hi @e8 = s.max();\nf64[..>] d = [2.0, nan, -1.0, nan, 0.5];\nd.sort();\nprintln(\"${lo} ${hi} ${d}\");\nd.sortDescending();\nprintln(\"${d}\");",
+        ),
+        "1.0 1.0 1.0 NaN NaN NaN\n1.0 1.0 NaN NaN\napple pear\napple zoo [-1.0, 0.5, 2.0, NaN, NaN]\n[2.0, 0.5, -1.0, NaN, NaN]\n",
+    );
+}
+
+/// Programs whose C didn't compile: a fixed or capped array copied from one of another
+/// layout, a `switch` on a `u8` array, and a block lambda returning a tuple.
+#[test]
+fn copies_between_layouts_and_switches_on_arrays() {
+    let text = "void main(string[.] args) {\n    i64[..>] a = [];\n    a +> 1; a +> 2; a +> 3;\n    i64[.3] f = a;\n    i64[..~4] g = a;\n    i64[.3] h = g;\n    u8[..~8] b = [];\n    b.append(\"hi\");\n    switch (b) { case \"hi\" => println(\"yes\"); default => println(\"no\"); }\n    string r = switch (b) { case \"hi\" => \"y\"; default => \"n\"; };\n    func(i64 => (i64, i64)) t = (i64 x) => { return (x, x + 1); };\n    (i64 p, i64 q) = t(3);\n    println(\"${f} ${g} ${h} ${r} ${p} ${q}\");\n    if (args.len > 0) { i64[..~2] small = a; }\n}\n";
+    let exe = build(text);
+    let r = exec(&exe, &[]);
+    assert_eq!(
+        r.stdout, "yes\n[1, 2, 3] [1, 2, 3] [1, 2, 3] y 3 4\n",
+        "{}",
+        r.stderr
+    );
+    let r = exec(&exe, &["x"]);
+    assert_eq!(r.code, 1);
+    assert!(
+        r.stderr
+            .contains("the value doesn't fit in an array that holds 2"),
+        "{}",
+        r.stderr
+    );
+}
+
+/// What's refused when the program is built, where the C once failed: no `main`, a
+/// class's `main`, two `main`s, and variable-size records in tuples, maps and pools.
+#[test]
+fn programs_the_c_backend_refuses_clearly() {
+    for (text, needle) in [
+        (
+            "void helper() { }\n",
+            "this program has no `main` to start from",
+        ),
+        (
+            "class App { public static void main() { } }\n",
+            "this program has no `main`: `App.main` is a method of a class, not where a program starts",
+        ),
+        (
+            "void main() { }\nvoid main(string[.] args) { }\n",
+            "2:6: error: a program starts from one `main`, and this is another",
+        ),
+        (
+            "class Item { u8[.] name; i64 n; }\n(Item, i64) two() { return (new Item(\"x\", 1), 2); }\nvoid main() { (Item it, i64 k) = two(); }\n",
+            "doesn't support a variable-size record in a tuple",
+        ),
+        (
+            "class Item { u8[.] name; i64 n; }\nvoid main() { pool<Item> p = []; }\n",
+            "doesn't support variable-size records in a set or a pool",
+        ),
+        (
+            "class Item { u8[.] name; i64 n; }\nvoid main() { hashmap<i64, Item> m = []; }\n",
+            "doesn't support variable-size records in a hash map",
+        ),
+        (
+            "class V { i64 n; }\nvoid main() { V[.] a = [new V(1)]; V[.] b = [new V(1)]; println(\"${a == b}\"); }\n",
+            "doesn't support comparing arrays of V",
+        ),
+    ] {
+        let file = SourceFile::new("prog.zn", text);
+        let (diags, c) = zink::compile_c(std::slice::from_ref(&file));
+        assert!(c.is_none(), "{}", text);
+        let shown: String = diags[0].iter().map(|d| render(&file, d)).collect();
+        assert!(shown.contains(needle), "{}", shown);
+    }
+}
+
+/// `extern.errno()` and the library's failures report `EPERM` as `PERMISSION`, since 1
+/// is `FAILED` (DESIGN §7.7).
+#[test]
+fn eperm_is_permission() {
+    if unsafe { libc_geteuid() } == 0 {
+        return;
+    }
+    prints(
+        "extern import signal.h;\nvoid main() {\n    i32 r = kill(1, 0);\n    u8 e = extern.errno();\n    println(\"${r} ${status.name(e)}\");\n}\n",
+        "-1 PERMISSION\n",
+    );
+}
+
+unsafe extern "C" {
+    #[link_name = "geteuid"]
+    fn libc_geteuid() -> u32;
+}
+
+/// `hex.decode` is all or nothing, as `base64.decode` is: on a bad digit `out` is as it
+/// was.
+#[test]
+fn hex_decode_is_all_or_nothing() {
+    prints(
+        "import zink.encoding.*;\nvoid main() {\n    u8[..>] out = [];\n    out.append(\"kept:\");\n    u8 e = @hex.decode(\"41zz\", out);\n    hex.decode(\"4142\", out);\n    println(\"${status.name(e)} ${out}\");\n}\n",
+        "INVALID kept:AB\n",
+    );
+}
+
+/// A program's own `-h` flag is its own, and help is then `--help` alone.
+#[test]
+fn a_programs_own_h_flag_wins() {
+    let text = "import zink.cli.*;\nu8 main(string[.] args) {\n    Args cli = new Args(\"du\", \"disk use\");\n    cli.flag('h', \"human\", \"sizes like 1K\");\n    u8 code @st = cli.parseOrStop(args);\n    if (st) { return code; }\n    println(\"human ${cli.has(\"human\")}\");\n    return 0;\n}\n";
+    let exe = build(text);
+    let r = exec(&exe, &["-h"]);
+    assert_eq!(r.stdout, "human true\n", "{}", r.stderr);
+    let r = exec(&exe, &["--help"]);
+    assert!(
+        r.stdout
+            .contains("      --help     show this help and exit"),
+        "{}",
+        r.stdout
+    );
+    assert!(!r.stdout.contains("-h, --help"), "{}", r.stdout);
+}

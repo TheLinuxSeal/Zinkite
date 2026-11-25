@@ -1979,7 +1979,11 @@ static ZR_UNUSED void zr_pool_clear(zr_pool *p, size_t sz) {
 /* ------------------------------------------------------------ input and files (STDLIB §4) */
 
 /* The status for the errno a failed call left: Zinkite's codes follow errno's (DESIGN §7.7). */
-static uint8_t zr_errno(void) { return (uint8_t)(errno > 0 && errno < 192 ? errno : 5); }
+/* `errno`'s value as a status, 0 when it's 0: EPERM is PERMISSION, since 1 is FAILED. */
+static ZR_UNUSED uint8_t zr_errno_status(int e) {
+    return (uint8_t)(e == EPERM ? EACCES : e >= 0 && e < 192 ? e : EIO);
+}
+static uint8_t zr_errno(void) { return errno > 0 ? zr_errno_status(errno) : (uint8_t)EIO; }
 
 /* Per file descriptor: an input buffer, made on its first read and freed when it's closed,
  * and for a File or a Dir, a generation that each close bumps, so a copy of a closed one

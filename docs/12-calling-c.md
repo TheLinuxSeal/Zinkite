@@ -336,8 +336,8 @@ puts succeeds as C says, and its status is always 0
   may change `errno`.
 - **`#` needs parentheses around it**: `return #(extern.errno()) f;`. Written
   `#extern.errno()`, it is "expected a status after `#`: a number, a named code or `(...)`".
-- **It is `errno` as it is**, so an `EPERM` (1) from C reads as `FAILED`, the one code
-  whose meaning differs from `errno`'s.
+- **It is `errno` as a status**: the same number, except that an `EPERM` (1) reads as
+  `PERMISSION` (13), since 1 is `FAILED` ([Errors and statuses](07-errors.md)).
 
 ## Output and C's stdout
 

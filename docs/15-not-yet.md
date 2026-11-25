@@ -149,10 +149,9 @@ example.zn:3:22: error: multi-dimensional indexing `m[i, j]` is undecided (GRAMM
 - **A clamped slice bound** `xs[:|n]`, to match the clamped index `xs[|i]`.
   Write `xs[:min(n, xs.len)]`.
 - **Default and static methods in interfaces**. A method body in an interface is an error,
-  `interface methods have no bodies: default methods are undecided (GRAMMAR §8)`; write a
-  static function that takes the interface reference. A `static` method in an interface
-  isn't rejected yet, and is read as an instance method that every class must implement,
-  so don't write one (see [Accepted today, and wrong](#accepted-today-and-wrong)).
+  `interface methods have no bodies: default methods are undecided (GRAMMAR §8)`, and a
+  `static` method in one is `static methods in interfaces are undecided`. Write a static
+  function that takes the interface reference.
 - **Nested type declarations**, a class inside a class. Declare it at the top
   level, package-private.
 - **`final` fields and locals** (`final` is reserved). There are no constants
@@ -281,8 +280,8 @@ void main() {
 ```
 
 - **Printing a class value or an enum** with `${x}` (undecided, [DESIGN
-  §4.13](../DESIGN.md#413-printing-and-formatting-decided)). The message calls an enum a
-  class value too. Print the fields, and give an enum a function that names its constants:
+  §4.13](../DESIGN.md#413-printing-and-formatting-decided)). Print the fields, and give an
+  enum a function that names its constants:
 
 ```java
 enum Color { RED, GREEN, BLUE }
@@ -294,7 +293,7 @@ void main() {
 ```
 
 ```error
-example.zn:5:16: error: a class value can't be printed until default formatting is decided (DESIGN §17)
+example.zn:5:16: error: an enum value can't be printed until default formatting is decided (DESIGN §17)
 ```
 
 - **No conversion between an enum and an integer** (limit). A cast is `` casts exist only
@@ -404,9 +403,6 @@ example.zn:3:29: error: a lambda that captures variables can't be stored in `big
   they are written, so an initializer that reads a later static reads its zero value, and
   initializers that read each other in a loop aren't an error. Write each static after the
   ones it reads.
-- **Two `main`s, or none** (not built). Overloads of `main` pass `zink check`, and the C
-  compiler then fails on two C `main`s; a script file with no `main` fails when it is
-  linked. Write exactly one.
 
 ## Arrays and text
 
@@ -709,11 +705,11 @@ void main() {
 example.zn:8:13: error: the C backend doesn't support a temporary value with a growable field yet
 ```
 
-- **Variable-size values in hash maps, pools and tuples** (not built): a class with a
-  `u8[.]` or `T[.*]` field as a map's value, a pool's element or part of a tuple result.
-  The compiler doesn't refuse all of these yet, and what it generates for the rest is wrong
-  ([below](#accepted-today-and-wrong)), so keep such values in an array of variable-size
-  values, and use a `string` field or a capped array where they must go into a map.
+- **Variable-size values in hash maps, sets, pools and tuples** (not built): a class with a
+  `u8[.]` or `T[.*]` field as a map's key or value, a set's or a pool's element, or part of
+  a tuple result. The C backend reports that it doesn't support them yet. Keep such values
+  in an array of variable-size values, and use a `string` field or a capped array where
+  they must go into a map.
 - **A lambda that captures, passed to a method called through an interface or to a
   constructor** (not built). Call the method on the class itself, or pass the captured
   values as arguments:
@@ -768,8 +764,7 @@ example.zn:25:26: error: the C backend doesn't support a lambda that captures, p
 
 - **Every `errno` code under its C name** (not built, [DESIGN
   §7.7](../DESIGN.md#77-named-codes-decided)). Only the names in DESIGN §7.7's table are
-  known, so `status.ESRCH` is an error; write the number, `#3`. An `EPERM` from the
-  system comes through as 1, `FAILED`, not as `PERMISSION`:
+  known, so `status.ESRCH` is an error; write the number, `#3`:
 
 ```java
 void main() {
@@ -1002,44 +997,26 @@ scratch space of `stableSort`, gate nothing ([STDLIB §11](../STDLIB.md#11-open-
 ## Accepted today, and wrong
 
 The compiler is meant to refuse what it can't compile, with a clear error, rather than make
-wrong code. These pass `zink check` today and then do something other than the design says,
-or make C that doesn't compile, so avoid them until they are fixed:
+wrong code. These pass `zink check` today and then do something other than the design says:
 
-- **Copying a value with a growable field into an array**, as `logs +> a;` with a
-  `class Log { i64 n; u8[..>] text; }`, makes an element that shares `a`'s storage, so
-  appending to one shows in the other, and a view kept in one can outlive what it points
-  into. A plain copy, `Log c = a;`, is refused as not supported yet; this one should be too.
-  Build the element in the array, `logs +> new Log(0);`, or keep the text elsewhere and an
-  index to it.
-- **A capped array passed to a `T[..>]&` parameter**, such as a `u8[..~16]` to a
-  `u8[..>]& out` that the function appends to, crashes the program. A cursor array passed to
-  one loses what the function appends. Pass an array on a data stack without a cursor,
-  `T[..>]`, `T[..~]` or `T[~.~]`, or a parameter of the array's own type, `u8[..~16]& out`.
-- **A fixed or capped array passed to a plain `T[..>]` parameter**, as an `i64[.3]` to
-  `i64 first(i64[..>] xs)`, makes C that doesn't compile. Take a slice, `i64[:] xs`, which
-  every kind of array converts to.
-- **A failing constructor whose status nothing reads** doesn't stop the program, as a failing
-  function's does: `C c = new C(true);` goes on with `c` the zero value. Read the status,
-  `C c @bad = new C(true);`.
-- **A field initializer that reads another field**, as `i64 area = w * 2;`, reads it before
-  the constructor has set it. Compute it in a constructor.
-- **An integer literal too large for an `i64`, with nothing to give it a type**, as
-  `var m = 9223372036854775808;`, wraps instead of being an error. Give it a type:
-  `u64 m = 9223372036854775808;`.
-- **`==` on arrays of strings**, or of classes with string fields, compares the views, not
-  the text, so equal text in two buffers compares unequal. Compare element by element.
-- **Variable-size values in pools and tuple results** compile, and read back wrong: a
-  record returned in a tuple has a broken length, and a pool's element an empty `u8[.]`
-  field. `get` on a map of them makes C that doesn't compile.
-- **`min()` and `max()` on an array of floats** with a NaN in it give an answer that depends
-  on where the NaN is; the design puts NaN last.
-- **A `static` method in an interface** is read as an instance method, so every class must
-  have it as one.
-- **Programs whose C doesn't compile**, which `zink` reports as a bug in itself: a fixed or
-  capped array initialized straight from an array on a data stack (`i64[.3] f = a;`, where
-  `i64[.3] f = a[:];` works), a `switch` on a `u8` array (take a `string` view first),
-  `min(a, b)` and `max(a, b)` on strings or classes (write `a < b ? a : b` for strings), and
-  two `main`s or none.
+- **A static as a `case` label** is accepted, though the grammar allows only literals and
+  enum constants, and compared with its value when the `switch` runs (above, "No
+  constants").
+- **The rules on packages and imports** that [Programs, packages and
+  building](10-programs.md) lists as not checked yet: a `package` line in a script file, a
+  file's package and its directory, and an import of a `zink.*` package the program doesn't
+  have.
+- **Failures nothing reports**: `stdout.write` never fails, and a file left open that fails
+  when it's written out at exit isn't reported ([System library](13-library-system.md)).
+- **A `Duration` overflow** stops the program with a message that names the library's line,
+  not the program's ([System library](13-library-system.md)).
+
+Those found while this documentation was written, and fixed since, include: arrays of
+another layout passed to a `T[..>]&` or `T[..>]` parameter, which get a copy of the
+function for their layout; copies of values with a growable field, refused; failing
+constructors nothing reads, which stop the program; field initializers reading fields not
+yet set, refused; `==` on arrays of strings and floats, element by element; NaN last in
+`min`, `max` and sorts; and the programs whose C didn't compile.
 
 ## Listed as missing elsewhere, and there now
 

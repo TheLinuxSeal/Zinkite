@@ -248,6 +248,10 @@ struct Checker<'p, 'a> {
     /// Set just before typing the value that initializes a named local or static, where
     /// a root may be created (DESIGN §6.6).
     root_new_ok: bool,
+    /// The non-static field whose initializer is being checked: its class and index. It
+    /// runs before the constructor, in declaration order, so it reads only the fields set
+    /// before it.
+    init_of: Option<(ClassId, usize)>,
     /// Whether the last call chosen is a `mut` method.
     last_call_mut: bool,
     /// Unsuffixed literals above `i128.MAX`, typed `u128`, by span: for saying they
@@ -298,6 +302,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             lambdas: Vec::new(),
             spawns: Vec::new(),
             root_new_ok: false,
+            init_of: None,
             last_call_mut: false,
             huge_lits: HashMap::new(),
             in_place: HashSet::new(),
@@ -504,8 +509,9 @@ impl<'p, 'a> Checker<'p, 'a> {
             self.class = Some(id);
             self.check_class_rules(id);
             let ctps = c.type_params.clone();
-            for f in &c.fields {
+            for (fi, f) in c.fields.iter().enumerate() {
                 if let Some(init) = f.init {
+                    self.init_of = (!f.is_static).then_some((id, fi));
                     self.begin(
                         FnKind::Init,
                         &f.name,
@@ -518,6 +524,7 @@ impl<'p, 'a> Checker<'p, 'a> {
                     self.root_new_ok = false;
                     self.expect(&t, &f.ty, init);
                     self.end();
+                    self.init_of = None;
                 }
             }
             for ctor in &c.ctors {
@@ -650,7 +657,8 @@ impl<'p, 'a> Checker<'p, 'a> {
             let Ty::Class(i, iargs) = iface else { continue };
             let ic = &prog.classes[*i];
             let map = self.class_subst(*i, iargs);
-            for im in &ic.methods {
+            // A static one is reported where it's declared, as undecided.
+            for im in ic.methods.iter().filter(|m| !m.is_static) {
                 let want: Vec<Ty> = im.params.iter().map(|p| p.subst(&map)).collect();
                 let want_ret = im.ret.subst(&map);
                 let named: Vec<&MethodInfo> =
@@ -1841,10 +1849,13 @@ impl<'p, 'a> Checker<'p, 'a> {
                         Ty::Void => Ty::Void,
                         t => self.var_type(&t, v.span),
                     },
-                    Some(v) => {
-                        let t = self.expr(v, None);
-                        self.var_type(&t, v.span)
-                    }
+                    Some(v) => match self.expr(v, None) {
+                        // Several results, as an expression body may give (DESIGN §9.5).
+                        Ty::Tuple(ts) => {
+                            Ty::Tuple(ts.iter().map(|t| t.unref().default_lit()).collect())
+                        }
+                        t => self.var_type(&t, v.span),
+                    },
                     None => Ty::Void,
                 };
                 match self.cur().lambda_ret.clone() {
@@ -2199,6 +2210,28 @@ impl<'p, 'a> Checker<'p, 'a> {
 
     /// The type `var x = e` gives `x`.
     fn var_type(&mut self, t: &Ty, span: Span) -> Ty {
+        // An integer literal nothing gives a type is an `i64` (DESIGN §9.1), so it must fit
+        // one.
+        let too_big = match t {
+            Ty::IntLit { value: Some(v), .. } => i64::try_from(*v)
+                .is_err()
+                .then_some(u64::try_from(*v).is_ok()),
+            Ty::Prim(crate::token::Prim::U128) if self.huge_lits.contains_key(&key(span)) => {
+                Some(false)
+            }
+            _ => None,
+        };
+        if let Some(u64_holds) = too_big {
+            self.err_help(
+                span,
+                "this literal doesn't fit in i64, the type a literal takes when nothing else gives it one",
+                format!(
+                    "write the variable's type, such as `{}` (DESIGN §9.1)",
+                    if u64_holds { "u64" } else { "u128" }
+                ),
+            );
+            return Ty::Unknown;
+        }
         match t {
             Ty::Ref(x) => self.var_type(x, span),
             Ty::IntLit { .. } | Ty::FloatLit => t.default_lit(),
@@ -3003,6 +3036,17 @@ impl<'p, 'a> Checker<'p, 'a> {
             E::Postfix { op, expr } => self.postfix(*op, expr, e.span, consumed),
             E::Member { expr, name } => {
                 // In a constructor, `this.x` reads one field, which needs only that field assigned.
+                if matches!(expr.kind, E::This)
+                    && let Some((cls, _)) = self.init_of
+                    && let Some(i) = self.prog.classes[cls]
+                        .fields
+                        .iter()
+                        .position(|f| f.name == name.name && !f.is_static)
+                {
+                    self.init_reads(cls, i, name.span);
+                    let bt = self.this_ty(expr.span);
+                    return self.member_of(&bt, expr, name);
+                }
                 if matches!(expr.kind, E::This) && self.in_ctor() {
                     let bt = self.this_ty(expr.span);
                     let writing = std::mem::take(&mut self.writing);
@@ -3116,6 +3160,11 @@ impl<'p, 'a> Checker<'p, 'a> {
     fn interp(&mut self, x: &Expr) {
         let t = self.expr_c(x, None, false);
         match t.unref() {
+            Ty::Class(c, _) if self.prog.classes[*c].kind == ClassKind::Enum => self.err_help(
+                x.span,
+                "an enum value can't be printed until default formatting is decided (DESIGN §17)",
+                "give the enum a function that names each constant with a `switch`",
+            ),
             Ty::Class(..) => self.err_help(
                 x.span,
                 "a class value can't be printed until default formatting is decided (DESIGN §17)",
@@ -3292,6 +3341,7 @@ impl<'p, 'a> Checker<'p, 'a> {
             self.facts.names.insert(key(span), NameRes::Field(cls, i));
             if !f.is_static {
                 self.note_this_capture(span);
+                self.init_reads(cls, i, span);
             }
             if !f.is_static && self.fn_static() {
                 let fname = self.fns.last().map(|f| f.name.clone()).unwrap_or_default();
@@ -3692,6 +3742,35 @@ impl<'p, 'a> Checker<'p, 'a> {
         {
             self.err(name.span, "a hashmap entry's key can't be changed");
         }
+        // A built-in property, as an array's `len`, is worked out, not stored.
+        if let E::Member { expr, name } = &target.kind
+            && let Some(bt) = self.facts.types.get(&key(expr.span))
+            && matches!(
+                bt.unref(),
+                Ty::Array(..)
+                    | Ty::Slice(_)
+                    | Ty::View(_)
+                    | Ty::Map(..)
+                    | Ty::Set(_)
+                    | Ty::Pool(_)
+                    | Ty::Queue(_)
+                    | Ty::Prim(_)
+            )
+        {
+            let help = if name.name == "len" && matches!(bt.unref(), Ty::Array(..)) {
+                "`truncate(n)` shortens an array, and `+>` lengthens it (STDLIB §7.1)"
+            } else {
+                "it changes as the value does"
+            };
+            self.err_help(
+                name.span,
+                format!(
+                    "`{}` is worked out from the value, so it can't be assigned",
+                    name.name
+                ),
+                help,
+            );
+        }
         // V1: a variable-size field is written once, when its value is built.
         if op != AssignOp::Rebind && self.prog.variable_size(&tt) && !self.in_ctor() {
             let field = match &target.kind {
@@ -3871,6 +3950,20 @@ impl<'p, 'a> Checker<'p, 'a> {
                     value: Some(i128::MIN),
                     is_char: false,
                 }
+            }
+            // `-128i8` is `i8.MIN`, though `128i8` alone doesn't fit.
+            UnaryOp::Neg
+                if matches!(x.kind, E::Int { value, suffix: Some(p) }
+                    if crate::types::signed(p) && value == 1u128 << (crate::types::bits(p) - 1)) =>
+            {
+                let E::Int {
+                    suffix: Some(p), ..
+                } = x.kind
+                else {
+                    unreachable!()
+                };
+                self.facts.types.insert(key(x.span), Ty::Prim(p));
+                Ty::Prim(p)
             }
             UnaryOp::Plus | UnaryOp::Neg => {
                 let t = self.expr(x, want);
@@ -5786,7 +5879,50 @@ impl<'p, 'a> Checker<'p, 'a> {
     }
 
     /// `this` is used for something other than assigning or reading one field.
+    /// A field initializer's read of field `i` of its class: one set before it, by its own
+    /// initializer or by starting empty, since initializers run in declaration order before
+    /// the constructor (DESIGN §6.2).
+    fn init_reads(&mut self, cls: ClassId, i: usize, span: Span) {
+        let Some((c, j)) = self.init_of else { return };
+        if c != cls || self.fns.iter().any(|f| f.kind == FnKind::Lambda) {
+            return;
+        }
+        let prog = self.prog;
+        let fields = &prog.classes[cls].fields;
+        let f = &fields[i];
+        if i < j && (f.init.is_some() || starts_empty(&f.ty)) {
+            return;
+        }
+        let why = if i == j {
+            "is the field being initialized".to_string()
+        } else if i > j {
+            format!(
+                "is declared after `{}`, and initializers run in order",
+                fields[j].name
+            )
+        } else {
+            "has no initializer, so it isn't set until the constructor runs".to_string()
+        };
+        self.err_help(
+            span,
+            format!(
+                "`{}` can't be read in `{}`'s initializer: it {}",
+                f.name, fields[j].name, why
+            ),
+            "compute it in a constructor (DESIGN §6.2)",
+        );
+    }
+
     fn this_use(&mut self, span: Span, what: &str) {
+        if let Some((c, j)) = self.init_of {
+            let name = self.prog.classes[c].fields[j].name.clone();
+            self.err_help(
+                span,
+                format!("{} in `{}`'s initializer, which runs before the constructor", what, name),
+                "a method could read a field that isn't set; compute it in a constructor (DESIGN §6.2)",
+            );
+            return;
+        }
         if !self.in_ctor() {
             return;
         }
@@ -6122,11 +6258,9 @@ impl<'p, 'a> Checker<'p, 'a> {
                     .get(&(expr.span.start, expr.span.end))
                     .map(|t| t.unref())
                 {
+                    let shown = self.show(&Ty::Slice(el.clone()));
                     return Some(Ro {
-                        msg: format!(
-                            "a `{}` is a read-only view",
-                            self.show(&Ty::Slice(el.clone()))
-                        ),
+                        msg: format!("{} `{}` is a read-only view", article(&shown), shown),
                         help: "take a writable view (`T[:]&`) of the array itself (DESIGN §4.10)"
                             .into(),
                     });
@@ -6967,6 +7101,18 @@ fn rebound_in_expr(e: &Expr, out: &mut Vec<String>) {
     }
     for c in expr_children(e) {
         rebound_in_expr(c, out);
+    }
+}
+
+/// "a" or "an" before a type's name as written, read as it's said: "an `i64[:]`", "an
+/// `f32`", "a `u8[:]`", "an `Item`".
+fn article(shown: &str) -> &'static str {
+    let mut cs = shown.chars();
+    match (cs.next(), cs.next()) {
+        (Some('i' | 'f'), Some(d)) if d.is_ascii_digit() => "an",
+        (Some('u'), Some(d)) if d.is_ascii_digit() => "a",
+        (Some(c), _) if "aeiouAEIOU".contains(c) => "an",
+        _ => "a",
     }
 }
 

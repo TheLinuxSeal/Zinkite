@@ -21,7 +21,26 @@ commands:
   zink lex FILE                 print the tokens of a file
 ";
 
+/// Output piped to a program that stops reading, as `zink c f.zn | head`, ends `zink`
+/// quietly, as it does other Unix tools, rather than as a failed write.
+#[cfg(unix)]
+fn default_sigpipe() {
+    unsafe extern "C" {
+        fn signal(sig: i32, handler: usize) -> usize;
+    }
+    const SIGPIPE: i32 = 13;
+    const SIG_DFL: usize = 0;
+    // SAFETY: restores the default action for one signal, before any thread starts.
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn default_sigpipe() {}
+
 fn main() -> ExitCode {
+    default_sigpipe();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("check") => check(&args[1..]),
@@ -113,6 +132,20 @@ fn build(args: &[String]) -> ExitCode {
             out = args.get(i + 1).cloned();
             i += 2;
             continue;
+        }
+        if args[i].starts_with('-') {
+            eprintln!(
+                "zink: unknown option `{}`\nusage: zink build FILE -o OUT",
+                args[i]
+            );
+            return ExitCode::from(2);
+        }
+        if file.is_some() {
+            eprintln!(
+                "zink: a program is built from one file, and `{}` is a second\nusage: zink build FILE -o OUT",
+                args[i]
+            );
+            return ExitCode::from(2);
         }
         file = Some(args[i].clone());
         i += 1;

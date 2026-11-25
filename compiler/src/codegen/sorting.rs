@@ -22,15 +22,17 @@ impl<'p, 'a> Gen<'p, 'a> {
         el: &Ty,
         span: Span,
     ) -> String {
-        let (x, y) = if desc { (y, x) } else { (x, y) };
         match o {
-            Order::Natural => self.natural_less(x, y, el, span),
-            Order::Less(f) => self.apply(f, &[x.to_string(), y.to_string()]),
+            Order::Natural => self.natural_before(x, y, el, desc, span),
+            Order::Less(f) => {
+                let (x, y) = if desc { (y, x) } else { (x, y) };
+                self.apply(f, &[x.to_string(), y.to_string()])
+            }
             Order::Key(f, kt) => {
                 let kc = self.cty(kt, span);
                 let kx = self.apply(f, &[x.to_string()]);
                 let ky = self.apply(f, &[y.to_string()]);
-                let less = self.natural_less("_ka", "_kb", kt, span);
+                let less = self.natural_before("_ka", "_kb", kt, desc, span);
                 format!(
                     "({{ {kc} _ka = {kx}; {kc} _kb = {ky}; {less}; }})",
                     kc = kc,
@@ -42,8 +44,25 @@ impl<'p, 'a> Gen<'p, 'a> {
         }
     }
 
-    fn natural_less(&mut self, x: &str, y: &str, t: &Ty, span: Span) -> String {
+    /// Whether `x` goes before `y` in their natural order, or its reverse when `desc`: NaN
+    /// is last both ways (STDLIB §7.1).
+    fn natural_before(&mut self, x: &str, y: &str, t: &Ty, desc: bool, span: Span) -> String {
         match settle(t.unref()) {
+            Ty::Prim(p) if p.is_float() && desc => {
+                format!("(!isnan({}) && (isnan({}) || ({}) > ({})))", x, y, x, y)
+            }
+            _ if desc => self.natural_less(y, x, t, span),
+            _ => self.natural_less(x, y, t, span),
+        }
+    }
+
+    /// Whether `x` goes before `y` in their natural order, a total order which puts a float
+    /// NaN last (DESIGN §10.1), where `<` on floats is false for every NaN.
+    pub(super) fn natural_less(&mut self, x: &str, y: &str, t: &Ty, span: Span) -> String {
+        match settle(t.unref()) {
+            Ty::Prim(p) if p.is_float() => {
+                format!("(!isnan({}) && (isnan({}) || ({}) < ({})))", x, y, x, y)
+            }
             Ty::Prim(_) => format!("(({}) < ({}))", x, y),
             Ty::Class(c, _) if self.prog.classes[c].kind == ClassKind::Enum => {
                 format!("(({}) < ({}))", x, y)
