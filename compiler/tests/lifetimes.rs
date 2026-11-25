@@ -811,3 +811,29 @@ fn a_parameter_stored_into_a_static_stays_its_own_functions() {
         "a reference into `mine`, a variable of this function, can't be stored in a static",
     );
 }
+
+/// What a lambda returns (DESIGN §9.3): a built-in's result is rooted at it, so text built
+/// only for the statement can't be kept; a lambda passed anywhere else can't return such
+/// text at all; and the array `filter` builds can't be built while its lambda recurses back
+/// into the function (§8.4).
+#[test]
+fn what_a_lambda_returns_lives_long_enough() {
+    rejects(
+        &main_with("", "i64[..>] a = [1, 2];\nstring r = a.fold(\"\", (string acc, i64 x) => \"${acc}${x}\");\nprintln(r);"),
+        "this text is a temporary, built only for this statement, so `r` can't keep a view of it",
+    );
+    rejects(
+        &main_with("", "i64[..>] a = [1, 2];\nstring[..>] t = a.map((i64 x) => \"<${x}>\");\nprintln(\"${t}\");"),
+        "this text is a temporary, built only for this statement, so `t` can't keep a view of it",
+    );
+    ok(&main_with("", "i64[..>] a = [1, 2];\nprintln(\"${a.map((i64 x) => \"<${x}>\")} ${a.fold(\"\", (string acc, i64 x) => \"${acc}${x}\")}\");\nstring[..>] w = [\"ab\", \"c\"];\nstring longest = w.fold(\"\", (string m, string s) => s.len > m.len ? s : m);\nprintln(longest);"));
+    rejects(
+        &main_with("string wrap(string s, func(string => string) f) { return f(s); }", "string pre = \"<\";\nstring r = wrap(\"x\", (string s) => \"${pre}${s}\");\nprintln(r);"),
+        "this lambda returns something built only for the statement it's in",
+    );
+    ok(&main_with("string wrap(string s, func(string => string) f) { return f(s); }", "string pre = \"<\";\nstring r = wrap(\"x\", (string s) => pre);\nprintln(r);"));
+    rejects(
+        "i64 depth(i64[:] xs, i64 d) {\n    if (d == 0) { return 0; }\n    i64[..>] kept = xs.filter((i64 x) => depth(xs, d - 1) >= 0 && x > d);\n    return kept.len;\n}\nvoid main() { i64[..>] a = [1, 2]; println(\"${depth(a, 2)}\"); }\n",
+        "`filter`'s result is still being built during this call, which can recurse back into `depth`",
+    );
+}

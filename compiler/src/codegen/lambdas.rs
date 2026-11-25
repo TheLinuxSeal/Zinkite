@@ -1,10 +1,176 @@
 //! Lambdas and function values (DESIGN §9.3). A lambda passed to a built-in is inlined
 //! where the built-in uses it, the compile-time value DESIGN describes, with its
-//! parameters bound to the elements in place. A lambda used as a value becomes a C
-//! function, reached through a pointer; such a lambda can't capture.
+//! parameters bound to the elements in place. A lambda that captures, passed to a
+//! function of the program's own, makes a copy of that function for it, which inlines
+//! the lambda where it calls it and is passed pointers to what the lambda reads. Any
+//! other lambda used as a value becomes a C function, reached through a pointer; such a
+//! lambda can't capture.
 
 use super::*;
 use crate::ast::LambdaBody;
+use std::rc::Rc;
+
+/// How many lambdas deep a copy of a function may be made for a lambda that calls
+/// another lambda passed to it, as `f(x, (i64 y) => g(y))` does inside a copy for `g`.
+/// A function that passes itself a new lambda each time would otherwise never end.
+const MAX_BOUND_DEPTH: usize = 8;
+
+/// A lambda that captures, passed for a `func` parameter of a copy of a function made
+/// for it (DESIGN §9.3).
+pub(super) struct Bound {
+    pub lam: Expr,
+    /// Where it was written: the class, file and instantiation its body is generated in.
+    pub class: ClassId,
+    pub file: usize,
+    pub subst: Vec<(String, Ty)>,
+    pub cargs: Vec<Ty>,
+    pub has_this: bool,
+    /// The variables it reads from where it was written, as C lvalues in the function
+    /// being generated now.
+    pub caps: Vec<Cap>,
+    /// `this` where it was written, as a C pointer here, and its struct's C type.
+    pub this: Option<(String, String)>,
+    /// Parameters of where it was written that are bound to lambdas in turn, which it calls.
+    pub lams: Vec<((u32, u32), Rc<Bound>)>,
+}
+
+#[derive(Clone)]
+pub(super) struct Cap {
+    pub decl: (u32, u32),
+    pub c: String,
+    pub ty: Ty,
+    pub ctype: String,
+}
+
+impl Bound {
+    /// What tells copies apart: the lambda, its instantiation, and what it reads.
+    fn shape(&self) -> String {
+        let caps: Vec<&str> = self.caps.iter().map(|c| c.ctype.as_str()).collect();
+        let lams: Vec<String> = self
+            .lams
+            .iter()
+            .map(|(d, b)| format!("{:?}={}", d, b.shape()))
+            .collect();
+        format!(
+            "{:?}{:?}{:?}[{}]{}{{{}}}",
+            key(self.lam.span),
+            self.subst,
+            self.cargs,
+            caps.join(","),
+            self.this.is_some(),
+            lams.join(";")
+        )
+    }
+
+    fn depth(&self) -> usize {
+        1 + self.lams.iter().map(|(_, b)| b.depth()).max().unwrap_or(0)
+    }
+
+    /// The C arguments a copy takes for it, in order: each variable's address, then
+    /// `this`, then those of the lambdas it calls.
+    fn args(&self, out: &mut Vec<String>) {
+        out.extend(self.caps.iter().map(|c| format!("&({})", c.c)));
+        if let Some((c, _)) = &self.this {
+            out.push(c.clone());
+        }
+        for (_, b) in &self.lams {
+            b.args(out);
+        }
+    }
+
+    /// The same lambda as the copy sees it: each variable through its parameter, in the
+    /// order `args` passes them.
+    fn in_copy(&self, n: &mut usize, params: &mut Vec<String>) -> Bound {
+        let mut next = |ctype: &str, params: &mut Vec<String>| {
+            let name = format!("_c{}", *n);
+            *n += 1;
+            params.push(format!("{} *{}", ctype, name));
+            name
+        };
+        let caps = self
+            .caps
+            .iter()
+            .map(|c| Cap {
+                c: format!("(*{})", next(&c.ctype, params)),
+                ..c.clone()
+            })
+            .collect();
+        let this = self
+            .this
+            .as_ref()
+            .map(|(_, ct)| (next(ct, params), ct.clone()));
+        let lams = self
+            .lams
+            .iter()
+            .map(|(d, b)| (*d, Rc::new(b.in_copy(n, params))))
+            .collect();
+        Bound {
+            lam: self.lam.clone(),
+            class: self.class,
+            file: self.file,
+            subst: self.subst.clone(),
+            cargs: self.cargs.clone(),
+            has_this: self.has_this,
+            caps,
+            this,
+            lams,
+        }
+    }
+}
+
+/// A copy's parameters bound to lambdas, by position.
+pub(super) type BoundParams = Vec<(usize, Rc<Bound>)>;
+
+/// A copy of a function to generate for the lambdas bound to its parameters.
+pub(super) struct BoundCopy {
+    pub class: ClassId,
+    pub method: usize,
+    pub name: String,
+    pub subst: Vec<(String, Ty)>,
+    pub cargs: Vec<Ty>,
+    pub bound: BoundParams,
+    /// The C parameters that come after the function's own.
+    pub params: Vec<String>,
+}
+
+/// The local declarations a lambda's body names from outside it, in order, once each.
+fn outer_names(facts: &Facts, lam: &Expr) -> Vec<(u32, u32)> {
+    fn expr(facts: &Facts, e: &Expr, lam: Span, out: &mut Vec<(u32, u32)>) {
+        if let E::Ident(_) = &e.kind
+            && let Some(NameRes::Local(d)) = facts.names.get(&key(e.span))
+            && !(lam.start <= d.0 && d.1 <= lam.end)
+            && !out.contains(d)
+        {
+            out.push(*d);
+        }
+        match &e.kind {
+            E::Lambda { body, .. } => {
+                if let LambdaBody::Block(b) = body.as_ref() {
+                    b.stmts.iter().for_each(|s| stmt(facts, s, lam, out));
+                }
+            }
+            E::Switch(sw) => {
+                for r in &sw.rules {
+                    if let SwitchBody::Block(b) = &r.body {
+                        b.stmts.iter().for_each(|s| stmt(facts, s, lam, out));
+                    }
+                }
+            }
+            _ => {}
+        }
+        for x in crate::check::expr_children(e) {
+            expr(facts, x, lam, out);
+        }
+    }
+    fn stmt(facts: &Facts, s: &Stmt, lam: Span, out: &mut Vec<(u32, u32)>) {
+        let (ss, es) = crate::check::stmt_children(s);
+        es.into_iter().for_each(|e| expr(facts, e, lam, out));
+        ss.into_iter().for_each(|s| stmt(facts, s, lam, out));
+    }
+    let mut out = Vec::new();
+    expr(facts, lam, lam.span, &mut out);
+    out
+}
 
 /// Where a status that an inlined lambda returns goes (DESIGN §9.3): to the `@` reading
 /// the call it's passed to, or, with none, to a stop at that call. `action` has `%%ST%%`
@@ -107,7 +273,10 @@ impl<'p, 'a> Gen<'p, 'a> {
     }
 
     fn apply_inner(&mut self, f: &Expr, args: &[String]) -> String {
-        let Some((params, body)) = as_lambda(f) else {
+        if let Some(b) = self.bound_of(f) {
+            return self.inline_bound(&b, args);
+        }
+        if as_lambda(f).is_none() {
             // A function value, called through its pointer.
             let ft = settle(&self.ty(f));
             let fv = self.expr(f, &ft);
@@ -120,6 +289,15 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
             let fail = self.lambda_failed(&format!("{}.s", t));
             return format!("({{ __auto_type {t} = {}; {}; {t}.v; }})", call, fail, t = t);
+        }
+        self.inline_lambda(f, args, "")
+    }
+
+    /// The lambda `f` inlined on `args`, with `after` (C declarations) after its
+    /// parameters are bound.
+    fn inline_lambda(&mut self, f: &Expr, args: &[String], after: &str) -> String {
+        let Some((params, body)) = as_lambda(f) else {
+            return self.unsupported(f.span, "this function value");
         };
         let (ptys, ret) = self.fn_sig(f);
         let mut binds = String::new();
@@ -131,6 +309,7 @@ impl<'p, 'a> Gen<'p, 'a> {
                     .insert(key(id.span), (format!("(*{})", v), t.clone()));
             }
         }
+        binds.push_str(after);
         match body {
             LambdaBody::Expr(x) => {
                 if ret == Ty::Void {
@@ -201,7 +380,7 @@ impl<'p, 'a> Gen<'p, 'a> {
         if self.facts.capturing.contains(&key(e.span)) {
             return self.unsupported(
                 e.span,
-                "a lambda that captures, passed to a function of your own",
+                "a lambda that captures, passed to a method called through an interface or to a constructor",
             );
         }
         let Some((params, body)) = as_lambda(e) else {
@@ -326,5 +505,230 @@ impl<'p, 'a> Gen<'p, 'a> {
         }
         self.line(&format!("goto {};", label));
         true
+    }
+
+    /// The lambda a parameter of this copy of a function is bound to, when `e` names one.
+    pub(super) fn bound_of(&self, e: &Expr) -> Option<Rc<Bound>> {
+        let e = strip_paren(e);
+        let E::Ident(_) = &e.kind else {
+            return None;
+        };
+        match self.facts.names.get(&key(e.span)) {
+            Some(NameRes::Local(d)) => self.lam_binds.get(d).cloned(),
+            _ => None,
+        }
+    }
+
+    /// What a `func` argument of a call to a function of the program's own binds: a lambda
+    /// that captures, or a parameter bound to one already, passed on.
+    pub(super) fn bound_arg(&mut self, e: &Expr) -> Option<Rc<Bound>> {
+        if let Some(b) = self.bound_of(e) {
+            return Some(b);
+        }
+        let l = strip_paren(e);
+        if as_lambda(l).is_none() || !self.facts.capturing.contains(&key(l.span)) {
+            return None;
+        }
+        let mut caps = Vec::new();
+        let mut lams = Vec::new();
+        for d in outer_names(self.facts, l) {
+            if let Some(b) = self.lam_binds.get(&d) {
+                lams.push((d, b.clone()));
+            } else if let Some((c, ty)) = self.locals.get(&d).cloned() {
+                let ctype = self.cty(&ty, l.span);
+                caps.push(Cap {
+                    decl: d,
+                    c,
+                    ty,
+                    ctype,
+                });
+            } else {
+                return None;
+            }
+        }
+        let this = self.has_this.then(|| {
+            let t = self.this_class();
+            ("self".to_string(), self.cty(&t, l.span))
+        });
+        Some(Rc::new(Bound {
+            lam: l.clone(),
+            class: self.class,
+            file: self.file,
+            subst: self.subst.clone(),
+            cargs: self.cur_cargs.clone(),
+            has_this: self.has_this,
+            caps,
+            this,
+            lams,
+        }))
+    }
+
+    /// The copy of method `i` of class `c` (called as `fname`, in the instantiation `map`)
+    /// for the lambdas `bound` to its parameters, and the C arguments to add for them.
+    pub(super) fn bound_copy(
+        &mut self,
+        c: ClassId,
+        i: usize,
+        fname: &str,
+        map: &[(String, Ty)],
+        bound: &[(usize, Rc<Bound>)],
+        span: Span,
+    ) -> (String, Vec<String>) {
+        let mut args = Vec::new();
+        for (_, b) in bound {
+            b.args(&mut args);
+        }
+        if bound.iter().any(|(_, b)| b.depth() > MAX_BOUND_DEPTH) {
+            let u = self.unsupported(
+                span,
+                "recursion that wraps a lambda in a new one at every call",
+            );
+            return (u, args);
+        }
+        let shapes: Vec<String> = bound
+            .iter()
+            .map(|(k, b)| format!("{}:{}", k, b.shape()))
+            .collect();
+        let k = format!("{}|{}", fname, shapes.join("|"));
+        if let Some(n) = self.bound_copies.get(&k) {
+            return (n.clone(), args);
+        }
+        let name = format!("{}_l{}", fname, self.bound_copies.len());
+        self.bound_copies.insert(k, name.clone());
+        let mut n = 0;
+        let mut params = Vec::new();
+        let bound = bound
+            .iter()
+            .map(|(k, b)| (*k, Rc::new(b.in_copy(&mut n, &mut params))))
+            .collect();
+        let cargs = self.prog.classes[c]
+            .type_params
+            .iter()
+            .map(|p| {
+                map.iter()
+                    .find(|(n, _)| *n == p.name)
+                    .map_or(Ty::Unknown, |(_, t)| t.clone())
+            })
+            .collect();
+        self.copy_queue.push(BoundCopy {
+            class: c,
+            method: i,
+            name: name.clone(),
+            subst: map.to_vec(),
+            cargs,
+            bound,
+            params,
+        });
+        (name, args)
+    }
+
+    /// Generates the queued copies of functions for lambdas, and any they ask for.
+    pub(super) fn drain_copies(&mut self) {
+        while let Some(copy) = self.copy_queue.pop() {
+            let prog = self.prog;
+            let saved_subst = std::mem::replace(&mut self.subst, copy.subst.clone());
+            let saved_cargs = std::mem::replace(&mut self.cur_cargs, copy.cargs.clone());
+            self.file = prog.classes[copy.class].file;
+            let m = &prog.classes[copy.class].methods[copy.method];
+            self.copy_for = Some((copy.bound, copy.params));
+            self.method_version(copy.class, m, &copy.name, None, false);
+            self.copy_for = None;
+            self.drain_lambdas();
+            self.subst = saved_subst;
+            self.cur_cargs = saved_cargs;
+        }
+    }
+
+    /// A call of the lambda `b` is bound to, on `args`: its value and status, as a call
+    /// through a `func` value gives them (DESIGN §9.3).
+    pub(super) fn call_bound(&mut self, b: &Rc<Bound>, args: &[String], ret: &Ty, span: Span) -> String {
+        let r = self.tmp("br");
+        let l = self.tmp("bend");
+        let void = *ret == Ty::Void;
+        let (decl, action) = if void {
+            (
+                format!("uint8_t {} = 0;", r),
+                format!("{{ {} = %%ST%%; goto {}; }}", r, l),
+            )
+        } else {
+            let rc = self.ret_c_of(ret, true, span);
+            (
+                format!("{} {} = {{0}};", rc, r),
+                format!("{{ {}.s = %%ST%%; goto {}; }}", r, l),
+            )
+        };
+        // The arguments are values, which the inlined lambda binds its parameters to.
+        let mut decl = decl;
+        let mut vals = Vec::new();
+        for a in args {
+            let v = self.tmp("ba");
+            let _ = write!(decl, " __auto_type {} = {};", v, a);
+            vals.push(v);
+        }
+        let saved = self.catching.take();
+        self.lambda_fail.push(LambdaFail { action, used: false });
+        let code = self.inline_bound(b, &vals);
+        self.lambda_fail.pop();
+        self.catching = saved;
+        if void {
+            format!("({{ __label__ {l}; {d} {c}; {l}: ; {r}; }})", l = l, d = decl, c = code, r = r)
+        } else {
+            format!("({{ __label__ {l}; {d} {r}.v = {c}; {l}: ; {r}; }})", l = l, d = decl, c = code, r = r)
+        }
+    }
+
+    /// The lambda `b` is bound to, inlined on `args`: generated where it was written,
+    /// reading what it captured through this copy's parameters, and `this` as `self`.
+    fn inline_bound(&mut self, b: &Rc<Bound>, args: &[String]) -> String {
+        let saved = (
+            self.class,
+            self.file,
+            std::mem::replace(&mut self.subst, b.subst.clone()),
+            std::mem::replace(&mut self.cur_cargs, b.cargs.clone()),
+            self.has_this,
+        );
+        self.class = b.class;
+        self.file = b.file;
+        self.has_this = b.has_this;
+        let old_locals: Vec<_> = b
+            .caps
+            .iter()
+            .map(|c| (c.decl, self.locals.insert(c.decl, (c.c.clone(), c.ty.clone()))))
+            .collect();
+        // Its names mean what they meant where it was written: a variable it read isn't
+        // bound to a lambda of the function it's inlined in.
+        let mut old_binds: Vec<_> = b
+            .caps
+            .iter()
+            .map(|c| (c.decl, self.lam_binds.remove(&c.decl)))
+            .collect();
+        old_binds.extend(
+            b.lams
+                .iter()
+                .map(|(d, x)| (*d, self.lam_binds.insert(*d, x.clone()))),
+        );
+        let shadow = b
+            .this
+            .as_ref()
+            .map_or(String::new(), |(c, ct)| format!("{} *self = {}; ", ct, c));
+        let code = self.inline_lambda(&b.lam, args, &shadow);
+        for (d, old) in old_binds.into_iter().rev() {
+            match old {
+                Some(x) => self.lam_binds.insert(d, x),
+                None => self.lam_binds.remove(&d),
+            };
+        }
+        for (d, old) in old_locals.into_iter().rev() {
+            match old {
+                Some(x) => self.locals.insert(d, x),
+                None => self.locals.remove(&d),
+            };
+        }
+        self.class = saved.0;
+        self.file = saved.1;
+        self.subst = saved.2;
+        self.cur_cargs = saved.3;
+        self.has_this = saved.4;
+        code
     }
 }

@@ -104,8 +104,8 @@ The memory model and the reference rules follow those of the Goose language.
 ## Status
 
 The compiler parses and type-checks the whole grammar, and runs the reference
-checks for lifetimes, removals and variable-size values (rules S, R and V of
-`REFERENCES.md`; rule L is still to come). It generates C for:
+checks for lifetimes, removals, variable-size values and links (rules S, R, V and
+L of `REFERENCES.md`). It generates C for:
 - classes, generics, lambdas and interfaces;
 - records stored inline, with their text and nested arrays in one block;
 - every kind of array, hash maps, sets and pools;

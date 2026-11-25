@@ -36,7 +36,7 @@ mod sorting;
 mod versions;
 
 use generics::{Inst, InstKind};
-use lambdas::PendingLambda;
+use lambdas::{Bound, BoundCopy, BoundParams, PendingLambda};
 use maps::MapOps;
 use sorting::Order;
 
@@ -152,6 +152,8 @@ struct Gen<'p, 'a> {
     /// The current function returns an array of the plain layout, built where its
     /// caller's `_dst` says (DESIGN §3.3).
     dst_fn: bool,
+    /// `direct_result` for the built-in call about to be generated, such as `filter`.
+    builtin_into: Option<String>,
     /// The local array the current function returns by name, built in `_dst`.
     result_local: Option<(u32, u32)>,
     /// The type of the value the last `with_status` evaluated.
@@ -162,6 +164,15 @@ struct Gen<'p, 'a> {
     /// Lambdas used as values, still to generate, and the C names given to them.
     pending_lambdas: Vec<PendingLambda>,
     lambda_names: HashMap<String, String>,
+    /// In a copy of a function made for lambdas, its parameters bound to them, by
+    /// declaration (DESIGN §9.3).
+    lam_binds: HashMap<(u32, u32), std::rc::Rc<Bound>>,
+    /// The copies made so far, by function and lambdas, and those still to generate.
+    bound_copies: HashMap<String, String>,
+    copy_queue: Vec<BoundCopy>,
+    /// For the copy `method_version` is about to generate: its bound parameters and the
+    /// C parameters it takes for them.
+    copy_for: Option<(BoundParams, Vec<String>)>,
     /// Inlined lambda block bodies being generated: result, end label, result type.
     inline_ret: Vec<(String, String, Ty)>,
     /// Where a status that the lambda being inlined returns goes (DESIGN §9.3).
@@ -370,12 +381,17 @@ impl<'p, 'a> Gen<'p, 'a> {
             direct_result: None,
             fresh_dst: false,
             dst_fn: false,
+            builtin_into: None,
             result_local: None,
             last_status_ret: Ty::Void,
             fn_types: HashMap::new(),
             fn_typedefs: String::new(),
             pending_lambdas: Vec::new(),
             lambda_names: HashMap::new(),
+            lam_binds: HashMap::new(),
+            bound_copies: HashMap::new(),
+            copy_queue: Vec::new(),
+            copy_for: None,
             inline_ret: Vec::new(),
             lambda_fail: Vec::new(),
             call_names: Vec::new(),
@@ -967,7 +983,9 @@ impl<'p, 'a> Gen<'p, 'a> {
         loop {
             self.drain_lib();
             self.drain_insts();
-            if self.lib_queue.is_empty() && self.inst_queue.is_empty() {
+            self.drain_copies();
+            if self.lib_queue.is_empty() && self.inst_queue.is_empty() && self.copy_queue.is_empty()
+            {
                 break;
             }
         }
@@ -1015,6 +1033,7 @@ impl<'p, 'a> Gen<'p, 'a> {
         self.is_ctor = is_ctor;
         self.is_main = false;
         self.locals.clear();
+        self.lam_binds.clear();
         self.out.clear();
         self.indent = 1;
         self.defers.clear();
@@ -1152,6 +1171,21 @@ impl<'p, 'a> Gen<'p, 'a> {
         }
         let ptys: Vec<Ty> = m.params.iter().map(|t| self.sb(t)).collect();
         params.extend(self.params_c(&m.decl.params, &ptys));
+        // A copy for lambdas: its bound parameters aren't passed, and what the lambdas
+        // read is (DESIGN §9.3).
+        let copy = self.copy_for.take();
+        let is_copy = copy.is_some();
+        if let Some((bound, extra)) = copy {
+            let off = params.len() - m.decl.params.len();
+            for (k, b) in bound.iter().rev() {
+                params.remove(off + k);
+                if let Name::Ident(id) = &m.decl.params[*k].name {
+                    self.locals.remove(&key(id.span));
+                    self.lam_binds.insert(key(id.span), b.clone());
+                }
+            }
+            params.extend(extra);
+        }
         let small = !self.is_main
             && level.is_none()
             && !dispatch
@@ -1164,6 +1198,7 @@ impl<'p, 'a> Gen<'p, 'a> {
         let base = (!self.is_main
             && level.is_none()
             && !dispatch
+            && !is_copy
             && !m.can_fail
             && !self.dst_fn
             && self.self_calls(&body.stmts, m) >= 2)
@@ -2073,6 +2108,21 @@ impl<'p, 'a> Gen<'p, 'a> {
                     self.line(&format!("{} {} = {};", ct, name, zero));
                 }
             }
+        }
+    }
+
+    /// Whether a value of this type is copied whole by a C assignment, as an element a
+    /// built-in such as `filter` copies: not an array or map, a variable-size record, a
+    /// class with a growable field, or a value with links.
+    fn plain_elem(&self, t: &Ty) -> bool {
+        let t = settle(t);
+        if on_stack(&t) || self.vs(&t) || self.prog.link_bearing(&t) || t == Ty::Void {
+            return false;
+        }
+        match &t {
+            Ty::Class(id, _) => self.growable_fields(*id) == 0,
+            Ty::Unknown => false,
+            _ => true,
         }
     }
 
@@ -3587,6 +3637,13 @@ impl<'p, 'a> Gen<'p, 'a> {
                     };
                     (c.clone(), ty)
                 }
+                None if self.lam_binds.contains_key(d) => (
+                    self.unsupported(
+                        span,
+                        &format!("using `{}` as a value when a lambda that captures is passed for it", n),
+                    ),
+                    t,
+                ),
                 None => (
                     self.unsupported(span, &format!("the variable `{}` here", n)),
                     t,
@@ -5041,11 +5098,6 @@ impl<'p, 'a> Gen<'p, 'a> {
                 };
                 let targs = fact.targs.clone();
                 let (mut fname, map) = self.method_ref(c, i, recv.as_ref(), &targs, e.span);
-                // A call to itself copies its base case first (DESIGN §14.2).
-                if self.base_name.as_deref() == Some(fname.as_str()) {
-                    self.base_used = true;
-                    fname.push_str("_base");
-                }
                 let mut cargs = Vec::new();
                 let mut rest: &[Ty] = &params;
                 if let E::Member { expr: base, .. } = &callee.kind {
@@ -5078,9 +5130,29 @@ impl<'p, 'a> Gen<'p, 'a> {
                         cargs.push(self.c_arg(v, p, nul));
                     }
                 } else {
-                    for (a, p) in args.iter().zip(rest) {
+                    // A lambda that captures goes to a copy of the function made for it
+                    // (DESIGN §9.3), as does one this copy was given, passed on.
+                    let shift = usize::from(recv_arg);
+                    let mut bound = Vec::new();
+                    for (k, (a, p)) in args.iter().zip(rest).enumerate() {
+                        if matches!(settle(p), Ty::Func(..))
+                            && let Some(b) = self.bound_arg(&a.expr)
+                        {
+                            bound.push((k + shift, b));
+                            continue;
+                        }
                         cargs.push(self.arg_code(&a.expr, p));
                     }
+                    if !bound.is_empty() {
+                        let (name, extra) = self.bound_copy(c, i, &fname, &map, &bound, e.span);
+                        fname = name;
+                        cargs.extend(extra);
+                    }
+                }
+                // A call to itself copies its base case first (DESIGN §14.2).
+                if self.base_name.as_deref() == Some(fname.as_str()) {
+                    self.base_used = true;
+                    fname.push_str("_base");
                 }
                 let fname = runtime_c.map_or(fname, str::to_string);
                 let r = if map.is_empty() {
@@ -5126,6 +5198,21 @@ impl<'p, 'a> Gen<'p, 'a> {
             }
             // Every function value can fail (DESIGN §9.3).
             Origin::Value => {
+                // A parameter bound to a lambda: the lambda, inlined.
+                if let Some(b) = self.bound_of(callee) {
+                    let params: Vec<Ty> = fact.params.iter().map(|t| self.sb(t)).collect();
+                    let cargs: Vec<String> = args
+                        .iter()
+                        .zip(&params)
+                        .map(|(a, p)| self.expr(&a.expr, p))
+                        .collect();
+                    let code = self.call_bound(&b, &cargs, &ret, e.span);
+                    return CallOut {
+                        code,
+                        ret,
+                        fails: true,
+                    };
+                }
                 let ft = settle(&self.ty(callee));
                 let f = self.expr(callee, &ft);
                 let params: Vec<Ty> = fact.params.iter().map(|t| self.sb(t)).collect();
@@ -5143,6 +5230,7 @@ impl<'p, 'a> Gen<'p, 'a> {
             Origin::Builtin => {
                 let name = fact.name.clone();
                 let params: Vec<Ty> = fact.params.iter().map(|t| self.sb(t)).collect();
+                self.builtin_into = direct;
                 self.builtin(e, callee, &name, args, &params, ret)
             }
             _ => {
@@ -5183,7 +5271,9 @@ impl<'p, 'a> Gen<'p, 'a> {
         ret: Ty,
     ) -> CallOut {
         self.call_names.push((name.to_string(), e.span));
-        let c = self.builtin_inner(e, callee, name, args, params, ret);
+        // Taken first, so the calls in the receiver and the arguments don't see it.
+        let into = self.builtin_into.take();
+        let c = self.builtin_inner(e, callee, name, args, params, ret, into);
         self.call_names.pop();
         c
     }
@@ -5197,6 +5287,7 @@ impl<'p, 'a> Gen<'p, 'a> {
         args: &[ast::Arg],
         params: &[Ty],
         ret: Ty,
+        into: Option<String>,
     ) -> CallOut {
         let span = e.span;
         let loc = self.loc(span);
@@ -6136,6 +6227,76 @@ impl<'p, 'a> Gen<'p, 'a> {
                     ),
                     Ty::Void,
                 )
+            }
+            // A new array, built where the result goes, as a function's is (DESIGN §3.3):
+            // in a new variable's storage, or on a data stack of its own, copied to the
+            // scratch stack when it's a temporary.
+            "filter" | "map" | "sortedIndexes" | "sortedIndexesBy" => {
+                let Some(rel) = ret.elem().cloned() else {
+                    return ok(self.unsupported(span, &format!("`{}` here", m)), ret);
+                };
+                if !self.plain_elem(&rel) || !self.plain_elem(&el) {
+                    let what = format!("`{}` on an array of {}", m, self.prog.show(if self.plain_elem(&el) { &rel } else { &el }));
+                    return ok(self.unsupported(span, &what), ret);
+                }
+                let rc = self.cty(&rel, span);
+                let site = self.site();
+                let at = match &into {
+                    Some(p) => format!("((void *)({p}) ? (void *)({p}) : zr_stack({}))", site, p = p),
+                    None => format!("zr_stack({})", site),
+                };
+                let r = self.tmp("nr");
+                let body = match m {
+                    "filter" => {
+                        let keep = self.apply(&args[0].expr, &[arr.at("_i")]);
+                        format!(
+                            "for (int64_t _i = 0; _i < {len}; _i++) if ({keep}) (({rc}*){r}.p)[{r}.n++] = {x};",
+                            len = len,
+                            keep = keep,
+                            rc = rc,
+                            r = r,
+                            x = arr.at("_i")
+                        )
+                    }
+                    "map" => {
+                        let v = self.apply(&args[0].expr, &[arr.at("_i")]);
+                        format!(
+                            "for (int64_t _i = 0; _i < {len}; _i++) {{ {rc} _mv = {v}; (({rc}*){r}.p)[{r}.n++] = _mv; }}",
+                            len = len,
+                            v = v,
+                            rc = rc,
+                            r = r
+                        )
+                    }
+                    // A stable merge sort of the indexes (STDLIB §7.1).
+                    _ => {
+                        let order = match args.first() {
+                            None => Order::Natural,
+                            Some(f) if m == "sortedIndexesBy" => {
+                                let (_, kt) = self.fn_sig(&f.expr);
+                                Order::Key(&f.expr, kt)
+                            }
+                            Some(f) => Order::Less(&f.expr),
+                        };
+                        let get = |x: &str| arr.at(x);
+                        let sort = self.merge_sort_by("int64_t", &get, "_n", &order, false, &el, span);
+                        format!(
+                            "{{ int64_t _n = {len}, *_d = (int64_t *){r}.p; for (int64_t _i = 0; _i < _n; _i++) _d[_i] = _i; {r}.n = _n; {sort} }}",
+                            len = len,
+                            r = r,
+                            sort = sort
+                        )
+                    }
+                };
+                let code = format!(
+                    "({{ {ptr} zr_vec {r} = {{{at}, 0}}; {body} {r}; }})",
+                    ptr = ptr,
+                    r = r,
+                    at = at,
+                    body = body
+                );
+                let code = self.array_result(code, &ret, false, &into, span);
+                ok(code, ret)
             }
             "fold" if args.len() == 2 => {
                 let acc_t = ret.clone();

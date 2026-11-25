@@ -1238,6 +1238,9 @@ rows.sort((Row a, Row b) => { return a.num < b.num; });     // a block body
 - **`=>` replaces the previous `->`**, which is now the pop operator (§4.8). C# uses `=>` the same way.
 - **`func(A, B => R)`** is the type of a function that takes an `A` and a `B` and returns an `R`. Both sides are always written, with `void` for "none".
 - **Lambdas passed as parameters are compile-time values**, as in Goose. `filter` is compiled with the lambda inlined, so it costs what the handwritten loop would, and the lambda may capture anything in scope.
+  - **Passed to a function of the program's own**, a lambda that captures gets a copy of that function, which inlines it where the function calls it and is passed pointers to what it reads (2026-11-24). The copy passes the lambda on the same way, to a built-in, to another function, or to itself. A function that wraps the lambda in a new one for every call to itself would need copies without end, and is an error.
+  - **Through an interface or to a constructor** a lambda that captures can't be passed yet: the method isn't known when the call is compiled, and a constructor stores what it's given.
+  - **What it returns must outlive its use** (`REFERENCES.md` §3.3): a lambda passed straight to a built-in may return text built for the statement, since the built-in is done with it by the statement's end, and anywhere else it can't.
 - **A `func` stored in a variable, field or array can't capture.** It is a plain function pointer. Stored closures that capture are Open (§17).
 - **A lambda can fail, as any function can** (Decided 2026-11-22). `return #code v;` and `return ## f();` work in its body:
   - a call through a `func` value is a call that can fail: `@` reads its status, and one nothing reads stops the program at the call (§7.6). Every `func` can fail, so the type doesn't say it;

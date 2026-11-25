@@ -806,15 +806,143 @@ fn bugs_stop_the_program_with_their_location() {
 fn unsupported_features_are_reported_not_miscompiled() {
     let file = SourceFile::new(
         "prog.zn",
-        "i64 apply(func(i64 => i64) f, i64 x) { return f(x); }\nvoid main() { i64 k = 3; println(\"${apply((i64 x) => x * k, 2)}\"); }\n",
+        "interface Op { i64 run(func(i64 => i64) f, i64 x); }\nclass P implements Op { new() {} i64 run(func(i64 => i64) f, i64 x) { return f(x); } }\nvoid main() { i64 k = 3; P p = new P(); Op& o = p; println(\"${o.run((i64 x) => x * k, 2)}\"); }\n",
     );
     let (diags, c) = zink::compile_c(std::slice::from_ref(&file));
     assert!(c.is_none());
     assert!(diags[0].iter().any(|d| {
         d.message.contains(
-            "the C backend doesn't support a lambda that captures, passed to a function of your own yet",
+            "the C backend doesn't support a lambda that captures, passed to a method called through an interface or to a constructor yet",
         )
     }));
+}
+
+/// A lambda that captures, passed to a function of the program's own (DESIGN §9.3): a
+/// copy of the function per lambda, inlining it, for locals, a `string`, an array, a
+/// class value and a reference; called twice on its own result; a block body; a generic
+/// function and a generic class's method; passed on to a built-in, to another function,
+/// and to itself recursively; a new lambda around it; `filter` with it in a function
+/// returning an array; a failing lambda whose status the copy reads; and `this` both
+/// where the lambda is written and in the function it's passed to.
+#[test]
+fn lambdas_that_capture_get_a_copy_of_the_function() {
+    prints(
+        r#"class Box<T> {
+    T v;
+    new(T v) { this.v = v; }
+    T mapped(func(T => T) f) { return f(v); }
+}
+class Pt { i64 x; i64 y; new(i64 x, i64 y) { this.x = x; this.y = y; } }
+
+i64 twice(i64 x, func(i64 => i64) f) { return f(f(x)); }
+<T> T apply(T x, func(T => T) f) { return f(x); }
+i64 countIn(i64[:] xs, func(i64 => bool) keep) { return xs.count(keep); }
+i64 countVia(i64[:] xs, func(i64 => bool) keep) { return countIn(xs, keep) + countIn(xs, (i64 x) => !keep(x)); }
+i64 sumTo(i64 n, func(i64 => i64) f) { if (n == 0) { return 0; } return f(n) + sumTo(n - 1, f); }
+i64[..>] keepAll(i64[:] xs, func(i64 => bool) p) { return xs.filter(p); }
+i64 checked(i64 x, func(i64 => i64) f) {
+    i64 v @st = f(x);
+    if (st != 0) { return -1; }
+    return v;
+}
+
+class Scaler {
+    i64 k;
+    new(i64 k) { this.k = k; }
+    i64 scale(i64 x) { return x * k; }
+    i64 run(Box<i64>& b, i64 add) { return b.mapped((i64 v) => scale(v) + add + k); }
+}
+
+void main() {
+    i64 a = 3;
+    string name = "zink";
+    i64[..>] xs = [1, 2, 3, 4, 5, 6];
+    Pt p = new Pt(10, 20);
+    Pt& pr = p;
+    println("${twice(1, (i64 x) => x + a)} ${apply("x", (string s) => name)} ${apply(5, (i64 x) => x * xs.len)}");
+    println("${apply(1, (i64 x) => x + p.x + pr.y)} ${twice(2, (i64 x) => { if (x > a) { return x * 10; } return x + a; })}");
+    println("count ${countIn(xs, (i64 x) => x > a)} via ${countVia(xs, (i64 x) => x > a)} sum ${sumTo(4, (i64 x) => x * a)}");
+    println("keep ${keepAll(xs, (i64 x) => x % a == 0)}");
+    println("checked ${checked(4, (i64 x) => { if (x > a) { return #status.INVALID 0; } return x; })} ${checked(2, (i64 x) => { if (x > a) { return #status.INVALID 0; } return x; })}");
+    Box<i64> b = new Box<i64>(7);
+    Box<string> bs = new Box<string>("q");
+    println("box ${b.mapped((i64 v) => v + a)} ${bs.mapped((string s) => name)}");
+    Scaler sc = new Scaler(2);
+    println("scaler ${sc.run(b, a)}");
+}
+"#,
+        "7 zink 30\n31 50\ncount 3 via 6 sum 30\nkeep [3, 6]\nchecked -1 2\nbox 10 zink\nscaler 19\n",
+    );
+    // A status the copy doesn't read stops the program at the call, as through a pointer.
+    let r = run(
+        "i64 call(i64 x, func(i64 => i64) f) { return f(x); }\nvoid main() {\n    i64 lim = 3;\n    println(\"${call(2, (i64 x) => { if (x > lim) { return #status.INVALID 0; } return x; })}\");\n    println(\"${call(5, (i64 x) => { if (x > lim) { return #status.INVALID 0; } return x; })}\");\n}\n",
+        &[],
+    );
+    assert_eq!(r.stdout, "2\n");
+    assert!(r.stderr.contains("prog.zn:1: `f` failed with INVALID"), "{}", r.stderr);
+    // Recursion that wraps the lambda in a new one at every call would need copies
+    // without end.
+    let file = SourceFile::new(
+        "prog.zn",
+        "i64 nest(i64 n, func(i64 => i64) f) {\n    if (n == 0) { return f(0); }\n    return nest(n - 1, (i64 y) => f(y) + 1);\n}\nvoid main() { i64 k = 1; println(\"${nest(3, (i64 x) => x + k)}\"); }\n",
+    );
+    let (diags, c) = zink::compile_c(std::slice::from_ref(&file));
+    assert!(c.is_none());
+    assert!(diags[0].iter().any(|d| d.message.contains("recursion that wraps a lambda in a new one at every call")));
+}
+
+/// `filter`, `map` and `sortedIndexes` (STDLIB §7.1): built where the result goes, a new
+/// variable's storage, an existing one's, a function's result or a temporary; on plain,
+/// fixed and ring arrays; of classes, `string`s and floats; a lambda that captures, a
+/// nested `filter`, and an empty result.
+#[test]
+fn filter_map_and_sorted_indexes() {
+    prints(
+        r#"class Dog { string name; i64 age; new(string name, i64 age) { this.name = name; this.age = age; } }
+
+i64[..>] evens(i64[:] xs) { return xs.filter((i64 x) => x % 2 == 0); }
+
+void main() {
+    i64[..>] a = [5, 2, 8, 1, 9, 4];
+    i64 minAge = 3;
+    println("${a.filter((i64 x) => x % 2 == 0)} ${a.map((i64 x) => x * 10)}");
+    i64[..>] big = a.filter((i64 x) => x > minAge);
+    big +> 100;
+    println("big ${big} evens ${evens(a)} len ${a.filter((i64 x) => x > 4).len}");
+    big = big.filter((i64 x) => x != 100);
+    println("big again ${big}");
+    Dog[..>] dogs = [];
+    dogs +> new Dog("rex", 5);
+    dogs +> new Dog("ada", 2);
+    dogs +> new Dog("bo", 7);
+    var adults = dogs.filter((Dog d) => d.age >= minAge);
+    string[..>] names = dogs.map((Dog d) => d.name);
+    f64[..>] halves = a.map((i64 x) => (f64) x / 2.0);
+    println("adults ${adults.len} ${adults[0].name} ${adults[1].name}; names ${names}; halves ${halves}");
+    i64[..>] order = dogs.sortedIndexesBy((Dog d) => d.age);
+    i64[..>] byName = dogs.sortedIndexes((Dog x, Dog y) => x.name < y.name);
+    println("by age ${order} by name ${byName} sorted ${a.sortedIndexes()} a unchanged ${a}");
+    i64[.4] fixed = [3, 1, 2, 0];
+    i64[~.~] ring = [];
+    ring +> 7; ring +> 3; ring.pushFront(9);
+    println("fixed ${fixed.map((i64 x) => x + 1)} ${fixed.sortedIndexes()} ring ${ring.filter((i64 x) => x > 3)} ${ring.sortedIndexes()}");
+    i64 total = 0;
+    for (i64 x : a.map((i64 x) => x * x)) { total += x; }
+    println("total ${total} nested ${a.filter((i64 x) => a.filter((i64 y) => y < x).len >= 2)}");
+    i64[..>] none = a.filter((i64 x) => x > 1000);
+    println("none ${none.len} ${none} text ${a.map((i64 x) => "<${x}>")}");
+}
+"#,
+        "[2, 8, 4] [50, 20, 80, 10, 90, 40]
+big [5, 8, 9, 4, 100] evens [2, 8, 4] len 3
+big again [5, 8, 9, 4]
+adults 2 rex bo; names [rex, ada, bo]; halves [2.5, 1.0, 4.0, 0.5, 4.5, 2.0]
+by age [1, 0, 2] by name [1, 2, 0] sorted [3, 1, 5, 0, 2, 4] a unchanged [5, 2, 8, 1, 9, 4]
+fixed [4, 2, 3, 1] [3, 1, 2, 0] ring [9, 7] [2, 1, 0]
+total 191 nested [5, 8, 9, 4]
+none 0 [] text [<5>, <2>, <8>, <1>, <9>, <4>]
+",
+    );
 }
 
 /// Each example either compiles to C that the C compiler accepts, or reports what the

@@ -263,6 +263,13 @@ enum Ev {
         values: Vec<R>,
         span: Span,
     },
+    /// What a lambda that isn't passed straight to a built-in returns, which must
+    /// outlive it: not a temporary, nor a local of its own, in scope `scope`.
+    LambdaRet {
+        value: R,
+        scope: u32,
+        span: Span,
+    },
     /// A link to what `src` names stored in a field, which must point into the storage
     /// `dst` names (REFERENCES §7.4, L1): the array the field is in, for a self-relative
     /// link, or its static array, for a pool link (`pool`).
@@ -1151,6 +1158,25 @@ impl<'p, 'a> Analysis<'p, 'a> {
                         let d = self.eval(&rs, dst);
                         self.link_rule(f, &s, &d, *pool, *span, &mut errs);
                     }
+                    Ev::LambdaRet { value, scope, span } => {
+                        for r in self.eval(&rs, value) {
+                            match r.var {
+                                Var::Temp(TempKind::Text | TempKind::Value, ..) => errs.push((
+                                    *span,
+                                    "this lambda returns something built only for the statement it's in, which is released before its result is used".into(),
+                                    "only a lambda passed straight to a built-in, such as `map` or `fold`, can return one; build it in a variable outside the lambda (DESIGN §9.3)".into(),
+                                )),
+                                Var::Local(l) if f.locals[l as usize].scope.contains(scope) => {
+                                    errs.push((
+                                        *span,
+                                        format!("this lambda returns a reference into `{}`, which is released when the lambda returns", f.locals[l as usize].name),
+                                        "return a copy, or build it in a variable outside the lambda (DESIGN §9.3)".into(),
+                                    ))
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     Ev::Call(c) => {
                         for &g in &c.call.callees {
                             for (a, b, pool) in &self.summaries[g].links {
@@ -1170,6 +1196,14 @@ impl<'p, 'a> Analysis<'p, 'a> {
                             if sccs[g].is_some() && sccs[g] == sccs[i] {
                                 for &l in &c.in_scope {
                                     let lv = &f.locals[l as usize];
+                                    if lv.name.starts_with('`') {
+                                        errs.push((
+                                            c.span,
+                                            format!("{} is still being built during this call, which can recurse back into `{}`", lv.name, f.name),
+                                            "it would need a new data stack on every call; build it with a loop into an array passed in by reference from outside the cycle (REFERENCES §8.4)".into(),
+                                        ));
+                                        continue;
+                                    }
                                     let what = if self.prog.variable_size(&lv.ty) {
                                         "a variable-size record"
                                     } else {
@@ -1483,7 +1517,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
                         }
                         live = with_args;
                     }
-                    Ev::Store { .. } | Ev::Ret { .. } | Ev::Link { .. } => {}
+                    Ev::Store { .. } | Ev::Ret { .. } | Ev::Link { .. } | Ev::LambdaRet { .. } => {}
                 },
                 Node::Block { body, defers } => {
                     // A deferred statement runs when the block ends (REFERENCES §9).
@@ -1865,6 +1899,13 @@ struct Builder<'x, 'p, 'a> {
     pending: std::cell::RefCell<Vec<(R, Span)>>,
     /// The array a `new` about to be evaluated is built in place in (CallR::into).
     new_into: Option<R>,
+    /// For each lambda being walked, its result type and what its `return`s give.
+    lambda_rets: Vec<(Ty, R)>,
+    /// What each lambda returns, by span, for the built-ins whose result it is.
+    lambda_res: HashMap<(u32, u32), R>,
+    /// The expression about to be walked is a lambda passed straight to a built-in,
+    /// which may return a temporary: the built-in's result is rooted at it.
+    lambda_to_builtin: bool,
 }
 
 impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
@@ -1886,6 +1927,9 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             lambda_depth: 0,
             pending: Default::default(),
             new_into: None,
+            lambda_rets: Vec::new(),
+            lambda_res: HashMap::new(),
+            lambda_to_builtin: false,
         }
     }
 
@@ -2328,7 +2372,11 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 let mut values = Vec::new();
                 if let Some(v) = value {
                     let val = self.expr(v);
-                    let ret = self.fn_ret();
+                    // A `return` in a lambda's block returns from the lambda.
+                    let ret = match self.lambda_rets.last() {
+                        Some((t, _)) if self.lambda_depth > 0 => t.clone(),
+                        _ => self.fn_ret(),
+                    };
                     match (&ret, &val.elems, &v.kind) {
                         (Ty::Tuple(ts), Some(elems), E::Tuple(xs)) => {
                             for ((t, ev), x) in ts.iter().zip(elems).zip(xs) {
@@ -2353,6 +2401,10 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                         span: s.span,
                     });
                     self.emit(Node::Return);
+                } else if let Some((_, r)) = self.lambda_rets.last_mut() {
+                    for v in values {
+                        *r = R::union(std::mem::replace(r, R::Empty), v);
+                    }
                 }
             }
             S::Destructure { targets, value, .. } => {
@@ -2521,8 +2573,16 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 }
             }
             E::Lambda { params, body } => {
+                let to_builtin = std::mem::take(&mut self.lambda_to_builtin);
+                let ret = match self.ty(e) {
+                    Ty::Func(_, r) => *r,
+                    _ => Ty::Unknown,
+                };
                 self.lambda_depth += 1;
                 self.push_scope();
+                let scope = self.scopes.last().copied().unwrap_or(0);
+                self.lambda_rets.push((ret.clone(), R::Empty));
+                let mut res = R::Empty;
                 let nodes = self.sub(|me| {
                     for p in params {
                         if let Name::Ident(n) = &p.name {
@@ -2532,11 +2592,25 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                     }
                     match body.as_ref() {
                         LambdaBody::Expr(x) => {
-                            me.expr(x);
+                            let v = me.expr(x);
+                            let from = me.ty(x);
+                            res = me.convert(&v, &from, &ret, x.span);
                         }
                         LambdaBody::Block(b) => me.block(b),
                     }
+                    let returned = me.lambda_rets.pop().map_or(R::Empty, |(_, r)| r);
+                    res = R::union(std::mem::replace(&mut res, R::Empty), returned);
+                    // Only a built-in uses what the lambda returns before the end of the
+                    // statement, so anywhere else it can't be a temporary (DESIGN §9.3).
+                    if !to_builtin && !matches!(res, R::Empty) {
+                        me.ev(Ev::LambdaRet {
+                            value: res.clone(),
+                            scope,
+                            span: e.span,
+                        });
+                    }
                 });
+                self.lambda_res.insert(key(e.span), res);
                 self.pop_scope();
                 self.lambda_depth -= 1;
                 self.emit(Node::Block {
@@ -3228,6 +3302,25 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
         params: &[Ty],
     ) -> Val {
         let mut vals = Vec::new();
+        // The array `filter` and the like build is growable while their lambda runs, as
+        // a growable local would be (§8.4): a call in it can't recurse back here.
+        let builds = matches!(name, "filter" | "map" | "sortedIndexes" | "sortedIndexesBy")
+            && matches!(recv_ty.unref(), Ty::Array(..) | Ty::Slice(_) | Ty::View(_));
+        if builds {
+            self.push_scope();
+            let i = self.locals.len() as u32;
+            self.locals.push(LocalVar {
+                name: format!("`{}`'s result", name),
+                ty: Ty::Array(Box::new(Ty::i64()), ArrayKind::grow()),
+                span: e.span,
+                scope: self.scopes.clone(),
+                order: self.order,
+            });
+            self.order += 1;
+            if let Some(s) = self.scope_locals.last_mut() {
+                s.push(i);
+            }
+        }
         let in_place = matches!(name, "push" | "pushFront" | "insert")
             && recv_ty
                 .unref()
@@ -3237,9 +3330,14 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             if in_place && is_new(&a.expr) {
                 self.new_into = recv.clone().map(|r| R::Elems(Box::new(r)));
             }
+            self.lambda_to_builtin = lambda_of(&a.expr).is_some();
             let v = self.expr(&a.expr);
+            self.lambda_to_builtin = false;
             self.new_into = None;
             vals.push((v, self.ty(&a.expr), a.expr.span));
+        }
+        if builds {
+            self.pop_scope();
         }
         let arg = |k: usize, me: &Self| -> R {
             match vals.get(k) {
@@ -3251,10 +3349,21 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             }
         };
         let all_args = |me: &Self| (0..vals.len()).fold(R::Empty, |r, k| R::union(r, arg(k, me)));
+        // What the built-in gives back from its arguments: a lambda's result rather than
+        // the lambda, which a built-in only calls.
+        let results = |me: &Self| {
+            (0..vals.len()).fold(R::Empty, |r, k| {
+                let a = match lambda_of(&args[k].expr) {
+                    Some(l) => me.lambda_res.get(&key(l.span)).cloned().unwrap_or(R::Empty),
+                    None => arg(k, me),
+                };
+                R::union(r, a)
+            })
+        };
         let Some(recv) = recv else {
             // A function: `min`, `max` and `clamp` give back one of their arguments.
             return match name {
-                "min" | "max" | "clamp" => Val::refs(all_args(self)),
+                "min" | "max" | "clamp" => Val::refs(results(self)),
                 "message" | "name" => Val::refs(R::root(Var::Literal)),
                 _ => Val::none(),
             };
@@ -3329,7 +3438,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 "getOr" => Val::refs(R::union(R::stored(recv.clone()), arg(1, self))),
                 "selectNth" | "selectNthBy" | "chunks" | "windows" => Val::refs(recv.clone()),
                 "min" | "max" | "filter" => Val::refs(R::stored(recv.clone())),
-                "map" | "fold" => Val::refs(R::union(R::stored(recv.clone()), all_args(self))),
+                "map" | "fold" => Val::refs(R::union(R::stored(recv.clone()), results(self))),
                 "split" | "splitBy" | "lines" | "words" | "trim" | "trimStart" | "trimEnd"
                 | "trimPrefix" | "trimSuffix" | "codePoints" => Val::refs(recv.clone()),
                 "splitFirst" | "splitLast" => Val {
@@ -3396,4 +3505,13 @@ fn is_true(e: &Expr) -> bool {
 /// A capped ring or gap buffer whose elements can move (REFERENCES §5.4).
 fn moves(t: &Ty) -> bool {
     matches!(t.unref(), Ty::Array(_, k) if k.moves_elements())
+}
+
+/// The lambda an argument is, through any parentheses.
+fn lambda_of(e: &Expr) -> Option<&Expr> {
+    match &e.kind {
+        E::Lambda { .. } => Some(e),
+        E::Paren(x) => lambda_of(x),
+        _ => None,
+    }
 }

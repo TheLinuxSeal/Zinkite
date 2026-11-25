@@ -138,7 +138,6 @@ impl<'p, 'a> Gen<'p, 'a> {
         el: &Ty,
         span: Span,
     ) -> String {
-        self.used_scratch = true;
         let get = |x: &str| {
             if value.is_empty() {
                 x.to_string()
@@ -146,6 +145,22 @@ impl<'p, 'a> Gen<'p, 'a> {
                 format!("{}[{}]", value, x)
             }
         };
+        self.merge_sort_by(item, &get, n, o, desc, el, span)
+    }
+
+    /// The same, where `get` gives the element an entry of `_d` stands for.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn merge_sort_by(
+        &mut self,
+        item: &str,
+        get: &dyn Fn(&str) -> String,
+        n: &str,
+        o: &Order,
+        desc: bool,
+        el: &Ty,
+        span: Span,
+    ) -> String {
+        self.used_scratch = true;
         let less = self.order_less(o, desc, &get("_d[_j]"), &get("_d[_i]"), el, span);
         format!(
             "{{ {item} *_tmp = ({item} *)zr_scratch_alloc((size_t)({n}) * sizeof({item})); for (int64_t _w = 1; _w < {n}; _w *= 2) {{ for (int64_t _lo = 0; _lo < {n}; _lo += 2 * _w) {{ int64_t _mid = _lo + _w < {n} ? _lo + _w : {n}, _hi = _lo + 2 * _w < {n} ? _lo + 2 * _w : {n}, _i = _lo, _j = _mid, _k = _lo; while (_i < _mid && _j < _hi) {{ if ({less}) _tmp[_k++] = _d[_j++]; else _tmp[_k++] = _d[_i++]; }} while (_i < _mid) _tmp[_k++] = _d[_i++]; while (_j < _hi) _tmp[_k++] = _d[_j++]; }} memcpy(_d, _tmp, (size_t)({n}) * sizeof *_d); }} }}",

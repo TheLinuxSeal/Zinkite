@@ -81,6 +81,7 @@ What follows from it:
 - **Within one block, a variable can hold references only into variables declared before it.**
 - **A reference can't be bound to a temporary**: `Item& r = makeItem();` is an error, since the temporary dies at the end of the statement. Write `Item it = makeItem();` instead.
 - **The same holds for interpolated text** (DESIGN §4.11): `string s = "${x}";` is an error, since the text is a temporary. The error suggests `u8[.] s = "${x}";`, which builds the text in `s`'s own storage.
+- **What a lambda returns is rooted where its value came from** (2026-11-24). A built-in that returns what its lambda does, `map` and `fold`, returns references with the lambda's roots as well as the array's, so `string r = a.fold("", (string acc, i64 x) => "${acc}${x}");` is an error, since the text is a temporary, while printing the same call isn't. A lambda passed anywhere else, to a function of the program's own or as a value, can't return a temporary or a reference into its own locals at all: the function it's passed to may keep the result after the statement the lambda's text was built for has ended. Before this, both compiled, and `r` read whatever text was built next.
 
 ### 3.4 Examples
 ```
@@ -341,6 +342,7 @@ A class has at most one growable field, and it must be the last field, so the va
 A function in a recursive cycle can't call into the cycle while one of its resizable or variable-size locals is in scope, since that local would need a stack per activation (Goose §7.8).
 - Growable data that has to outlive the recursive calls is passed in by reference from outside the cycle.
 - A resizable value can't be passed by value into the cycle.
+- **The array `filter`, `map` or `sortedIndexes` is building counts as such a local** while its lambda runs, since it grows on a stack of its own: `xs.filter((i64 x) => depth(xs, d - 1) > 0)` inside `depth` is an error (2026-11-24).
 
 ```
 void collect(Dir& d, Item[..>]& out) {

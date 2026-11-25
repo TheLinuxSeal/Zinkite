@@ -76,9 +76,13 @@ Done:
   references into removable arrays kept only in locals and parameters, also
   when the array is a field of the same object (each such field is storage of
   its own, like a root's part); no
-  recursive call while a growable local is in scope; and no stored lambda that
-  captures. A root can't be copied, passed or returned by value, or be a
-  temporary (DESIGN §6.6).
+  recursive call while a growable local is in scope, or while `filter`, `map` or
+  `sortedIndexes` is building its array; and no stored lambda that captures.
+  What a lambda returns is part of what a built-in like `map` or `fold`
+  returns, so text it builds for the statement can't be kept past it, and a
+  lambda passed anywhere but straight to a built-in can't return such text at
+  all. A root can't be copied, passed or returned by value, or be a temporary
+  (DESIGN §6.6).
 
 - rule V (variable-size values, `REFERENCES.md` §6): a variable-size field isn't
   assigned once its record is built (V1), though a fixed-size field of it can be;
@@ -107,9 +111,9 @@ Not yet:
 The checker models `zink.lang` (output, `status`, `min`, `max` and the rest),
 `math`, and the methods on numbers, strings, arrays, `hashmap`, `hashset` and
 `pool`. `zink.io` and `zink.cli` are written in Zinkite (below) and checked like
-the program's own files. Names from the `zink.*` packages that aren't written
-yet, such as `zink.json`, aren't checked, and a file that imports one gets a
-warning saying so. For the lifetime rules, a call into one of those packages is
+the program's own files, as are the other `zink.*` packages written so far. Names
+from the packages that aren't written yet, such as `zink.toml`, aren't checked,
+and a file that imports one gets a warning saying so. For the lifetime rules, a call into one of those packages is
 taken to return something rooted at everything it was given, and to remove from
 nothing.
 
@@ -190,11 +194,27 @@ when it is copied.
 Lambdas (DESIGN §9.3): one passed to a built-in, such as a comparator, key or
 predicate, is inlined where the built-in uses it, its parameters pointing at the
 elements, so it costs what a handwritten loop would and may capture anything in
-scope. One used as a value is a C function reached through a pointer, as a stored
-`func` can't capture. The sort family (`sort`, `stableSort`, `sortBy`,
-`sortByDescending`, `radixSortBy`, `partialSort` and the others) is a stable merge
-sort; `partialSort` keeps a heap of the smallest, O(n log k). Also `isSorted`,
-`findIndex`, `any`, `all`, `count`, `retain`, `dedup` and `fold`.
+scope. One that captures, passed to a function of the program's own, gets a copy
+of that function, generated where it calls the lambda with the lambda inlined
+there, and passed pointers to the variables the lambda reads and to `this` when
+it was written in a method. A copy that passes the lambda on, to a built-in, to
+another function or to itself, passes it on inlined too, and a new lambda around
+it, as in `countIn(xs, (i64 x) => !keep(x))`, gets a copy that inlines both. A
+function that wraps it in a new lambda for every call to itself is an error, as
+it would need copies without end. One used as a value is a C function reached
+through a pointer, as a stored `func` can't capture. The sort family (`sort`,
+`stableSort`, `sortBy`, `sortByDescending`, `radixSortBy`, `partialSort` and the
+others) is a stable merge sort; `partialSort` keeps a heap of the smallest,
+O(n log k). Also `isSorted`, `findIndex`, `any`, `all`, `count`, `retain`,
+`dedup` and `fold`.
+
+`filter`, `map` and `sortedIndexes` build their array where the result goes, as a
+function returning one does (DESIGN §3.3): in a new variable's storage, or on a
+data stack of their own, copied to the scratch stack when the result is a
+temporary. `sortedIndexes` merge-sorts the indexes, so it works on read-only
+slices. The elements, and what `map` returns, are values a C assignment copies:
+not arrays, variable-size records, values with links, or classes with a growable
+field.
 
 `hashmap` and `hashset` (DESIGN §4.14) follow Python's compact dict on one data
 stack: entries appended in insertion order, never moved by an insert; an index of
@@ -299,10 +319,9 @@ call the C compiler inlines.
 Where they differ from STDLIB: `fs.move` of a directory across file systems still
 fails with `CROSS_DEVICE`; `hash.xxh3`, JSON5 and `TreeBuilder` aren't written.
 
-Not yet: a capturing lambda
-passed to a function of the program's own (which needs that function specialized per lambda), `filter`, `map`
-and the other methods that build a new array, comparing class values, and the library packages that aren't written yet (`zink.json`,
-`zink.time` and the others).
+Not yet: a lambda that captures, passed to a method called through an interface
+or to a constructor; comparing class values; and the library packages that
+aren't written yet (`zink.toml`, `zink.regex` and the others).
 Using any of the rest is a clear error, not wrong code.
 
 Arrays on data stacks, by layout:
