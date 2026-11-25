@@ -1,3 +1,5 @@
 compiler/target/
 bench/compare/gen/
 __pycache__/
+result
+result-*

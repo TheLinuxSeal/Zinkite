@@ -138,6 +138,35 @@ cargo test
 
 `cargo install --path compiler` puts `zink` in `~/.cargo/bin`.
 
+### With Nix
+
+The flake's `zink` brings its own clang, which it uses when the path has no clang
+and `$CC` isn't set. `nix run github:TheLinuxSeal/Zinkite -- FILE` runs a program
+without installing anything. To install it, add the flake to a system or Home
+Manager flake:
+
+```nix
+{
+  inputs.zink.url = "github:TheLinuxSeal/Zinkite";
+  inputs.zink.inputs.nixpkgs.follows = "nixpkgs";
+
+  outputs = { nixpkgs, zink, ... }: {
+    nixosConfigurations.HOST = nixpkgs.lib.nixosSystem {
+      modules = [
+        ({ pkgs, ... }: {
+          environment.systemPackages = [ zink.packages.${pkgs.stdenv.hostPlatform.system}.default ];
+        })
+      ];
+    };
+  };
+}
+```
+
+With Home Manager, put the same package in `home.packages`. The flake also has an
+overlay, `zink.overlays.default`, which adds `pkgs.zink`. `nix flake update zink`
+picks up a newer compiler. The nixpkgs it follows needs Rust 1.88 or later, as in
+NixOS 26.05. The tests run in `nix flake check`, not when the package is built.
+
 ## Using it
 
 ```
