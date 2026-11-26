@@ -18,7 +18,9 @@ programs that fit it.
 | **G**, growth | each growable value is alone on top of its data stack, so growing never runs into another value |
 
 [`REFERENCES.md`](../REFERENCES.md) states them precisely. There are no aliasing or
-exclusivity rules: two references to the same value can both read and write it. The
+exclusivity rules: two references to the same value can both read and write it, and the
+same array can be passed twice, unless the function would use a reference into one
+argument after removing from the other ([Summaries](#summaries-instead-of-annotations)). The
 lifetime checks (rules S and R, which array a link is in, and recursion) run after type
 checking, so their errors appear only once a program has no type errors.
 
@@ -488,10 +490,11 @@ help: declare `circles` before `early`, in the same block or an enclosing one (R
 ### Summaries instead of annotations
 
 For every function, the compiler infers a **summary** from its body: which arguments its
-result may point into, which arguments it stores into which others or into statics, and
-which arrays it may remove from or grow. Each call is checked against the summary with its
-own arguments, so nothing is written in the declaration. This result may be rooted at
-either argument:
+result may point into, which arguments it stores into which others or into statics, which
+arrays it may remove from or grow, and which references into one argument it still uses
+after removing from another. Each call is checked against the summary with its own
+arguments, so nothing is written in the declaration. This result may be rooted at either
+argument:
 
 ```java
 string longest(string a, string b) {
@@ -551,10 +554,41 @@ would accept more programs, and is an open question
   over the call graph until nothing changes. A function that returns its argument on one
   path and a literal on another is rooted at both.
 - **A call through an interface** uses the union of the summaries of every method that
-  implements it, and a call through a function value the union over every function stored
-  in one of its type. The whole program is visible, so both are known.
+  implements it, and a call through a function value the union over every lambda with as
+  many parameters. The whole program is visible, so both are known.
 - **A function is compiled once** per array layout and generic instance, never once per
   root: summaries are only for checking.
+
+Inside a function, two `&` parameters are separate storage, so removing from one while a
+reference into the other is in use is fine there. A call that passes the same array as
+both is the error, and says what the function does:
+
+```java
+void refill(i64[..~]& from, i64[..~]& into) {
+    i64& first = from[0];
+    into.clear();
+    into +> 7;
+    println("${first}");
+}
+
+void main() {
+    i64[..~] a = [1];
+    i64[..~] b = [2];
+    refill(a, b);
+    refill(a, a);
+}
+```
+
+```error
+example.zn:12:5: error: `refill(...)` removes from `into` while it still uses a reference into `from`, and in this call both are in `a`
+help: pass separate storage, or have `refill` bind the reference again after the change (REFERENCES §4.2)
+```
+
+- **`this` and statics count as parameters**: `b.merge(b)` is refused when `merge` uses a
+  reference into its object after removing from its argument.
+- **A function that uses the reference only before the change**, or one that only grows an
+  array while reading a slice of it, as `appendAll(xs, xs)` would, takes the same array
+  twice.
 - The reasons are in [REFERENCES §4](../REFERENCES.md#4-functions-summaries-instead-of-annotations).
 
 ### Returning and storing references

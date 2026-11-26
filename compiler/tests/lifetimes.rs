@@ -1349,3 +1349,58 @@ fn links_arent_copied_by_slices_or_built_ins() {
     }
     ok(&main_with(node, &format!("{}Node[..>] whole = tree;", pre)));
 }
+
+/// Item 1: a function that uses a reference into one argument after removing from
+/// another is fine, until a call passes it the same storage for both (REFERENCES §4.2).
+#[test]
+fn calls_that_alias_what_a_function_keeps_apart() {
+    let f = "void f(i64[..~]& a, i64[..~]& b) { i64& r = a[0]; b.clear(); b +> 777; println(\"${r}\"); }";
+    rejects(
+        &main_with(f, "i64[..~] x = [5];\nf(x, x);"),
+        "`f(...)` removes from `b` while it still uses a reference into `a`, and in this call both are in `x`",
+    );
+    ok(&main_with(
+        f,
+        "i64[..~] x = [5];\ni64[..~] y = [6];\nf(x, y);",
+    ));
+    // A reference parameter, and a method call's receiver.
+    rejects(
+        &main_with(
+            "void g(i32[..~]& a, i32& r) { @_ = a ->; a +> 777; println(\"${r}\"); }",
+            "i32[..~] a = [5];\ng(a, a[0]);",
+        ),
+        "`g(...)` removes from `a` while it still uses `r`, and in this call both are in `a`",
+    );
+    rejects(
+        &main_with(
+            "void bump(i32& r, i32[..~]& a) { a.clear(); a +> 777; println(\"${r}\"); }",
+            "i32[..~] a = [5];\na[0].bump(a);",
+        ),
+        "while it still uses `r`",
+    );
+    // `this` and an argument, and a static and an argument.
+    rejects(
+        &main_with(
+            "class Bag {\n    i64[..~] xs;\n    mut void merge(Bag& other) { i64& r = xs[0]; other.xs.clear(); other.xs +> 777; println(\"${r}\"); }\n}",
+            "Bag b = new Bag();\nb.xs +> 5;\nb.merge(b);",
+        ),
+        "`merge(...)` removes from `other` while it still uses a reference into `this`, and in this call both are in `b`",
+    );
+    rejects(
+        "i64[..~] arr = [];\nvoid f(i64[..~]& a) { i64& r = a[0]; arr.clear(); arr +> 777; println(\"${r}\"); }\nvoid main() { arr +> 5; f(arr); }\n",
+        "removes from the static `arr` while it still uses a reference into `a`",
+    );
+    // Through a function that passes the pair on.
+    rejects(
+        &main_with(
+            &format!("{}\nvoid w(i64[..~]& p, i64[..~]& q) {{ f(p, q); }}", f),
+            "i64[..~] x = [5];\nw(x, x);",
+        ),
+        "`w(...)`",
+    );
+    // What isn't used after the change, and growth, which moves nothing, are fine.
+    ok(&main_with(
+        "void g(i64[..~]& a, i64[..~]& b) { i64& r = a[0]; println(\"${r}\"); b.clear(); }\nvoid appendAll(i64[..>]& dst, i64[:] src) { for (i64 v : src) { dst +> v; } }",
+        "i64[..~] x = [5];\ng(x, x);\ni64[..>] xs = [1, 2];\nappendAll(xs, xs);\nprintln(\"${xs}\");",
+    ));
+}

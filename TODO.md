@@ -5,7 +5,7 @@ they shouldn't: reference lifetimes, removals and moved elements, the generated 
 C runtime. Each item below was reproduced by running it; the repros are minimal versions.
 The numbers are the ones used when the audit was reported.
 
-Items 2–27 are fixed (2026-11-25), each with a regression test: 2–21 in
+Items 1–27 are fixed (2026-11-25), each with a regression test: 1–21 in
 `compiler/tests/lifetimes.rs`, 22–27 in `compiler/tests/run.rs`. The repros below are
 what those tests check.
 
@@ -16,9 +16,9 @@ the program should not have compiled.
 Already known and not repeated here: stack overflow has no message, there are no guard
 pages, and `#max_memory_mb` isn't enforced (docs/15-not-yet.md).
 
-## Needs a decision
+## Aliasing across calls (decided 2026-11-25: through summaries)
 
-- [ ] **1. Aliasing across a call (rule R).** Inside a function, two `&` parameters, a
+- [x] **1. Aliasing across a call (rule R).** Inside a function, two `&` parameters, a
   parameter and `this`, or a parameter and a static are treated as separate storage, so a
   reference through one survives a removal through the other.
   ```
@@ -31,9 +31,10 @@ pages, and `#max_memory_mb` isn't enforced (docs/15-not-yet.md).
   refused, since the receiver is evaluated before `user_call_with` collects `uses`
   (lifetimes.rs ~3315, ~3474). Summaries (`summarize`, ~892) record which formals a
   function removes from, not that it keeps using another formal's references after.
-  DESIGN §5.2 says there are no aliasing rules. Options: summaries record "uses a
-  reference from X after removing from Y" and the caller rejects calls where X and Y may
-  share a root (recommended), or an exclusivity rule for `&` arguments.
+  DESIGN §5.2 says there are no aliasing rules. Fixed with summaries: they record "uses a
+  reference into X after removing from Y", and a call where X and Y share a root is an
+  error (REFERENCES §4.2); a receiver given to a free function in method syntax is one of
+  its arguments' uses.
 
 ## Checker: rule R (removals and moves)
 

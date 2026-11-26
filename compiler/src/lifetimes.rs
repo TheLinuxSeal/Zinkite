@@ -346,7 +346,7 @@ struct Func {
 }
 
 /// What an event does to references into an array, for rule R.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Change {
     /// Removes elements: every reference and slice into it ends.
     Remove,
@@ -371,6 +371,10 @@ struct Summary {
     rearranges: Roots,
     /// Formal storage it may add elements to.
     grows: Roots,
+    /// (a, b, how): a reference rooted at formal a is still used after the function
+    /// removes from, moves or rearranges formal b. Fine while they are different storage;
+    /// a call whose arguments make them the same is an error (REFERENCES §4.2).
+    uses_after: BTreeSet<(Root, Root, Change)>,
     /// Rule L1 for the callers: (a, b, pool) when a link to what formal a names is stored
     /// where it must point into what b names.
     links: BTreeSet<(Root, Root, bool)>,
@@ -1283,6 +1287,41 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 break;
             }
         }
+        // Then what each function still uses after a change, which nothing above depends
+        // on: through the same walk as rule R, and through what its callees pass on.
+        let mut statics = self.static_rs.clone();
+        let all_rs: Vec<HashMap<Var, Roots>> = (0..self.funcs.len())
+            .map(|i| self.root_sets(&self.funcs[i], &mut statics))
+            .collect();
+        for round in 0.. {
+            if round == LIMIT {
+                break;
+            }
+            let mut changed = false;
+            for (i, rs) in all_rs.iter().enumerate() {
+                let f = &self.funcs[i];
+                let mut ctx = LiveCtx::default();
+                let mut scratch = Vec::new();
+                let start = Live::new();
+                self.live(
+                    f,
+                    rs,
+                    &self.static_rs,
+                    &f.body,
+                    &start,
+                    &mut ctx,
+                    true,
+                    &mut scratch,
+                );
+                if ctx.pairs != self.summaries[i].uses_after {
+                    self.summaries[i].uses_after = ctx.pairs;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
     }
 
     /// The summaries a call may run: its callees', and for a call through a function
@@ -2044,6 +2083,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
                         let mut with_args = live.clone();
                         with_args.extend(c.uses.iter().copied());
                         if report {
+                            self.aliased(f, rs, &c.call, &c.name, c.span, ctx, errs);
                             for sm in self.sums(&c.call) {
                                 for (set, kind) in [
                                     (&sm.removes, Change::Remove),
@@ -2205,6 +2245,91 @@ impl<'p, 'a> Analysis<'p, 'a> {
         self.live(f, rs, statics, &l.pre, &pre_after, ctx, report, errs)
     }
 
+    /// A call whose callee uses a reference into one argument after removing from
+    /// another, where these arguments are the same storage: an error. Where they are the
+    /// caller's own arguments, the caller's summary passes the pair on.
+    #[allow(clippy::too_many_arguments)]
+    fn aliased(
+        &self,
+        f: &Func,
+        rs: &HashMap<Var, Roots>,
+        call: &CallR,
+        name: &str,
+        span: Span,
+        ctx: &mut LiveCtx,
+        errs: &mut Vec<(Span, String, String)>,
+    ) {
+        let callers = |r: &Root| r.var.is_formal() || matches!(r.var, Var::Static(_));
+        for &g in &call.callees {
+            for (u, t, kind) in &self.summaries[g].uses_after {
+                let us = self.map_formal(rs, call, u);
+                let ts = self.map_formal(rs, call, t);
+                let shared = us.iter().find(|x| {
+                    !x.whole
+                        && ts.iter().any(|y| {
+                            x.var == y.var
+                                && (x.part.is_none() || y.part.is_none() || x.part == y.part)
+                        })
+                });
+                if let Some(x) = shared {
+                    let callee = &self.funcs[g];
+                    let verb = match kind {
+                        Change::Remove => "removes from",
+                        Change::Move => "can move the elements of",
+                        Change::Rearrange => "can rearrange",
+                    };
+                    // A reference parameter is used itself; anything else, a reference
+                    // into it.
+                    let used = match u.var {
+                        Var::Formal(i)
+                            if callee.params.get(i as usize).is_some_and(|p| {
+                                matches!(p.1, Ty::Ref(_) | Ty::Nullable(_))
+                                    && !Self::whole_ref(&p.1)
+                            }) =>
+                        {
+                            self.formal_name(callee, u)
+                        }
+                        _ => format!("a reference into {}", self.formal_name(callee, u)),
+                    };
+                    errs.push((
+                        span,
+                        format!(
+                            "`{}(...)` {} {} while it still uses {}, and in this call both are in {}",
+                            name,
+                            verb,
+                            self.formal_name(callee, t),
+                            used,
+                            self.root_name(f, &Root { part: None, ..*x }),
+                        ),
+                        format!("pass separate storage, or have `{}` bind the reference again after the change (REFERENCES §4.2)", callee.name),
+                    ));
+                    return;
+                }
+                for x in us.iter().filter(|x| callers(x) && !x.whole) {
+                    for y in ts.iter().filter(|y| callers(y) && y.var != x.var) {
+                        ctx.pairs.insert((*x, Root { whole: false, ..*y }, *kind));
+                    }
+                }
+            }
+        }
+    }
+
+    /// A formal root of `g`, as its own code names it.
+    fn formal_name(&self, g: &Func, r: &Root) -> String {
+        match r.var {
+            Var::Formal(i) | Var::FormalHeld(i) => g
+                .params
+                .get(i as usize)
+                .map_or("an argument".into(), |p| format!("`{}`", p.0)),
+            Var::This | Var::ThisHeld => "`this`".into(),
+            Var::Static(id) => {
+                let (c, i) = self.statics[id as usize];
+                format!("the static `{}`", self.prog.classes[c].fields[i].name)
+            }
+            _ => "an argument".into(),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn removal(
         &self,
@@ -2213,7 +2338,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
         statics: &HashMap<u32, Roots>,
         target: &Roots,
         live: &Live,
-        ctx: &LiveCtx,
+        ctx: &mut LiveCtx,
         span: Span,
         what: &str,
         kind: Change,
@@ -2231,6 +2356,27 @@ impl<'p, 'a> Analysis<'p, 'a> {
             .collect();
         if target.is_empty() {
             return;
+        }
+        // A reference into one of the caller's arrays, used after this changes another:
+        // the caller decides whether they are the same.
+        let callers = |r: &Root| r.var.is_formal() || matches!(r.var, Var::Static(_));
+        for v in live {
+            let Some(set) = rs.get(v) else { continue };
+            let ty = match v {
+                Var::Local(i) => f.locals[*i as usize].ty.clone(),
+                Var::Param(i) => f.params[*i as usize].1.clone(),
+                _ => Ty::Unknown,
+            };
+            if Self::whole_ref(&ty)
+                || kind == Change::Rearrange && matches!(ty, Ty::Slice(_) | Ty::View(_))
+            {
+                continue;
+            }
+            for u in set.iter().filter(|u| callers(u) && !u.whole) {
+                for t in target.iter().filter(|t| callers(t) && t.var != u.var) {
+                    ctx.pairs.insert((*u, Root { whole: false, ..*t }, kind));
+                }
+            }
         }
         let hits = |set: &Roots| {
             target
@@ -2356,6 +2502,9 @@ type Live = BTreeSet<Var>;
 
 #[derive(Default)]
 struct LiveCtx {
+    /// What `Summary::uses_after` gets: references into the caller's storage used after a
+    /// removal from other storage of the caller's.
+    pairs: BTreeSet<(Root, Root, Change)>,
     /// Enclosing loops: label, live at their exit, live where `continue` goes, and how
     /// many blocks with deferred statements enclosed the loop.
     loops: Vec<(Option<String>, Live, Live, usize)>,
@@ -2631,6 +2780,9 @@ struct Builder<'x, 'p, 'a> {
     new_into: Option<R>,
     /// Where each parameter is declared, for its type.
     param_spans: Vec<Span>,
+    /// The variables a receiver read, for a free function called as a method: uses of
+    /// the call, as its arguments' are.
+    recv_uses: Vec<Var>,
     /// For a constructor: its class, whose field initializers run first.
     inits: Option<ClassId>,
     /// The function being built.
@@ -2668,6 +2820,7 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             pending: Default::default(),
             new_into: None,
             param_spans: Vec::new(),
+            recv_uses: Vec::new(),
             inits: None,
             fn_id: 0,
             lambda_elems: None,
@@ -4143,7 +4296,16 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
                 if matches!(bt, Ty::TypeName(_) | Ty::Namespace(_)) {
                     (None, bt)
                 } else {
+                    // `r.bump(a)`: a free function given the receiver as its first
+                    // argument reads it as it reads the others.
+                    let recv_arg = fact.is_some_and(|f| f.recv_arg);
+                    if recv_arg {
+                        self.collect.push(Vec::new());
+                    }
                     let bv = self.expr(base);
+                    if recv_arg {
+                        self.recv_uses = self.collect.pop().unwrap_or_default();
+                    }
                     if bv.cell.is_none()
                         && !Analysis::refish(&bt)
                         && !matches!(bt.unref(), Ty::Unknown)
@@ -4371,7 +4533,8 @@ impl<'x, 'p, 'a> Builder<'x, 'p, 'a> {
             }
             arg_rs.push(self.convert(&v, &at, &p, a.expr.span));
         }
-        let uses = self.collect.pop().unwrap_or_default();
+        let mut uses = self.collect.pop().unwrap_or_default();
+        uses.append(&mut self.recv_uses);
         let call = Rc::new(CallR {
             callees: callees.clone(),
             recv,

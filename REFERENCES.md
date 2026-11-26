@@ -25,7 +25,7 @@ Five rules cover the rest:
 | **L, links** | A link always lands inside the array it belongs to | 7 |
 | **G, growth** | Each growable value is alone on top of its data stack, so growing never runs into another value | 8 |
 
-There are **no aliasing or exclusivity rules**: two references to the same element can both read and write it. Without shared-memory threads, aliasing alone can't break type safety (Goose §9.1). Threads share no memory (DESIGN §12.9): a worker gets copies of flat values and of the program's statics, so no reference crosses a thread, and every rule here holds per thread.
+There are **no aliasing or exclusivity rules**: two references to the same element can both read and write it. Without shared-memory threads, aliasing alone can't break type safety (Goose §9.1). What aliasing can do is join two arguments that a function treats as separate, so rule R follows that through summaries: a call is refused only when the function would use a reference into one of them after removing from the other (§4.2). Threads share no memory (DESIGN §12.9): a worker gets copies of flat values and of the program's statics, so no reference crosses a thread, and every rule here holds per thread.
 
 ---
 
@@ -130,7 +130,8 @@ For every function, the compiler infers a **summary** from its body:
 - **Store requirements**: pairs "references from parameter a are stored into storage reached through parameter b". Each needs the roots of a to outlive the roots of b, at every call.
 - **Effects**:
   - which arrays, reached through `&` parameters or statics, it may remove from or rebuild (for rule R);
-  - which it may grow (for rule G).
+  - which it may grow (for rule G);
+  - **uses after a change**: pairs "a reference into what parameter a refers to is still used after the function removes from, moves or rearranges what parameter b refers to", where `this` and statics count as parameters. Inside the function they are separate storage, so this is fine there (for rule R at calls).
 
 ```
 string longest(string a, string b) { return a.len >= b.len ? a : b; }
@@ -147,6 +148,7 @@ void trim(i32[..~]& xs) { while (xs.len > 10) { @_ = xs ->; } }
 - **The result's roots** are the roots of the arguments its summary names.
 - **Each store requirement** is checked against the arguments' roots, by rule S.
 - **The effects** apply to the arguments: calling `trim(nums)` is a removal from `nums` for rule R.
+- **Each use after a change** is checked against the arguments: when the arguments for a and b may be the same storage, the call is an error that says what the function does. So `f(x, x)` is refused for `void f(i64[..~]& a, i64[..~]& b) { i64& r = a[0]; b.clear(); println("${r}"); }`, and `f(x, y)` isn't; nor is `g(x, x)` when `g` uses `r` only before the change, or `appendAll(xs, xs)`, which grows `xs` while reading a slice of it, since growing moves nothing. A pair whose arguments are the caller's own parameters goes into the caller's summary.
 
 ### 4.3 Recursion, interfaces and function values
 - **Recursion**: summaries are sets of parameter positions and statics, so the compiler computes them by iterating over the call graph until nothing changes, however many rounds that takes. This always terminates; a guard on the number of rounds refuses the program rather than accept it unchecked.

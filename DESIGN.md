@@ -504,7 +504,7 @@ items[0].heavier(1.0);         // works in place, with no copy
 - **A reference held in a slot reaches what it refers to** (Decided). Storing a reference in an array element or a field needs one that can be written through, so a read-only view or a read-only object keeps its slots from being given new references, but not what those references refer to, as C's `T *const *`. `for (Shape& s : shapes)` over a `Shape&[:]` binds `s` to what the element refers to, and `s` can be passed to a `Shape&` parameter; `shapes[0] .= other` is still an error.
 
 ### 5.2 Roots: lifetime checks without annotations (Decided)
-Every reference and slice has a static **root**: the variable that bounds its target's lifetime. This is rule S (`REFERENCES.md` §3). The compiler infers roots, and a summary for each function of how its result and stores relate to its parameters' roots, so no annotations are needed. There are no aliasing or exclusivity rules. This is Goose's approach, except that functions are compiled once instead of once per root. The full rules are in `REFERENCES.md`.
+Every reference and slice has a static **root**: the variable that bounds its target's lifetime. This is rule S (`REFERENCES.md` §3). The compiler infers roots, and a summary for each function of how its result and stores relate to its parameters' roots, so no annotations are needed. There are no aliasing or exclusivity rules: a call that passes the same array twice is refused only when the function uses a reference into one after removing from the other (2026-11-25, `REFERENCES.md` §4.2). This is Goose's approach, except that functions are compiled once instead of once per root. The full rules are in `REFERENCES.md`.
 
 ```
 string longest(string a, string b) { return a.len >= b.len ? a : b; }
