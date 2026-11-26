@@ -384,8 +384,28 @@ static ZR_UNUSED zr_deq zr_deq_new(void *base) {
     return d;
 }
 
-/* Back to the middle when empty, so a queue doesn't drift through the reservation. */
-static ZR_UNUSED void zr_deq_settle(zr_deq *d) { if (d->n == 0) d->p = d->mid; }
+/* How far a deque or a cursor array's index may drift from its middle, beyond twice its
+ * own size, before it is moved back: a queue that never empties would otherwise creep
+ * through its reservation, and past it, one element per operation. Moving it costs its
+ * size once per that much drift, so O(1) per operation. */
+#define ZR_DRIFT ((int64_t)4 << 20)
+
+/* After a removal from a deque: back to the middle when empty, or when it has drifted
+ * far. A removal ends every reference and slice into the array (rule R, REFERENCES §5.2),
+ * so its elements may move then. */
+static ZR_UNUSED void zr_deq_settle(zr_deq *d, size_t esz) {
+    if (d->n == 0) {
+        d->p = d->mid;
+        return;
+    }
+    int64_t live = d->n * (int64_t)esz, off = (char *)d->p - (char *)d->mid;
+    if (off < 0) off = -off;
+    if (off > ZR_DRIFT + 2 * live) {
+        char *to = (char *)d->mid - d->n / 2 * (int64_t)esz;
+        memmove(to, d->p, (size_t)live);
+        d->p = to;
+    }
+}
 
 /* The elements of a cursor array (DESIGN §4.5): a data array whose elements never move,
  * so references stay valid. Removals leave holes that the next insert reuses, through a
@@ -455,9 +475,22 @@ static ZR_UNUSED int64_t zr_cur_len(const zr_cur *c) { return c->bn + c->an; }
 /* The slot of the element at logical position i. */
 static ZR_UNUSED uint32_t zr_cur_at(const zr_cur *c, int64_t i) { return i < c->bn ? c->bp[i] : c->ap[i - c->bn]; }
 
+/* Each half of the index back to its middle when empty, or when it has drifted far. Only
+ * slot numbers move: the elements stay where they are, and so do references to them. */
 static void zr_cur_settle(zr_cur *c) {
+    int64_t far = ZR_DRIFT / 4;
     if (c->bn == 0) c->bp = c->bmid;
+    else if (llabs((long long)(c->bp - c->bmid)) > far + 2 * c->bn) {
+        uint32_t *to = c->bmid - c->bn / 2;
+        memmove(to, c->bp, (size_t)c->bn * 4);
+        c->bp = to;
+    }
     if (c->an == 0) c->ap = c->amid;
+    else if (llabs((long long)(c->ap - c->amid)) > far + 2 * c->an) {
+        uint32_t *to = c->amid - c->an / 2;
+        memmove(to, c->ap, (size_t)c->an * 4);
+        c->ap = to;
+    }
 }
 
 /* Where an insert puts its element: at the cursor, the start or the end. */
@@ -622,7 +655,7 @@ static ZR_UNUSED uint32_t zr_chk_take_at(zr_chk *c, int64_t i) {
         for (uint32_t k = o; k + 1 < B; k++) ZR_CHK_SLOT(c, ch, k) = ZR_CHK_SLOT(c, ch, k + 1);
         /* Each later chunk gives its front to the end of the chunk before. */
         for (size_t d = ch + 1; d <= last; d++) {
-            uint32_t h = c->heads[d];
+            uint32_t h = c->heads[d] & c->M;
             uint32_t front = c->buf[(d << c->L) + h];
             c->heads[d] = (h + 1) & c->M;
             ZR_CHK_SLOT(c, d - 1, B - 1) = front;
@@ -663,6 +696,8 @@ static ZR_UNUSED void zr_chk_move(zr_chk *c, int64_t n) {
 }
 
 static ZR_UNUSED void zr_chk_clear(zr_chk *c) {
+    /* Heads from the larger chunks used so far would be out of a smaller chunk's range. */
+    memset(c->heads, 0, (((size_t)c->n >> c->L) + 1) * 4);
     zr_data_clear(&c->d);
     c->n = c->pos = 0;
     c->L = 4;
@@ -915,10 +950,13 @@ static ZR_UNUSED void zr_w_radix128(zr_sink s, zr_u128 x, int shift) {
 }
 
 static ZR_UNUSED void zr_w_fixed(zr_sink s, double x, int64_t d) {
-    char b[400];
+    /* The longest is a sign, 309 digits, a point and 100 decimals, and the NUL: 412. */
+    char b[420];
     if (d < 0) d = 0;
     if (d > 100) d = 100;
     int n = snprintf(b, sizeof b, "%.*f", (int)d, x);
+    if (n < 0) n = 0;
+    if ((size_t)n >= sizeof b) n = (int)sizeof b - 1;
     zr_put(s, b, (size_t)n);
 }
 
@@ -2458,8 +2496,12 @@ static ZR_UNUSED uint8_t zr_fs_copy(zr_slice from, zr_slice to) {
  * getrandom and created exclusively, appended to `path`. A File's handle (mode 0600), or 0
  * for a directory (mode 0700); -1 and errno when it can't be made. */
 static ZR_UNUSED int64_t zr_fs_temp(zr_vec *path, int32_t dir) {
-    const char *base = getenv("TMPDIR");
-    if (!base || !*base) base = "/tmp";
+    char tmpdir[4096];
+    ZR_ENV_LOCK();
+    const char *env = getenv("TMPDIR");
+    snprintf(tmpdir, sizeof tmpdir, "%s", env && *env ? env : "/tmp");
+    ZR_ENV_UNLOCK();
+    const char *base = tmpdir;
     size_t bn = strlen(base);
     while (bn > 1 && base[bn - 1] == '/') bn--;
     if (bn > 4000) {
@@ -2606,6 +2648,8 @@ static char **zr_proc_strings(zr_slice list) {
 /* This environment with the changes applied: "NAME=VALUE" sets, a bare "NAME" unsets. */
 static char **zr_proc_env(zr_slice changes) {
     char **ch = zr_proc_strings(changes);
+    /* Another thread's env.set can move the array, though not the text it points at. */
+    ZR_ENV_LOCK();
     int64_t n = 0;
     while (environ[n]) n++;
     char **v = (char **)zr_scratch_alloc((size_t)(n + changes.n + 1) * sizeof(char *));
@@ -2620,6 +2664,7 @@ static char **zr_proc_env(zr_slice changes) {
         }
         if (!replaced) v[k++] = (char *)e;
     }
+    ZR_ENV_UNLOCK();
     /* The last change to a name wins: a set that a later change undoes isn't kept. */
     for (int64_t j = 0; j < changes.n; j++) {
         if (!strchr(ch[j], '=')) continue;
@@ -2652,7 +2697,10 @@ static int zr_proc_start(pid_t *pid, char **argv, char **envp, const char *cwd, 
     posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGDEF);
     zr_flush();
     fflush(stderr);
+    /* It reads the environment, and PATH from it, as it starts the child. */
+    ZR_ENV_LOCK();
     int r = posix_spawnp(pid, argv[0], &fa, &at, argv, envp ? envp : environ);
+    ZR_ENV_UNLOCK();
     posix_spawn_file_actions_destroy(&fa);
     posix_spawnattr_destroy(&at);
     return r;
@@ -2809,11 +2857,17 @@ static ZR_UNUSED uint8_t zr_proc_which(zr_slice prog, zr_vec *out) {
             st = 0;
         }
     } else {
-        const char *path = getenv("PATH");
-        if (!path) path = "/usr/local/bin:/usr/bin:/bin";
+        ZR_ENV_LOCK();
+        const char *env = getenv("PATH");
+        if (!env) env = "/usr/local/bin:/usr/bin:/bin";
+        size_t pl = strlen(env);
+        char *path = (char *)zr_scratch_alloc(pl + 1);
+        memcpy(path, env, pl + 1);
+        ZR_ENV_UNLOCK();
         while (st && *path) {
             size_t dl = strcspn(path, ":");
-            char *cand = (char *)zr_scratch_alloc(dl + (size_t)prog.n + 2);
+            /* An empty entry is ".": dir, '/', the name and the NUL. */
+            char *cand = (char *)zr_scratch_alloc((dl ? dl : 1) + (size_t)prog.n + 2);
             memcpy(cand, path, dl);
             size_t at = dl;
             if (dl == 0) cand[at++] = '.';
@@ -3167,8 +3221,24 @@ static ZR_UNUSED int64_t zr_q_len(zr_queue *q) {
 }
 #endif
 
+/* The text status.name and status.message give for codes without one of their own: views
+ * of these, which last the whole run in every thread, so they're filled at the start,
+ * before any thread, from strerror, whose own buffer the next call or a thread's end
+ * reuses. */
+static char zr_num_tab[256][4];
+static char zr_msg_tab[256][64];
+
+static void zr_status_tables(void) {
+    for (int s = 0; s < 256; s++) {
+        snprintf(zr_num_tab[s], sizeof zr_num_tab[s], "%d", s);
+        if (s < 192) snprintf(zr_msg_tab[s], sizeof zr_msg_tab[s], "%s", strerror(s));
+        else snprintf(zr_msg_tab[s], sizeof zr_msg_tab[s], "Error %d", s);
+    }
+}
+
 static ZR_UNUSED void zr_start(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
+    zr_status_tables();
     /* glibc ignores the size unless it's given the buffer too. */
     static char obuf[1 << 16];
     if (!isatty(1)) {
@@ -3203,7 +3273,6 @@ static const char *zr_status_names[256];
 
 /* The names of DESIGN §7.7 and STDLIB §1.4; codegen::STATUS_NAMES is the same list. */
 static const char *zr_status_name(uint8_t s) {
-    static ZR_TLS char buf[8];
     switch (s) {
         case 0: return "OK";
         case 1: return "FAILED";
@@ -3239,12 +3308,11 @@ static const char *zr_status_name(uint8_t s) {
         case 198: return "GPU";
         case 199: return "OUT_OF_DATE";
         case 200: return "ABANDONED";
-        default: snprintf(buf, sizeof buf, "%d", s); return buf;
+        default: return zr_num_tab[s];
     }
 }
 
 static ZR_UNUSED zr_slice zr_status_message(uint8_t s) {
-    static ZR_TLS char buf[32];
     const char *m = NULL;
     switch (s) {
         case 0: m = "OK"; break;
@@ -3256,9 +3324,7 @@ static ZR_UNUSED zr_slice zr_status_message(uint8_t s) {
         case 196: m = "Position out of range"; break;
         case 197: m = "Wrong kind of value"; break;
         case 200: m = "Abandoned: a failure inside wasn't read"; break;
-        default:
-            if (s < 192) m = strerror(s);
-            else { snprintf(buf, sizeof buf, "Error %d", s); m = buf; }
+        default: m = zr_msg_tab[s];
     }
     (void)zr_status_names;
     return zr_lit(m, (int64_t)strlen(m));

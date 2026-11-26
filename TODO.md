@@ -5,8 +5,9 @@ they shouldn't: reference lifetimes, removals and moved elements, the generated 
 C runtime. Each item below was reproduced by running it; the repros are minimal versions.
 The numbers are the ones used when the audit was reported.
 
-Items 2–21 are fixed (2026-11-25), each with a regression test in
-`compiler/tests/lifetimes.rs`; the repros below are what those tests check.
+Items 2–27 are fixed (2026-11-25), each with a regression test: 2–21 in
+`compiler/tests/lifetimes.rs`, 22–27 in `compiler/tests/run.rs`. The repros below are
+what those tests check.
 
 A dangling reference into a data stack is invisible to AddressSanitizer (a data stack is
 one mapping), so most repros print a wrong value instead: `777` or `overwritten-BBB` where
@@ -216,11 +217,11 @@ println(/* the escaped view */);
 
 ## Generated code
 
-- [ ] **22. `reverse()` on an empty capped array with a cap above 65535 segfaults**: the
+- [x] **22. `reverse()` on an empty capped array with a cap above 65535 segfaults**: the
   counter is `uint32_t` (`counter()`, codegen.rs:7311), `Arr::len()` returns `a->n`
   uncast (7357), so `_j = a->n - 1` (6369) wraps to 4294967295.
   `u8[..~70000] c = []; c.reverse();`. The ring version `u8[~.~70000]` loops 2^31 times.
-- [ ] **23. Chunked arrays (`$`) after `clear()`**: `zr_chk_clear` (zink_rt.h ~667) resets
+- [x] **23. Chunked arrays (`$`) after `clear()`**: `zr_chk_clear` (zink_rt.h ~667) resets
   `L`/`M` but keeps `heads[]` from the larger chunk size, and `zr_chk_take_at` (~612)
   uses an unmasked head, so two positions share a slot.
   ```
@@ -240,25 +241,25 @@ println(/* the escaped view */);
 
 ## Runtime
 
-- [ ] **24. `x.fixed(d)` reads past its buffer**: `char b[400]` (zink_rt.h:917–923), but
+- [x] **24. `x.fixed(d)` reads past its buffer**: `char b[400]` (zink_rt.h:917–923), but
   `1.7976931348623157e308.fixed(100)` is 410 characters, and `zr_put` writes `n`.
-- [ ] **25. `status.name` and `status.message` return views of reused buffers**: `static
+- [x] **25. `status.name` and `status.message` return views of reused buffers**: `static
   ZR_TLS char buf[8]`/`buf[32]` (zink_rt.h ~3206, 3242, 3247) and `strerror()`'s buffer
   (~3260), which glibc frees on the next call and at thread exit.
   `string a = status.name(201); string b = status.name(202);` prints `a` as 202;
   `string e1 = status.message(150); string e2 = status.message(151); println(e1);` is a
   heap-use-after-free, and a static set from one in a worker dangles after it ends.
-- [ ] **26. `environ` races with threads**: `zr_env_set` takes `ZR_ENV_LOCK`, but
+- [x] **26. `environ` races with threads**: `zr_env_set` takes `ZR_ENV_LOCK`, but
   `zr_proc_env` (zink_rt.h ~2607–2621), `posix_spawnp(..., environ)` (~2655) and the
   `getenv` calls (~2461, ~2812) don't. A worker calling `env.set` while another runs a
   `Command` with `setEnv` is a heap-use-after-free.
-- [ ] **27. Deques and cursor arrays used as queues drift through their reservation**:
+- [x] **27. Deques and cursor arrays used as queues drift through their reservation**:
   `zr_deq_settle` (zink_rt.h:388) recenters only when empty, as do `zr_cur_push` /
   `zr_cur_take_front` (466–478). `i64[~.~] q = []; q +> 0;` then `q +> i; q -<;` in a loop
   moves 8 bytes per operation: 783 MB after 100M operations, and past the end of the 8 GB
   stack, into the next mapping, after about 537M.
-- [ ] Suspected: `zr_proc_which` writes n+3 bytes into n+2 for an empty PATH entry
-  (~2816/2819); a hashmap's entries reaching 4 GB overwrite its index (one 8 GB
+- [x] `zr_proc_which` wrote n+3 bytes into n+2 for an empty PATH entry (fixed with 26).
+- [ ] Suspected: a hashmap's entries reaching 4 GB overwrite its index (one 8 GB
   reservation split in half); cursor slot numbers are `uint32_t` with `UINT32_MAX` as
   "none", so 2^32 inserts wrap.
 

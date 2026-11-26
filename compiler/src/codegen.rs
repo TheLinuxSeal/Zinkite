@@ -7353,7 +7353,9 @@ impl Arr {
             Layout::Cur => format!("zr_cur_len({})", self.a),
             Layout::Gap => format!("((int64_t){a}->gs + {a}->an)", a = self.a),
             Layout::Fixed => format!("((int64_t){})", self.cap),
-            _ => format!("{}->n", self.a),
+            // A capped array's counter is as narrow as its cap allows, and unsigned, so
+            // `len - 1` on an empty one would wrap.
+            _ => format!("((int64_t){}->n)", self.a),
         }
     }
 
@@ -7663,12 +7665,12 @@ impl Arr {
                 ec = ec
             ),
             (Layout::Deq, Where::Front) => format!(
-                "if ({a}->n > 0) {{ _v = (({ec}*){a}->p)[0]; {a}->p = ({ec}*){a}->p + 1; {a}->n--; _s = 0; zr_deq_settle({a}); }}",
+                "if ({a}->n > 0) {{ _v = (({ec}*){a}->p)[0]; {a}->p = ({ec}*){a}->p + 1; {a}->n--; _s = 0; zr_deq_settle({a}, sizeof({ec})); }}",
                 a = a,
                 ec = ec
             ),
             (Layout::Deq, _) => format!(
-                "if ({a}->n > 0) {{ _v = (({ec}*){a}->p)[--{a}->n]; _s = 0; zr_deq_settle({a}); }}",
+                "if ({a}->n > 0) {{ _v = (({ec}*){a}->p)[--{a}->n]; _s = 0; zr_deq_settle({a}, sizeof({ec})); }}",
                 a = a,
                 ec = ec
             ),

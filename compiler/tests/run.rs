@@ -6691,3 +6691,94 @@ fn final_fields_hold_while_values_move() {
         "1 3.0 2\n2 1.0 4\n9 0.0 18\n",
     );
 }
+
+// ---------------------------------------------------------------- the audit of 2026-11-25 (TODO.md 22-27)
+
+/// Item 22: an empty capped array with a cap above 65535, whose counter is 32 bits, reverses
+/// to nothing rather than swapping with 4294967295.
+#[test]
+fn reversing_an_empty_wide_capped_array() {
+    prints(
+        &body(
+            "u8[..~70000] c = [];\nc.reverse();\nu8[~.~70000] r = [];\nr.reverse();\ni64[..~3] s = [1, 2, 3];\ns.reverse();\nprintln(\"${c.len} ${r.len} ${s}\");",
+        ),
+        "0 0 [3, 2, 1]\n",
+    );
+}
+
+/// Item 23: a chunked array cleared after its chunks grew starts again with small ones.
+#[test]
+fn a_cleared_chunked_array_keeps_its_order() {
+    let want: Vec<String> = (1001..1040).map(|i| i.to_string()).collect();
+    prints(
+        &body(
+            "i64[~$] c = [];\nfor (i64 i = 0; i < 2000; i++) { c +> i; }\nfor (i64 i = 0; i < 20; i++) { @_ = c -<; }\nc.clear();\nfor (i64 i = 0; i < 40; i++) { c +> 1000 + i; }\n@_ = c -<;\nprintln(\"${c}\");",
+        ),
+        &format!("[{}]\n", want.join(", ")),
+    );
+}
+
+/// Item 24: the longest `fixed` there is, 309 digits and 100 decimals, all of it.
+#[test]
+fn the_longest_fixed() {
+    let r = run(
+        &body("f64 x = 1.7976931348623157e308;\nprintln(\"${x.fixed(100)} ${(-x).fixed(100)}\");"),
+        &[],
+    );
+    let (pos, neg) = r.stdout.trim_end().split_once(' ').expect("two parts");
+    assert_eq!(pos.len(), 410, "{}", r.stdout);
+    assert!(
+        pos.bytes().all(|b| b.is_ascii_digit() || b == b'.'),
+        "{:?}",
+        pos
+    );
+    assert!(
+        pos.starts_with("17976931348623157") && pos.ends_with(&"0".repeat(100)),
+        "{}",
+        pos
+    );
+    assert_eq!(neg, format!("-{}", pos));
+}
+
+/// Item 25: status names and messages last: the next call doesn't change an earlier one.
+#[test]
+fn status_texts_last() {
+    prints(
+        &body(
+            "string a = status.name(201);\nstring b = status.name(202);\nstring e1 = status.message(150);\nstring e2 = status.message(151);\nstring e3 = status.message(230);\nstring e4 = status.message(231);\nprintln(\"${a} ${b} ${e1 != e2} ${e3} ${e4}\");",
+        ),
+        "201 202 true Error 230 Error 231\n",
+    );
+}
+
+/// Item 26: one thread changing the environment while another starts processes with
+/// their own.
+#[test]
+fn the_environment_with_threads() {
+    prints(
+        "import zink.os.*;\nimport zink.thread.*;\nvoid main() {\n    Worker setter = thread.spawn(() => { for (i64 i = 0; i < 500; i++) { env.set(\"ZK_RACE_${i}\", \"v\"); } });\n    Worker runner = thread.spawn(() => { for (i64 i = 0; i < 20; i++) { Command c = new Command(\"true\"); c.setEnv(\"ONE\", \"1\"); c.run(); } });\n    setter.join();\n    runner.join();\n    println(\"done\");\n}\n",
+        "done\n",
+    );
+}
+
+/// Item 27: a queue that never empties stays near the middle of its reservation, so its
+/// memory stays small however long it runs.
+#[test]
+fn queues_dont_drift() {
+    let text = "import zink.io.*;\nvoid main() {\n    i64[~.~] q = [];\n    i64[~] c = [];\n    q +> 0;\n    c +> 0;\n    for (i64 i = 0; i < 40000000; i++) {\n        q +> i;\n        @_ = q -<;\n        c +> i;\n        @_ = c -<;\n    }\n    u8[..>] status = [];\n    File.readAll(\"/proc/self/status\", status);\n    for (string line : status.lines()) {\n        if (line.startsWith(\"VmHWM:\")) { println(line); }\n    }\n    println(\"${q.len} ${q[0]} ${c.len} ${c[0]}\");\n}\n";
+    let r = run(text, &[]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let kb: u64 = r
+        .stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("VmHWM:"))
+        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+        .expect("VmHWM");
+    // Without recentering, 40M steps touch 320 MB of deque and 160 MB of index.
+    assert!(kb < 64 * 1024, "peak memory {} kB", kb);
+    assert!(
+        r.stdout.ends_with("1 39999999 1 39999999\n"),
+        "{}",
+        r.stdout
+    );
+}
