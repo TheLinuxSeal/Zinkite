@@ -34,7 +34,9 @@ pages, and `#max_memory_mb` isn't enforced (docs/15-not-yet.md).
   DESIGN §5.2 says there are no aliasing rules. Fixed with summaries: they record "uses a
   reference into X after removing from Y", and a call where X and Y share a root is an
   error (REFERENCES §4.2); a receiver given to a free function in method syntax is one of
-  its arguments' uses.
+  its arguments' uses. Calls through function values are checked against every lambda
+  with as many parameters (§4.3), so one lambda's pairs can refuse a call meant for
+  another; following which lambda a local `func` holds would tell them apart.
 
 ## Checker: rule R (removals and moves)
 

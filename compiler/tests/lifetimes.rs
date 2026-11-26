@@ -1404,3 +1404,41 @@ fn calls_that_alias_what_a_function_keeps_apart() {
         "i64[..~] x = [5];\ng(x, x);\ni64[..>] xs = [1, 2];\nappendAll(xs, xs);\nprintln(\"${xs}\");",
     ));
 }
+
+/// Item 1, through function values: a call may run any lambda with as many parameters,
+/// so one that uses a reference into one parameter after removing from another makes a
+/// call passing them the same storage an error (REFERENCES §4.3).
+#[test]
+fn calls_through_function_values_that_alias() {
+    let lam =
+        "(i64[..~]& a, i64[..~]& b) => { i64& r = a[0]; b.clear(); b +> 777; println(\"${r}\"); }";
+    rejects(
+        &main_with(
+            "",
+            &format!(
+                "func(i64[..~]&, i64[..~]& => void) g = {};\ni64[..~] x = [5];\ng(x, x);",
+                lam
+            ),
+        ),
+        "`g(...)` may run a lambda that removes from its argument 2 while it still uses what its argument 1 refers to, and in this call both are in `x`",
+    );
+    let apply =
+        "void apply(func(i64[..~]&, i64[..~]& => void) f, i64[..~]& p, i64[..~]& q) { f(p, q); }";
+    rejects(
+        &main_with(apply, &format!("i64[..~] x = [5];\napply({}, x, x);", lam)),
+        "`apply(...)` removes from `q` while it still uses a reference into `p`, and in this call both are in `x`",
+    );
+    ok(&main_with(
+        apply,
+        &format!(
+            "i64[..~] x = [5];\ni64[..~] y = [6];\napply({}, x, y);",
+            lam
+        ),
+    ));
+    rejects(
+        &format!(
+            "i64[..~] arr = [];\nvoid main() {{\n    arr +> 5;\n    func(i64[..~]& => void) g = (i64[..~]& a) => {{ i64& r = a[0]; arr.clear(); arr +> 777; println(\"${{r}}\"); }};\n    g(arr);\n}}\n"
+        ),
+        "may run a lambda that removes from the static `arr` while it still uses what its argument 1 refers to",
+    );
+}

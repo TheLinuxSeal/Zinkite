@@ -586,6 +586,9 @@ help: pass separate storage, or have `refill` bind the reference again after the
 
 - **`this` and statics count as parameters**: `b.merge(b)` is refused when `merge` uses a
   reference into its object after removing from its argument.
+- **A call through a function value** is checked against every lambda with as many
+  parameters, since any of them may be the one it runs: `g(x, x)` is refused when one of
+  them would use a reference into its first parameter after removing from its second.
 - **A function that uses the reference only before the change**, or one that only grows an
   array while reading a slice of it, as `appendAll(xs, xs)` would, takes the same array
   twice.

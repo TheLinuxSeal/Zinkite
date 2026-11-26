@@ -358,6 +358,9 @@ enum Change {
     Rearrange,
 }
 
+/// (a, b, how): a reference rooted at a used after b changes this way (`Summary::uses_after`).
+type Pairs = BTreeSet<(Root, Root, Change)>;
+
 #[derive(Clone, Default, PartialEq, Debug)]
 struct Summary {
     /// Per result: the formal roots it may have.
@@ -374,7 +377,7 @@ struct Summary {
     /// (a, b, how): a reference rooted at formal a is still used after the function
     /// removes from, moves or rearranges formal b. Fine while they are different storage;
     /// a call whose arguments make them the same is an error (REFERENCES §4.2).
-    uses_after: BTreeSet<(Root, Root, Change)>,
+    uses_after: Pairs,
     /// Rule L1 for the callers: (a, b, pool) when a link to what formal a names is stored
     /// where it must point into what b names.
     links: BTreeSet<(Root, Root, bool)>,
@@ -1298,6 +1301,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 break;
             }
             let mut changed = false;
+            let mut by_arity: HashMap<usize, Pairs> = HashMap::new();
             for (i, rs) in all_rs.iter().enumerate() {
                 let f = &self.funcs[i];
                 let mut ctx = LiveCtx::default();
@@ -1313,8 +1317,20 @@ impl<'p, 'a> Analysis<'p, 'a> {
                     true,
                     &mut scratch,
                 );
-                if ctx.pairs != self.summaries[i].uses_after {
-                    self.summaries[i].uses_after = ctx.pairs;
+                let (own, lambdas): (BTreeSet<_>, BTreeSet<_>) =
+                    ctx.pairs.into_iter().partition(|(u, t, _)| {
+                        !matches!(u.var, Var::Arg(_)) && !matches!(t.var, Var::Arg(_))
+                    });
+                self.lambda_pairs(i, &lambdas, &mut by_arity);
+                if own != self.summaries[i].uses_after {
+                    self.summaries[i].uses_after = own;
+                    changed = true;
+                }
+            }
+            for (n, pairs) in by_arity {
+                let sm = self.value_sums.entry(n).or_default();
+                if sm.uses_after != pairs {
+                    sm.uses_after = pairs;
                     changed = true;
                 }
             }
@@ -2259,9 +2275,22 @@ impl<'p, 'a> Analysis<'p, 'a> {
         ctx: &mut LiveCtx,
         errs: &mut Vec<(Span, String, String)>,
     ) {
-        let callers = |r: &Root| r.var.is_formal() || matches!(r.var, Var::Static(_));
-        for &g in &call.callees {
-            for (u, t, kind) in &self.summaries[g].uses_after {
+        // Pairs a lambda passes on count only within that lambda (`lambda_pairs`).
+        let callers = |r: &Root| r.var.is_formal() || matches!(r.var, Var::Static(_) | Var::Arg(_));
+        // The callees' pairs, and for a call through a function value, any lambda's with
+        // as many parameters.
+        let mut sources: Vec<(&Pairs, Option<FnId>)> = call
+            .callees
+            .iter()
+            .map(|&g| (&self.summaries[g].uses_after, Some(g)))
+            .collect();
+        if let Some(n) = call.value
+            && let Some(sm) = self.value_sums.get(&n)
+        {
+            sources.push((&sm.uses_after, None));
+        }
+        for (pairs, g) in sources {
+            for (u, t, kind) in pairs {
                 let us = self.map_formal(rs, call, u);
                 let ts = self.map_formal(rs, call, t);
                 let shared = us.iter().find(|x| {
@@ -2272,37 +2301,59 @@ impl<'p, 'a> Analysis<'p, 'a> {
                         })
                 });
                 if let Some(x) = shared {
-                    let callee = &self.funcs[g];
                     let verb = match kind {
                         Change::Remove => "removes from",
                         Change::Move => "can move the elements of",
                         Change::Rearrange => "can rearrange",
                     };
-                    // A reference parameter is used itself; anything else, a reference
-                    // into it.
-                    let used = match u.var {
-                        Var::Formal(i)
-                            if callee.params.get(i as usize).is_some_and(|p| {
-                                matches!(p.1, Ty::Ref(_) | Ty::Nullable(_))
-                                    && !Self::whole_ref(&p.1)
-                            }) =>
-                        {
-                            self.formal_name(callee, u)
+                    let here = self.root_name(f, &Root { part: None, ..*x });
+                    let (msg, help) = match g {
+                        Some(g) => {
+                            let callee = &self.funcs[g];
+                            // A reference parameter is used itself; anything else, a
+                            // reference into it.
+                            let used = match u.var {
+                                Var::Formal(i)
+                                    if callee.params.get(i as usize).is_some_and(|p| {
+                                        matches!(p.1, Ty::Ref(_) | Ty::Nullable(_))
+                                            && !Self::whole_ref(&p.1)
+                                    }) =>
+                                {
+                                    self.formal_name(callee, u)
+                                }
+                                _ => format!("a reference into {}", self.formal_name(callee, u)),
+                            };
+                            (
+                                format!(
+                                    "`{}(...)` {} {} while it still uses {}, and in this call both are in {}",
+                                    name,
+                                    verb,
+                                    self.formal_name(callee, t),
+                                    used,
+                                    here
+                                ),
+                                format!(
+                                    "pass separate storage, or have `{}` bind the reference again after the change (REFERENCES §4.2)",
+                                    callee.name
+                                ),
+                            )
                         }
-                        _ => format!("a reference into {}", self.formal_name(callee, u)),
+                        None => {
+                            let nth = |r: &Root| match r.var {
+                                Var::Formal(i) => format!("its argument {}", i + 1),
+                                Var::Static(id) => {
+                                    let (c, i) = self.statics[id as usize];
+                                    format!("the static `{}`", self.prog.classes[c].fields[i].name)
+                                }
+                                _ => "an argument".into(),
+                            };
+                            (
+                                format!("`{}(...)` may run a lambda that {} {} while it still uses what {} refers to, and in this call both are in {}", name, verb, nth(t), nth(u), here),
+                                "pass separate storage, or have the lambda bind the reference again after the change (REFERENCES §4.3)".into(),
+                            )
+                        }
                     };
-                    errs.push((
-                        span,
-                        format!(
-                            "`{}(...)` {} {} while it still uses {}, and in this call both are in {}",
-                            name,
-                            verb,
-                            self.formal_name(callee, t),
-                            used,
-                            self.root_name(f, &Root { part: None, ..*x }),
-                        ),
-                        format!("pass separate storage, or have `{}` bind the reference again after the change (REFERENCES §4.2)", callee.name),
-                    ));
+                    errs.push((span, msg, help));
                     return;
                 }
                 for x in us.iter().filter(|x| callers(x) && !x.whole) {
@@ -2311,6 +2362,46 @@ impl<'p, 'a> Analysis<'p, 'a> {
                     }
                 }
             }
+        }
+    }
+
+    /// The pairs in function `fid` that are about one lambda's parameters, as the formals
+    /// of a call through a function value with as many arguments (REFERENCES §4.3): two
+    /// parameters of the same lambda, or one and a static.
+    fn lambda_pairs(&self, fid: FnId, pairs: &Pairs, out: &mut HashMap<usize, Pairs>) {
+        let lambdas = self.lambdas.borrow();
+        let owner = |l: u32| {
+            lambdas
+                .iter()
+                .position(|(g, ls)| *g == fid && ls.contains(&l))
+        };
+        for (u, t, kind) in pairs {
+            let side = |r: &Root| match r.var {
+                Var::Arg(l) => owner(l).map(|k| {
+                    let pos = lambdas[k].1.iter().position(|x| *x == l).unwrap_or(0);
+                    (
+                        Some(k),
+                        Root {
+                            var: Var::Formal(pos as u32),
+                            ..*r
+                        },
+                    )
+                }),
+                Var::Static(_) => Some((None, *r)),
+                _ => None,
+            };
+            let (Some((ku, fu)), Some((kt, ft))) = (side(u), side(t)) else {
+                continue;
+            };
+            // Both sides of one lambda, or one side and a static.
+            let k = match (ku, kt) {
+                (Some(a), Some(b)) if a == b => a,
+                (Some(a), None) | (None, Some(a)) => a,
+                _ => continue,
+            };
+            out.entry(lambdas[k].1.len())
+                .or_default()
+                .insert((fu, ft, *kind));
         }
     }
 
@@ -2358,8 +2449,15 @@ impl<'p, 'a> Analysis<'p, 'a> {
             return;
         }
         // A reference into one of the caller's arrays, used after this changes another:
-        // the caller decides whether they are the same.
-        let callers = |r: &Root| r.var.is_formal() || matches!(r.var, Var::Static(_));
+        // the caller decides whether they are the same. A lambda's parameters are its
+        // caller's too, for a reference the lambda itself holds.
+        let callers = |r: &Root| r.var.is_formal() || matches!(r.var, Var::Static(_) | Var::Arg(_));
+        let held_by_lambda = |v: &Var, l: u32| match v {
+            Var::Local(i) => f.locals[*i as usize]
+                .scope
+                .starts_with(&f.locals[l as usize].scope),
+            _ => false,
+        };
         for v in live {
             let Some(set) = rs.get(v) else { continue };
             let ty = match v {
@@ -2374,6 +2472,11 @@ impl<'p, 'a> Analysis<'p, 'a> {
             }
             for u in set.iter().filter(|u| callers(u) && !u.whole) {
                 for t in target.iter().filter(|t| callers(t) && t.var != u.var) {
+                    if let Var::Arg(l) = t.var
+                        && !held_by_lambda(v, l)
+                    {
+                        continue;
+                    }
                     ctx.pairs.insert((*u, Root { whole: false, ..*t }, kind));
                 }
             }
@@ -2504,7 +2607,7 @@ type Live = BTreeSet<Var>;
 struct LiveCtx {
     /// What `Summary::uses_after` gets: references into the caller's storage used after a
     /// removal from other storage of the caller's.
-    pairs: BTreeSet<(Root, Root, Change)>,
+    pairs: Pairs,
     /// Enclosing loops: label, live at their exit, live where `continue` goes, and how
     /// many blocks with deferred statements enclosed the loop.
     loops: Vec<(Option<String>, Live, Live, usize)>,

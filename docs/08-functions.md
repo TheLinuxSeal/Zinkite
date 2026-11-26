@@ -870,7 +870,9 @@ item 8
 - **Calling a function value does what the lambdas it may be do**: a call `f(xs)` through a
   `func(i64[..~]& => void)` counts as removing from `xs` when any lambda with one parameter
   in the program removes from its parameter, so a reference into `xs` can't be used after
-  it.
+  it. And `g(x, x)` is refused when any lambda with two parameters uses a reference into
+  its first after removing from its second
+  ([Memory and references](05-memory.md#summaries-instead-of-annotations)).
 - **Not yet**: a lambda that captures, passed to a constructor or to a method called through
   an interface. The C backend says so; a lambda that captures nothing works there
   ([What isn't there yet](15-not-yet.md)).
